@@ -63,6 +63,7 @@ class Config:
     body_word: str = "단순투자"       # 본문 포함 단어
     out_dir: str = "."              # 결과 엑셀과 dart_cache가 저장될 폴더
     out_name: str = "단순투자_평균매수단가.xlsx"
+    add_prices: bool = True         # 제출일 종가 넣기 (네이버 증권 시세, API 한도와 무관)
     workers: int = 8                # 동시 다운로드 수
     max_per_min: int = 900          # 분당 최대 호출 (과다호출 차단 방지)
     daily_budget: int = 39000       # 한 번 실행에서 쓸 최대 호출 수 (한도 4만 건 여유분)
@@ -142,7 +143,7 @@ def parse_one(rp, cache, body_word):
             rows.append(dict(
                 종목명=rp.get("stock_name") or rp["corp_name"], 종목코드=rp.get("stock_code"),
                 회사=rp["corp_name"], 보고서=rp["report_nm"],
-                접수일=rp["rcept_dt"], 접수번호=rp["rcept_no"], 보유목적=purpose,
+                제출일=_ymd(rp["rcept_dt"]), 접수번호=rp["rcept_no"], 보유목적=purpose,
                 제출인=rp["flr_nm"], 보고자=cells[0],
                 변동일=f"{y}-{int(mo):02d}-{int(d):02d}",
                 방법=cells[di+1], 종류=cells[di+2],
@@ -150,18 +151,48 @@ def parse_one(rp, cache, body_word):
     return rows
 
 
+def _ymd(s):
+    s = _norm_date(s)
+    return f"{s[:4]}-{s[4:6]}-{s[6:8]}" if len(s) == 8 else s
+
+
 def summarize(detail):
     df = pd.DataFrame(detail)
     if df.empty:
         return df, df
+    if "제출일종가" not in df.columns:
+        df["제출일종가"] = None
+    # 제출일 옆에 종가가 오도록 열 순서 정리
+    cols = [c for c in df.columns if c != "제출일종가"]
+    cols.insert(cols.index("제출일") + 1, "제출일종가")
+    df = df[cols]
     buy = df[(df["증감"] > 0) & df["단가"].notna() & (df["단가"] > 0)].copy()
     buy["금액"] = buy["증감"] * buy["단가"]
-    summary = (buy.groupby(["종목명", "종목코드", "제출인", "변동일"], dropna=False)
+    summary = (buy.groupby(["종목명", "종목코드", "제출인", "제출일", "제출일종가", "변동일"], dropna=False)
                   .agg(매수수량=("증감", "sum"), 매수금액=("금액", "sum"))
                   .reset_index())
     summary["평균매수단가"] = (summary["매수금액"] / summary["매수수량"]).round(0)
-    summary = summary.sort_values(["종목명", "변동일"])
+    summary = summary.sort_values(["종목명", "변동일", "제출일"])
     return summary, df
+
+
+# ---------------- 제출일 주가 (네이버 증권 일별 시세) ----------------
+PRICE_URL = "https://fchart.stock.naver.com/sise.nhn"
+_PRICE_RE = re.compile(rb'data="(\d{8})\|[\d.]*\|[\d.]*\|[\d.]*\|([\d.]+)\|')
+
+
+def parse_prices(content):
+    """네이버 일별 시세 응답 → {YYYYMMDD: 종가}"""
+    return {d.decode(): float(c) for d, c in _PRICE_RE.findall(content or b"")}
+
+
+def price_on(prices, ymd):
+    """ymd(YYYY-MM-DD) 당일 종가. 휴장일이면 직전 거래일 종가."""
+    import bisect
+    key = _norm_date(ymd)
+    days = sorted(prices)
+    i = bisect.bisect_right(days, key)
+    return prices[days[i - 1]] if i else None
 
 
 def write_excel(path, summary, df):
@@ -444,6 +475,64 @@ class Engine:
                 step(i, fn(rp))
         return detail
 
+    # ---- 4단계: 제출일 주가 ----
+    def fetch_prices(self, code, since):
+        """종목 하나의 일별 종가. 오늘 받은 게 있으면 재사용."""
+        folder = os.path.join(self.cfg.cache, "prices")
+        path = os.path.join(folder, f"{code}.json")
+        today = dt.date.today().strftime("%Y%m%d")
+        try:
+            with open(path, encoding="utf-8") as f:
+                c = json.load(f)
+            if c.get("fetched") == today and c.get("since", "99999999") <= since:
+                return c["prices"]
+        except (OSError, ValueError):
+            pass
+        days = (dt.date.today() - dt.datetime.strptime(since, "%Y%m%d").date()).days
+        count = min(max(days + 30, 30), 8000)
+        r = self.session.get(PRICE_URL, timeout=self.cfg.timeout, headers={"User-Agent": "Mozilla/5.0"},
+                             params=dict(symbol=code, timeframe="day", count=count, requestType=0))
+        prices = parse_prices(r.content)
+        if prices:
+            os.makedirs(folder, exist_ok=True)
+            tmp = path + ".part"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(dict(fetched=today, since=since, prices=prices), f)
+            os.replace(tmp, path)
+        return prices
+
+    def add_prices(self, detail):
+        if not self.cfg.add_prices or not detail:
+            return
+        need = {}
+        for row in detail:
+            code = (row.get("종목코드") or "").strip()
+            if re.fullmatch(r"[0-9A-Z]{6}", code or ""):
+                d = _norm_date(row["제출일"])
+                need[code] = min(need.get(code, d), d)
+        self._progress(0, len(need))
+        self.log(f"[4단계] 제출일 주가 조회 ({len(need)}개 종목, 네이버 증권)")
+        got, fails = {}, 0
+        with ThreadPoolExecutor(max(1, self.cfg.workers)) as ex:
+            futs = {ex.submit(self.fetch_prices, c, s): c for c, s in need.items()}
+            for i, f in enumerate(as_completed(futs), 1):
+                if self.stop.is_set():
+                    for g in futs:
+                        g.cancel()
+                    raise Stopped
+                try:
+                    got[futs[f]] = f.result()
+                except Exception:
+                    fails += 1
+                self._progress(i)
+        if fails == len(need) and need:
+            self.log("  ! 주가를 받지 못했습니다(네이버 증권 접속 불가). 제출일종가 칸은 비워 둡니다.")
+        elif fails:
+            self.log(f"  ! {fails}개 종목은 주가를 받지 못해 비워 둡니다.")
+        for row in detail:
+            p = got.get((row.get("종목코드") or "").strip())
+            row["제출일종가"] = price_on(p, row["제출일"]) if p else None
+
     # ---- 엑셀 ----
     def save_excel(self, detail, complete):
         summary, df = summarize(detail)
@@ -475,6 +564,9 @@ class Engine:
         complete = self.download_all(reports)
         self._set_stage("3단계 분석")
         detail = self.analyze(reports)
+        if self.cfg.add_prices:
+            self._set_stage("4단계 주가")
+            self.add_prices(detail)
         self._set_stage("엑셀 저장")
         path = self.save_excel(detail, complete)
         self._set_stage("완료")
@@ -517,6 +609,9 @@ def selftest(workdir=None):
     assert len(rows) == 3 and rows[0]["종목명"] == "테스트", rows
     summary, df = summarize(rows)
     assert len(summary) == 1 and summary.iloc[0]["평균매수단가"] == 13000, summary
+    assert summary.iloc[0]["제출일"] == "2026-03-02", summary
+    px = parse_prices(b'<item data="20260227|1|2|1|9900|10" />\n<item data="20260303|1|2|1|10100|10" />')
+    assert price_on(px, "2026-03-02") == 9900 and price_on(px, "2026-03-03") == 10100, px
     out = os.path.join(d, "selftest.xlsx")
     write_excel(out, summary, df)
     assert os.path.getsize(out) > 0

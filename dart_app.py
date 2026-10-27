@@ -97,6 +97,7 @@ class App:
             "keyword": tk.StringVar(value=s.get("keyword", "상황보고")),
             "body_word": tk.StringVar(value=s.get("body_word", "단순투자")),
             "out_dir": tk.StringVar(value=s.get("out_dir", default_out_dir())),
+            "add_prices": tk.BooleanVar(value=bool(s.get("add_prices", True))),
         }
 
         # ---- 설정 ----
@@ -126,6 +127,9 @@ class App:
         ttk.Label(main, text="저장 폴더").grid(row=r, column=0, sticky="w", pady=3)
         ttk.Entry(main, textvariable=self.v["out_dir"]).grid(row=r, column=1, sticky="ew", pady=3)
         ttk.Button(main, text="찾아보기…", command=self._pick_dir).grid(row=r, column=2, padx=(6, 0))
+        r += 1
+        ttk.Checkbutton(main, text="제출일 주가(종가) 넣기 — 네이버 증권 시세, DART 호출 한도와 무관",
+                        variable=self.v["add_prices"]).grid(row=r, column=1, columnspan=2, sticky="w", pady=3)
         r += 1
 
         # ---- 버튼 ----
@@ -338,11 +342,12 @@ class App:
             last = f"마지막 응답 {idle:.0f}초 전"
         else:
             self._set_state("ok", f"{stage} · 정상 작동 중",
-                            "인터넷을 쓰지 않는 단계라 오래 걸려도 정상입니다." if stage.startswith("3단계") else "")
+                            "인터넷을 쓰지 않는 단계라 오래 걸려도 정상입니다." if stage.startswith("3단계")
+                            else "네이버 증권에서 종목별 주가를 받는 중입니다." if stage.startswith("4단계") else "")
             last = "API 사용 안 함"
         if total:
             self.bar.config(maximum=total, value=done)
-            unit = "구간" if stage.startswith("1단계") else "건"
+            unit = "구간" if stage.startswith("1단계") else "종목" if stage.startswith("4단계") else "건"
             eta = f" · 남은 시간 약 {fmt_min(s['eta'])}" if s["eta"] is not None and done < total else ""
             self.lbl_prog.config(text=f"{done:,} / {total:,}{unit} ({done / total:.0%}){eta}")
         else:
