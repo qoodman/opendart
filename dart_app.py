@@ -63,6 +63,73 @@ class KeepAwake:
             pass
 
 
+# ---------- 복사·붙여넣기 단축키 (한글 자판에서도 동작) ----------
+# tkinter는 한글 입력 상태에서 ⌘V를 'ㅍ'로 받아 붙여넣기를 안 함 → 같은 자리의 한글 키도 처리
+EDIT_KEYS = [
+    # 영문, 가상 이벤트, 한글 글자, Tk 한글 키 이름, 맥 물리 키 번호
+    ("v", "<<Paste>>", "ㅍ", "hangul_phieuf", 9),
+    ("c", "<<Copy>>", "ㅊ", "hangul_chieuch", 8),
+    ("x", "<<Cut>>", "ㅌ", "hangul_thieuth", 7),
+    ("a", "<<SelectAll>>", "ㅁ", "hangul_mieum", 0),
+]
+
+
+def _edit_key(event):
+    ks = (event.keysym or "").lower()
+    if ks in ("v", "c", "x", "a"):
+        return None                     # 영문 자판: 기본 동작 그대로
+    ch = event.char or ""
+    kc = event.keycode or 0
+    mac_vk = (kc >> 24) & 0xFF if kc > 0xFFFF else None   # Tk(맥)는 물리 키 번호를 위쪽 바이트에 담음
+    for latin, virtual, hangul, hangul_ks, vk in EDIT_KEYS:
+        if ch == hangul or ks == hangul_ks or (IS_MAC and mac_vk == vk) or (IS_WIN and kc == ord(latin.upper())):
+            w = event.widget
+            if virtual == "<<SelectAll>>" and hasattr(w, "select_range"):
+                w.select_range(0, "end")
+                w.icursor("end")
+            else:
+                w.event_generate(virtual)
+            return "break"
+    return None
+
+
+def install_edit_support(root):
+    import tkinter as tk
+    mod = "Command" if IS_MAC else "Control"
+    root.bind_all(f"<{mod}-KeyPress>", _edit_key, add="+")
+
+    # 입력칸 오른쪽 클릭 메뉴
+    menu = tk.Menu(root, tearoff=0)
+    target = {}
+
+    def do(virtual):
+        w = target.get("w")
+        if w is None:
+            return
+        w.focus_set()
+        if virtual == "<<SelectAll>>" and hasattr(w, "select_range"):
+            w.select_range(0, "end")
+        else:
+            w.event_generate(virtual)
+
+    for label, virtual in (("잘라내기", "<<Cut>>"), ("복사", "<<Copy>>"),
+                           ("붙여넣기", "<<Paste>>"), ("모두 선택", "<<SelectAll>>")):
+        menu.add_command(label=label, command=lambda v=virtual: do(v))
+
+    def popup(event):
+        target["w"] = event.widget
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    buttons = ("<Button-2>", "<Control-Button-1>") if IS_MAC else ("<Button-3>",)
+    for cls in ("TEntry", "Entry", "Text"):
+        for b in buttons:
+            root.bind_class(cls, b, popup, add="+")
+
+
 def fmt_min(sec):
     if sec is None:
         return "-"
@@ -108,9 +175,12 @@ class App:
         self.key_entry = ttk.Entry(main, textvariable=self.v["api_key"], show="•")
         self.key_entry.grid(row=r, column=1, sticky="ew", pady=3)
         self.show_key = tk.BooleanVar(value=False)
-        ttk.Checkbutton(main, text="보기", variable=self.show_key,
+        keybox = ttk.Frame(main)
+        keybox.grid(row=r, column=2, sticky="w", padx=(6, 0))
+        ttk.Button(keybox, text="붙여넣기", command=self._paste_key).pack(side="left")
+        ttk.Checkbutton(keybox, text="보기", variable=self.show_key,
                         command=lambda: self.key_entry.config(show="" if self.show_key.get() else "•")
-                        ).grid(row=r, column=2, sticky="w", padx=(6, 0))
+                        ).pack(side="left", padx=(6, 0))
         r += 1
         ttk.Label(main, text="기간").grid(row=r, column=0, sticky="w", pady=3)
         dates = ttk.Frame(main)
@@ -185,6 +255,20 @@ class App:
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.after(500, self.tick)
         root.after(1500, lambda: self.check_update(manual=False))
+
+    def _paste_key(self):
+        """복사해 둔 API 키를 그대로 넣기 (앞뒤 공백·줄바꿈 제거)"""
+        from tkinter import messagebox
+        try:
+            text = self.root.clipboard_get()
+        except Exception:
+            text = ""
+        text = "".join(text.split())
+        if not text:
+            messagebox.showinfo(APP_TITLE, "복사된 내용이 없습니다. API 키를 먼저 복사해 주세요.")
+            return
+        self.v["api_key"].set(text)
+        self.key_entry.icursor("end")
 
     # ---------- 설정 저장 ----------
     def _load_settings(self):
@@ -553,6 +637,7 @@ def main():
             style.theme_use("vista")
     except Exception:
         pass
+    install_edit_support(root)
     App(root)
     root.mainloop()
     return 0
