@@ -8,7 +8,7 @@ DART '상황보고' + 본문 '단순투자' 공시 → 날짜별 평균 매수�
 2단계: 원문 병렬 다운로드 → dart_cache/*.zip 저장 (이미 받은 건 API 호출 안 함)
 3단계: 저장된 원문을 여러 CPU로 병렬 분석 → 엑셀
 """
-import os, re, json, time, zipfile, threading, datetime as dt
+import io, os, re, json, time, zipfile, threading, datetime as dt
 from dataclasses import dataclass
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
@@ -140,7 +140,8 @@ def parse_one(rp, cache, body_word):
                 continue
             y, mo, d = DATE_RE.search(cells[di]).groups()
             rows.append(dict(
-                회사=rp["corp_name"], 종목코드=rp.get("stock_code"), 보고서=rp["report_nm"],
+                종목명=rp.get("stock_name") or rp["corp_name"], 종목코드=rp.get("stock_code"),
+                회사=rp["corp_name"], 보고서=rp["report_nm"],
                 접수일=rp["rcept_dt"], 접수번호=rp["rcept_no"], 보유목적=purpose,
                 제출인=rp["flr_nm"], 보고자=cells[0],
                 변동일=f"{y}-{int(mo):02d}-{int(d):02d}",
@@ -155,18 +156,25 @@ def summarize(detail):
         return df, df
     buy = df[(df["증감"] > 0) & df["단가"].notna() & (df["단가"] > 0)].copy()
     buy["금액"] = buy["증감"] * buy["단가"]
-    summary = (buy.groupby(["회사", "종목코드", "제출인", "변동일"], dropna=False)
+    summary = (buy.groupby(["종목명", "종목코드", "제출인", "변동일"], dropna=False)
                   .agg(매수수량=("증감", "sum"), 매수금액=("금액", "sum"))
                   .reset_index())
     summary["평균매수단가"] = (summary["매수금액"] / summary["매수수량"]).round(0)
-    summary = summary.sort_values(["회사", "변동일"])
+    summary = summary.sort_values(["종목명", "변동일"])
     return summary, df
 
 
 def write_excel(path, summary, df):
     with pd.ExcelWriter(path) as w:
-        summary.to_excel(w, sheet_name="날짜별_평균매수단가", index=False)
-        df.to_excel(w, sheet_name="세부변동내역_전체", index=False)
+        for name, d in (("날짜별_평균매수단가", summary), ("세부변동내역_전체", df)):
+            d.to_excel(w, sheet_name=name, index=False)
+            ws = w.sheets[name]
+            ws.freeze_panes = "A2"
+            # 열 너비를 내용에 맞춤 (한글은 두 칸으로 계산)
+            for i, col in enumerate(d.columns, 1):
+                vals = [str(col)] + [str(v) for v in d[col].head(500).tolist()]
+                width = max(sum(2 if ord(ch) > 127 else 1 for ch in v) for v in vals)
+                ws.column_dimensions[ws.cell(1, i).column_letter].width = min(max(width + 2, 8), 50)
 
 
 # ---------------- 엔진 ----------------
@@ -299,6 +307,48 @@ class Engine:
         os.replace(tmp, path)
         return out
 
+    # ---- 종목명: DART 전체 회사 목록(corpCode.xml, 호출 1회, 7일간 재사용) ----
+    def corp_names(self):
+        path = os.path.join(self.cfg.cache, "corp_names.json")
+        if os.path.exists(path) and time.time() - os.path.getmtime(path) < 7 * 86400:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    return json.load(f)
+            except (OSError, ValueError):
+                pass
+        try:
+            data = self.get(f"{BASE}/corpCode.xml").content
+            import xml.etree.ElementTree as ET
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                root = ET.fromstring(z.read(z.namelist()[0]))
+        except (Stopped, KeyboardInterrupt):
+            raise
+        except Exception as e:
+            self.log(f"  ! 종목명 목록을 받지 못해 공시의 회사명을 씁니다({type(e).__name__}).")
+            return {"stock": {}, "corp": {}}
+        names = {"stock": {}, "corp": {}}
+        for it in root.iter("list"):
+            nm = (it.findtext("corp_name") or "").strip()
+            sc = (it.findtext("stock_code") or "").strip()
+            cc = (it.findtext("corp_code") or "").strip()
+            if nm and sc:
+                names["stock"][sc] = nm
+            if nm and cc:
+                names["corp"][cc] = nm
+        tmp = path + ".part"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(names, f, ensure_ascii=False)
+        os.replace(tmp, path)
+        self.log(f"[1단계] 종목명 목록 {len(names['stock'])}개 종목")
+        return names
+
+    def add_stock_names(self, reports):
+        names = self.corp_names()
+        for rp in reports:
+            rp["stock_name"] = (names["stock"].get((rp.get("stock_code") or "").strip())
+                                or names["corp"].get(rp.get("corp_code") or "")
+                                or rp.get("corp_name", ""))
+
     # ---- 2단계: 원문 다운로드 ----
     def download(self, rcept_no):
         r = self.get(f"{BASE}/document.xml", rcept_no=rcept_no)
@@ -420,6 +470,7 @@ class Engine:
             raise DartError(f"저장 폴더를 만들 수 없습니다: {e}")
         self._set_stage("1단계 목록")
         reports = self.list_reports()
+        self.add_stock_names(reports)
         self._set_stage("2단계 다운로드")
         complete = self.download_all(reports)
         self._set_stage("3단계 분석")
@@ -463,7 +514,7 @@ def selftest(workdir=None):
     fn = partial(parse_one, cache=cache, body_word="단순투자")
     with ProcessPoolExecutor(2) as ex:
         rows = list(ex.map(fn, [rp]))[0]
-    assert len(rows) == 3, rows
+    assert len(rows) == 3 and rows[0]["종목명"] == "테스트", rows
     summary, df = summarize(rows)
     assert len(summary) == 1 and summary.iloc[0]["평균매수단가"] == 13000, summary
     out = os.path.join(d, "selftest.xlsx")
