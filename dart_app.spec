@@ -6,6 +6,9 @@ import sys
 NAME = "DartSimpleInvest"
 DISPLAY = "DART 단순투자"
 IS_MAC = sys.platform == "darwin"
+_v = {}
+exec(open("version.py", encoding="utf-8").read(), _v)
+VERSION = _v["__version__"]
 
 a = Analysis(
     ["dart_app.py"],
@@ -25,7 +28,8 @@ if IS_MAC:
         info_plist={
             "CFBundleDisplayName": DISPLAY,
             "CFBundleName": DISPLAY,
-            "CFBundleShortVersionString": "1.0.0",
+            "CFBundleShortVersionString": VERSION,
+            "CFBundleVersion": VERSION,
             "NSHighResolutionCapable": True,
             "NSAppSleepDisabled": True,      # 창을 가려도 작업이 느려지지 않게 (App Nap 끔)
             "LSMinimumSystemVersion": "11.0",

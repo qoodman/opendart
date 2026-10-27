@@ -8,6 +8,8 @@ DART 단순투자 평균매수단가 — 창 화면 앱 (Windows · macOS 공용
 import os, sys, json, queue, threading, time, traceback, subprocess, datetime as dt, multiprocessing
 from pathlib import Path
 
+from version import __version__
+
 APP_TITLE = "DART 단순투자 평균매수단가"
 SETTINGS = Path.home() / ".dart_simple_invest.json"
 IS_MAC = sys.platform == "darwin"
@@ -82,7 +84,7 @@ class App:
         self.last_path = None
         self.log_file = None
 
-        root.title(APP_TITLE)
+        root.title(f"{APP_TITLE}  v{__version__}")
         root.minsize(620, 560)
         main = ttk.Frame(root, padding=12)
         main.pack(fill="both", expand=True)
@@ -170,9 +172,19 @@ class App:
         self.logbox = ScrolledText(main, height=12, state="disabled", wrap="word")
         self.logbox.grid(row=r, column=0, columnspan=3, sticky="nsew")
         main.rowconfigure(r, weight=1)
+        r += 1
+
+        # ---- 버전·업데이트 ----
+        foot = ttk.Frame(main)
+        foot.grid(row=r, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        ttk.Label(foot, text=f"버전 {__version__}", foreground="#777").pack(side="left")
+        self.btn_update = ttk.Button(foot, text="업데이트 확인", command=lambda: self.check_update(manual=True))
+        self.btn_update.pack(side="right")
+        self.upd = None   # 업데이트 창
 
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.after(500, self.tick)
+        root.after(1500, lambda: self.check_update(manual=False))
 
     # ---------- 설정 저장 ----------
     def _load_settings(self):
@@ -181,10 +193,12 @@ class App:
         except Exception:
             return {}
 
-    def _save_settings(self):
+    def _save_settings(self, **extra):
         try:
-            SETTINGS.write_text(json.dumps({k: v.get() for k, v in self.v.items()}, ensure_ascii=False),
-                                encoding="utf-8")
+            data = self._load_settings()
+            data.update({k: v.get() for k, v in self.v.items()})
+            data.update(extra)
+            SETTINGS.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             if not IS_WIN:
                 os.chmod(SETTINGS, 0o600)   # API 키가 들어 있으므로 본인만 읽게
         except Exception:
@@ -296,6 +310,9 @@ class App:
                 if kind == "log":
                     self._append(data)
                     continue
+                if kind.startswith("upd_"):
+                    self._on_update_event(kind, data)
+                    continue
                 self._finish()
                 if kind == "done":
                     self.bar.config(value=self.bar["maximum"])
@@ -356,6 +373,144 @@ class App:
         self.lbl_stats.config(text=f"경과 {fmt_min(s['elapsed'])} · API 호출 {s['calls']:,}회 · {last} · "
                                    f"대기중 요청 {s['inflight']}개 · 오류 {s['errors']}회")
 
+    # ---------- 업데이트 ----------
+    def check_update(self, manual):
+        import updater
+        if manual:
+            self.btn_update.config(state="disabled", text="확인 중…")
+
+        def work():
+            try:
+                self.q.put(("upd_checked", (updater.check(__version__), manual, None)))
+            except Exception as e:
+                self.q.put(("upd_checked", (None, manual, str(e))))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_update_event(self, kind, data):
+        from tkinter import messagebox
+        import updater
+        if kind == "upd_checked":
+            info, manual, err = data
+            self.btn_update.config(state="normal", text="업데이트 확인")
+            if err:
+                if manual:
+                    messagebox.showwarning(APP_TITLE, err)
+            elif not info:
+                if manual:
+                    messagebox.showinfo(APP_TITLE, f"최신 버전입니다. (v{__version__})")
+            elif manual or info["version"] != self._load_settings().get("skip_version"):
+                self._show_update(info)
+        elif kind == "upd_progress" and self.upd:
+            got, total = data
+            self.upd["bar"].config(maximum=max(total, 1), value=got)
+            self.upd["msg"].config(text=f"받는 중… {got / 1048576:.1f}"
+                                        + (f" / {total / 1048576:.1f}MB" if total else "MB"))
+        elif kind == "upd_ready":
+            try:
+                updater.install_and_restart(data)
+            except updater.UpdateError as e:
+                self._update_failed(str(e))
+                return
+            self.awake.off()
+            self.root.destroy()
+            os._exit(0)
+        elif kind == "upd_error":
+            self._update_failed(data)
+
+    def _show_update(self, info):
+        tk, ttk = self.tk, self.ttk
+        import updater
+        if self.upd:
+            self.upd["win"].lift()
+            return
+        w = tk.Toplevel(self.root)
+        w.title("업데이트")
+        w.transient(self.root)
+        w.resizable(False, False)
+        f = ttk.Frame(w, padding=14)
+        f.pack(fill="both", expand=True)
+        ttk.Label(f, text=f"새 버전 v{info['version']}이 나왔습니다.", font=("", 13, "bold")).pack(anchor="w")
+        ttk.Label(f, text=f"지금 쓰는 버전: v{__version__}", foreground="#666").pack(anchor="w", pady=(2, 8))
+        if info["notes"]:
+            t = tk.Text(f, height=8, width=56, wrap="word")
+            t.insert("1.0", info["notes"])
+            t.config(state="disabled")
+            t.pack(fill="both", pady=(0, 8))
+        msg = ttk.Label(f, text="", foreground="#666", wraplength=420)
+        msg.pack(anchor="w")
+        bar = ttk.Progressbar(f, mode="determinate", maximum=1)
+        bar.pack(fill="x", pady=(4, 10))
+        row = ttk.Frame(f)
+        row.pack(fill="x")
+        auto = updater.can_self_update() and info.get("asset_url")
+        b_go = ttk.Button(row, text="지금 업데이트" if auto else "다운로드 페이지 열기",
+                          command=(lambda: self._do_update(info)) if auto else (lambda: self._open_page(info)))
+        b_go.pack(side="right")
+        b_later = ttk.Button(row, text="나중에", command=self._close_update)
+        b_later.pack(side="right", padx=6)
+        b_skip = ttk.Button(row, text="이 버전 건너뛰기",
+                            command=lambda: (self._save_settings(skip_version=info["version"]), self._close_update()))
+        b_skip.pack(side="left")
+        if not auto:
+            msg.config(text="이 실행 방식에서는 자동 교체가 안 되어 다운로드 페이지를 엽니다.")
+        w.protocol("WM_DELETE_WINDOW", self._close_update)
+        try:   # 본 창 가운데에 띄우기
+            w.update_idletasks()
+            x = self.root.winfo_rootx() + (self.root.winfo_width() - w.winfo_width()) // 2
+            y = self.root.winfo_rooty() + (self.root.winfo_height() - w.winfo_height()) // 3
+            w.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+            w.grab_set()
+        except Exception:
+            pass
+        self.upd = dict(win=w, msg=msg, bar=bar, btns=(b_go, b_later, b_skip), info=info)
+
+    def _close_update(self):
+        if self.upd:
+            self.upd["win"].destroy()
+            self.upd = None
+
+    def _open_page(self, info):
+        import webbrowser
+        webbrowser.open(info["page"])
+        self._close_update()
+
+    def _do_update(self, info):
+        from tkinter import messagebox
+        import updater
+        if self.worker and self.worker.is_alive():
+            messagebox.showwarning(APP_TITLE, "작업 중에는 업데이트할 수 없습니다. 끝나거나 중지한 뒤 다시 눌러 주세요.",
+                                   parent=self.upd["win"])
+            return
+        try:
+            updater.preflight()
+        except updater.UpdateError as e:
+            self._update_failed(str(e))
+            return
+        for b in self.upd["btns"]:
+            b.config(state="disabled")
+        self.btn_start.config(state="disabled")
+        self.upd["msg"].config(text="받는 중…")
+
+        def work():
+            try:
+                path = updater.download(info, progress=lambda g, t: self.q.put(("upd_progress", (g, t))))
+                self.q.put(("upd_ready", path))
+            except Exception as e:
+                self.q.put(("upd_error", str(e)))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_failed(self, err):
+        from tkinter import messagebox
+        self.btn_start.config(state="normal")
+        info = self.upd and self.upd["info"]
+        if self.upd:
+            for b in self.upd["btns"]:
+                b.config(state="normal")
+            self.upd["msg"].config(text="")
+        if info and messagebox.askyesno(APP_TITLE, f"자동 업데이트를 하지 못했습니다.\n{err}\n\n"
+                                                    "다운로드 페이지를 열어 직접 받을까요?"):
+            self._open_page(info)
+
     def on_close(self):
         from tkinter import messagebox
         if self.worker and self.worker.is_alive():
@@ -376,12 +531,19 @@ def main():
         try:
             import tkinter  # 설치본에 화면 라이브러리가 들어갔는지 확인
             tkinter.Tcl()
+            import updater  # 업데이트 기능이 들어갔는지 확인
+            assert updater.parse_ver(__version__) > (0, 0, 0)
             selftest()
         except Exception:
             traceback.print_exc()
             return 1
         print("selftest ok")
         return 0
+    try:
+        import updater
+        updater.cleanup_old()
+    except Exception:
+        pass
     import tkinter as tk
     root = tk.Tk()
     try:

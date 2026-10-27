@@ -5,12 +5,21 @@ Windows와 Mac에서 쓸 수 있는 창 화면 앱과, 기존 명령줄 버전�
 
 ## 앱 받기
 
-1. GitHub 저장소의 **Actions** 탭 → 가장 위의 초록색 ✔ **앱 빌드** 실행을 누릅니다.
-2. 아래 **Artifacts**에서 내 컴퓨터에 맞는 것을 받습니다.
-   - `DART-simple-invest-windows` : Windows
-   - `DART-simple-invest-mac-apple-silicon` : M1·M2·M3·M4 맥 ( 메뉴 → 이 Mac에 관하여에서 '칩: Apple …')
-   - `DART-simple-invest-mac-intel` : 인텔 맥 ('프로세서: Intel …')
-3. 받은 zip을 풀면 앱이 나옵니다. (`v1.0.0` 같은 태그를 올리면 **Releases**에도 자동으로 올라갑니다.)
+1. **https://github.com/qoodman/opendart/releases/latest** 에서 내 컴퓨터에 맞는 파일을 받습니다.
+   - `DART-simple-invest-windows.exe` : Windows
+   - `DART-simple-invest-mac-apple-silicon.zip` : M1·M2·M3·M4 맥 ( 메뉴 → 이 Mac에 관하여에서 '칩: Apple …')
+   - `DART-simple-invest-mac-intel.zip` : 인텔 맥 ('프로세서: Intel …')
+2. Mac은 zip을 풀면 앱이 나옵니다. Windows는 받은 .exe를 원하는 폴더(예: 바탕화면)에 두고 실행합니다.
+
+## 업데이트
+
+- 앱을 켤 때 새 버전이 있는지 확인하고, 있으면 **지금 업데이트 / 나중에 / 이 버전 건너뛰기**를 고르는 창이 뜹니다.
+- **지금 업데이트**를 누르면 새 버전을 받아 바꾸고 다시 켜집니다. 설정과 받아 둔 원문은 그대로입니다.
+- 아래쪽 **업데이트 확인** 버튼으로 언제든 직접 확인할 수 있습니다. 작업 중에는 업데이트하지 않습니다.
+- Mac은 앱이 **응용 프로그램** 폴더에 있어야 자동 업데이트가 됩니다. Windows는 Program Files처럼 권한이 필요한 폴더 말고 내 폴더에 두세요.
+- 자동으로 못 바꾸면 다운로드 페이지를 열어 줍니다.
+
+**새 버전 내는 법 (관리자용):** `version.py`의 숫자를 올리고 `CHANGELOG.md`에 바뀐 내용을 적어 기본 브랜치에 푸시하면, GitHub Actions가 앱을 만들어 Release로 올립니다. 숫자를 안 올리면 Release는 만들지 않습니다.
 
 ### Windows에서 처음 열 때
 "Windows의 PC 보호" 파란 창이 뜨면 **추가 정보 → 실행**을 누르세요. (서명하지 않은 앱이라 뜨는 안내입니다.)
