@@ -1,0 +1,15 @@
+[Unit]
+Description=DART 단순투자 매일 수집·분석
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__USER__
+WorkingDirectory=__ROOT__
+ExecStart=__PY__ __ROOT__/dart_server.py run
+Environment=PYTHONUNBUFFERED=1
+# 작은 서버에서 다른 프로그램(부동산 대시보드 등)이 느려지지 않게 낮은 우선순위로
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=6h

@@ -1,0 +1,16 @@
+[Unit]
+Description=DART 단순투자 대시보드
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=__USER__
+WorkingDirectory=__ROOT__
+# 서버 밖에서는 직접 접속할 수 없고, Tailscale(serve)을 통해서만 열립니다
+ExecStart=__PY__ __ROOT__/dart_server.py web --host 127.0.0.1 --port 8766
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

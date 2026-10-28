@@ -4,3 +4,7 @@ dist/
 dart_cache/
 *.xlsx
 실행기록.txt
+data/
+.env
+.server
+.venv/

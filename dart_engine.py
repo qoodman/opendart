@@ -33,6 +33,7 @@ except ImportError:
 
 BASE = "https://opendart.fss.or.kr/api"
 DATE_RE = re.compile(r"(\d{4})\s*[.\-년/]\s*(\d{1,2})\s*[.\-월/]\s*(\d{1,2})")
+PARSE_VERSION = 2       # 분석 결과 형식이 바뀌면 올림 (저장된 분석 결과를 다시 만듦)
 HEARTBEAT = 30          # 명령줄 버전의 ♥ 줄 간격(초)
 WARN_IDLE = 90          # 응답 없음 경고(초)
 DEAD_IDLE = 180         # 다시 시작 권장(초)
@@ -68,6 +69,8 @@ class Config:
     max_per_min: int = 900          # 분당 최대 호출 (과다호출 차단 방지)
     daily_budget: int = 39000       # 한 번 실행에서 쓸 최대 호출 수 (한도 4만 건 여유분)
     timeout: int = 30
+    parse_workers: int = 0          # 3단계 동시 분석 수 (0 = CPU 수만큼, 작은 서버는 1)
+    list_refresh: bool = False      # True면 저장된 목록을 쓰지 않고 매번 새로 조회 (서버용)
 
     @property
     def cache(self):
@@ -297,7 +300,7 @@ class Engine:
     def list_reports(self):
         c = self.cfg
         path = os.path.join(c.cache, f"reports_{c.start}_{c.end}.json")
-        if os.path.exists(path):
+        if os.path.exists(path) and not c.list_refresh:
             with open(path, encoding="utf-8") as f:
                 out = json.load(f)
             self.log(f"[1단계] 저장된 목록 사용: {len(out)}건")
@@ -445,34 +448,67 @@ class Engine:
 
     # ---- 3단계: 분석 ----
     def analyze(self, reports):
+        """원문 분석. 한 번 분석한 공시는 parsed.sqlite에 저장해 두고 다시 분석하지 않음."""
+        import sqlite3
         cache = self.cfg.cache
         avail = [r for r in reports if os.path.exists(zpath(cache, r["rcept_no"]))]
-        self._progress(0, len(avail))
-        self.log(f"[3단계] 원문 분석 시작 ({os.cpu_count()}코어, {len(avail)}건)")
-        fn = partial(parse_one, cache=cache, body_word=self.cfg.body_word)
-        detail = []
+        bw = self.cfg.body_word
+        db = sqlite3.connect(os.path.join(cache, "parsed.sqlite"))
+        db.execute("CREATE TABLE IF NOT EXISTS parsed (rcept_no TEXT, body_word TEXT, ver INTEGER,"
+                   " rows TEXT, PRIMARY KEY (rcept_no, body_word))")
+        done = {k: json.loads(v) for k, v in db.execute(
+            "SELECT rcept_no, rows FROM parsed WHERE body_word=? AND ver=?", (bw, PARSE_VERSION))}
+        todo = [r for r in avail if r["rcept_no"] not in done]
+        self._progress(len(avail) - len(todo), len(avail))
+        workers = self.cfg.parse_workers or os.cpu_count() or 1
+        self.log(f"[3단계] 원문 {len(avail)}건 중 이미 분석 {len(avail) - len(todo)}건, "
+                 f"새로 분석 {len(todo)}건 ({workers}개 동시)")
+        fn = partial(parse_one, cache=cache, body_word=bw)
+        pending = []
 
-        def step(i, rows):
-            detail.extend(rows)
-            self._progress(i)
-            if i % 1000 == 0 or i == len(avail):
-                self.log(f"[3단계] {i}/{len(avail)}  매매내역 {len(detail)}행")
+        def save(rp, rows, i):
+            done[rp["rcept_no"]] = rows
+            pending.append((rp["rcept_no"], bw, PARSE_VERSION, json.dumps(rows, ensure_ascii=False)))
+            if len(pending) >= 500:
+                flush()
+            self._progress(len(avail) - len(todo) + i)
+            if i % 1000 == 0 or i == len(todo):
+                self.log(f"[3단계] 새로 분석 {i}/{len(todo)}")
+
+        def flush():
+            if pending:
+                db.executemany("INSERT OR REPLACE INTO parsed VALUES (?,?,?,?)", pending)
+                db.commit()
+                pending.clear()
 
         try:
-            with ProcessPoolExecutor() as ex:
-                for i, rows in enumerate(ex.map(fn, avail, chunksize=50), 1):
-                    if self.stop.is_set():
-                        ex.shutdown(wait=False, cancel_futures=True)
-                        raise Stopped
-                    step(i, rows)
-        except (BrokenProcessPool, OSError, PermissionError) as e:
-            # 일부 PC에서 병렬 처리가 막히면 한 개씩 처리
-            self.log(f"  ! 병렬 분석 불가({type(e).__name__}) → 한 개씩 분석합니다.")
-            detail.clear()
-            for i, rp in enumerate(avail, 1):
+            if todo and workers > 1:
+                try:
+                    with ProcessPoolExecutor(workers) as ex:
+                        for i, (rp, rows) in enumerate(zip(todo, ex.map(fn, todo, chunksize=50)), 1):
+                            if self.stop.is_set():
+                                ex.shutdown(wait=False, cancel_futures=True)
+                                raise Stopped
+                            save(rp, rows, i)
+                except (BrokenProcessPool, OSError, PermissionError) as e:
+                    # 일부 PC에서 병렬 처리가 막히면 한 개씩 처리
+                    self.log(f"  ! 병렬 분석 불가({type(e).__name__}) → 한 개씩 분석합니다.")
+                    flush()
+            left = [r for r in todo if r["rcept_no"] not in done]
+            for i, rp in enumerate(left, len(todo) - len(left) + 1):
                 if self.stop.is_set():
                     raise Stopped
-                step(i, fn(rp))
+                save(rp, fn(rp), i)
+        finally:
+            flush()
+            db.close()
+
+        detail = []
+        for rp in avail:
+            name = rp.get("stock_name") or rp["corp_name"]
+            for row in done.get(rp["rcept_no"], []):
+                detail.append({**row, "종목명": name})   # 종목명은 최신 목록 기준으로
+        self.log(f"[3단계] 분석 완료  매매내역 {len(detail)}행")
         return detail
 
     # ---- 4단계: 제출일 주가 ----
@@ -564,10 +600,12 @@ class Engine:
         complete = self.download_all(reports)
         self._set_stage("3단계 분석")
         detail = self.analyze(reports)
+        self.reports = reports
         if self.cfg.add_prices:
             self._set_stage("4단계 주가")
             self.add_prices(detail)
         self._set_stage("엑셀 저장")
+        self.detail = detail
         path = self.save_excel(detail, complete)
         self._set_stage("완료")
         if path:
