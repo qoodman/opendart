@@ -17,18 +17,62 @@ ROOT = Path(__file__).resolve().parent
 
 
 # ---------------- 설정 ----------------
-def load_env(path=ROOT / ".env"):
-    """간단한 .env 읽기 (KEY=VALUE, # 주석). 이미 있는 환경 변수가 우선."""
+DOTENV_KEYS = set()   # .env에서 읽어 온 값들 (대시보드가 수집을 시작할 때 다시 읽게 빼 줌)
+
+
+def read_env_file(path=ROOT / ".env"):
+    out = {}
     try:
         for line in Path(path).read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
             k, v = line.split("=", 1)
-            v = v.strip().strip('"').strip("'")
-            os.environ.setdefault(k.strip(), v)
+            out[k.strip()] = v.strip().strip('"').strip("'")
     except OSError:
         pass
+    return out
+
+
+def load_env(path=ROOT / ".env"):
+    """간단한 .env 읽기 (KEY=VALUE, # 주석). 이미 있는 환경 변수가 우선."""
+    for k, v in read_env_file(path).items():
+        if k not in os.environ:
+            os.environ[k] = v
+            DOTENV_KEYS.add(k)
+
+
+def set_env_value(key, value, if_empty=False, path=ROOT / ".env"):
+    """.env 의 한 값을 바꿈 (없으면 추가). 바꿨으면 True."""
+    path = Path(path)
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    found = False
+    for i, line in enumerate(lines):
+        if line.split("=", 1)[0].strip() == key:
+            found = True
+            if if_empty and line.split("=", 1)[1].strip():
+                return False
+            lines[i] = f"{key}={value}"
+    if not found:
+        lines.append(f"{key}={value}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.chmod(path, 0o600)
+    return True
+
+
+def check_dart_key(key):
+    """DART API 키 확인. (정상 여부, 설명)"""
+    import requests
+    try:
+        r = requests.get("https://opendart.fss.or.kr/api/list.json",
+                         params=dict(crtfc_key=key, page_count=1), timeout=15)
+        st = r.json().get("status")
+    except Exception as e:
+        return None, f"DART에 접속하지 못해 확인은 못 했습니다({type(e).__name__})."
+    return {"000": (True, "정상"), "013": (True, "정상"), "010": (False, "등록되지 않은 키입니다."),
+            "011": (False, "사용할 수 없는 키입니다."), "012": (False, "접근할 수 없는 IP입니다."),
+            "020": (True, "정상 키지만 오늘 호출 한도를 넘었습니다."),
+            }.get(st, (None, f"DART 응답 상태 {st}"))
 
 
 def env(key, default=""):
@@ -335,27 +379,27 @@ def cmd_status(args):
 def cmd_set_env(args):
     """.env 의 한 값을 바꿈. 값은 입력(stdin)으로 받음 (API 키가 명령줄에 남지 않게)."""
     value = sys.stdin.read().strip()
-    path = ROOT / ".env"
-    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-    found = False
-    for i, line in enumerate(lines):
-        if line.split("=", 1)[0].strip() == args.key:
-            found = True
-            if args.if_empty and line.split("=", 1)[1].strip():
-                print(f"{args.key}는 이미 있어서 그대로 둡니다.")
-                return 0
-            lines[i] = f"{args.key}={value}"
-    if not found:
-        lines.append(f"{args.key}={value}")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    os.chmod(path, 0o600)
-    print(f"{args.key}를 저장했습니다.")
+    if set_env_value(args.key, value, if_empty=args.if_empty):
+        print(f"{args.key}를 저장했습니다.")
+    else:
+        print(f"{args.key}는 이미 있어서 그대로 둡니다.")
     return 0
 
 
 def cmd_web(args):
     from dart_web import serve
-    serve(results_db(), host=args.host, port=args.port)
+    # 수집을 시작할 때 .env를 새로 읽도록, .env에서 온 값은 빼고 넘김
+    child_env = {k: v for k, v in os.environ.items() if k not in DOTENV_KEYS}
+
+    def save_key(key):
+        ok, why = check_dart_key(key)
+        if ok is False:
+            return False, why
+        set_env_value("DART_API_KEY", key)
+        return True, why
+    serve(results_db(), host=args.host, port=args.port, child_env=child_env,
+          get_key=lambda: read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", ""),
+          save_key=save_key)
     return 0
 
 

@@ -163,8 +163,8 @@ def status_box(conn, st):
 
 
 def run_button():
-    return ('<form method="post" action="/run" style="margin-top:6px">'
-            '<button class="ghost" type="submit">지금 수집</button></form>')
+    return ('<form method="post" action="/run" style="margin-top:6px;display:flex;gap:12px;align-items:center">'
+            '<button class="ghost" type="submit">지금 수집</button><a class="muted" href="/settings">API 키 설정</a></form>')
 
 
 def summary_card(r):
@@ -183,8 +183,34 @@ SORTS = {"submit": ("제출일 최신", "제출일 DESC, 변동일 DESC"),
          "gap": ("종가가 매수단가보다 낮은 순", "(제출일종가 * 1.0 / 평균매수단가) ASC")}
 
 
-def view_home(conn, q, st):
+def key_form(msg="", bad=False, current=""):
+    note = f'<div class="{"warn" if bad else "muted"}" style="margin-top:6px">{escape(msg)}</div>' if msg else ""
+    now = f'<div class="muted">지금 키: {escape(current[:4])}…{escape(current[-4:])}</div>' if current else ""
+    return (f'<div class="card"><b>DART API 키</b>{now}'
+            '<div class="muted">opendart.fss.or.kr → 인증키 신청/관리에서 받은 40자리 키를 붙여넣으세요.</div>'
+            '<form method="post" action="/settings/key" class="filters" style="margin:8px 0 0">'
+            '<input type="text" name="key" autocomplete="off" autocapitalize="off" spellcheck="false" '
+            'placeholder="API 키" style="flex:1 1 220px"><button>저장</button></form>' + note + '</div>')
+
+
+def view_settings(get_key, q):
+    cur = get_key() if get_key else ""
+    msg, bad = "", False
+    if q.get("saved"):
+        msg = "저장했습니다. " + q.get("why", "")
+    elif q.get("err"):
+        msg, bad = q["err"], True
+    body = key_form(msg, bad, cur)
+    if q.get("saved"):
+        body += run_button()
+    body += '<p><a href="/">← 요약으로</a></p>'
+    return page("설정", body)
+
+
+def view_home(conn, q, st, need_key=False):
     box, running = status_box(conn, st)
+    if need_key and not running:
+        box = key_form("API 키가 없어서 수집할 수 없습니다. 여기에 넣으면 바로 저장됩니다.", True) + box
     if not has_table(conn, "summary"):
         return page("DART 단순투자", box, refresh=running)
     text = q.get("q", "").strip()
@@ -287,7 +313,7 @@ def latest_excel(conn):
 
 
 # ---------------- 서버 ----------------
-def make_handler(db_path, status_path, run_cmd):
+def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, save_key=None):
     class Handler(BaseHTTPRequestHandler):
         def _send(self, status, ctype, data, headers=()):
             self.send_response(status)
@@ -325,7 +351,9 @@ def make_handler(db_path, status_path, run_cmd):
                         return self._send(200, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                           data, [("Content-Disposition", f"attachment; filename*=UTF-8''{fname}")])
                 elif url.path == "/":
-                    body = view_home(conn, q, st)
+                    body = view_home(conn, q, st, need_key=bool(get_key) and not get_key())
+                elif url.path == "/settings":
+                    body = view_settings(get_key, q)
                 elif url.path == "/new":
                     body = view_new(conn, q)
                 elif url.path == "/stock":
@@ -339,14 +367,30 @@ def make_handler(db_path, status_path, run_cmd):
                                   page("없는 페이지", '<p>찾는 페이지나 종목이 없습니다.</p><p><a href="/">요약으로</a></p>'))
             self._send(200, "text/html; charset=utf-8", body)
 
+        def _redirect(self, where):
+            self.send_response(303)
+            self.send_header("Location", where)
+            self.end_headers()
+
         def do_POST(self):  # noqa: N802
-            if urlparse(self.path).path != "/run":
+            path = urlparse(self.path).path
+            if path == "/settings/key" and save_key:
+                n = min(int(self.headers.get("Content-Length") or 0), 4096)
+                form = parse_qs(self.rfile.read(n).decode("utf-8", "ignore"))
+                key = "".join((form.get("key") or [""])[0].split())
+                if not key.isalnum() or not 20 <= len(key) <= 64:
+                    return self._redirect("/settings?err=" + quote("키 형식이 맞지 않습니다. 40자리 영문·숫자 키를 그대로 붙여넣으세요."))
+                ok, why = save_key(key)
+                if not ok:
+                    return self._redirect("/settings?err=" + quote(why))
+                return self._redirect("/settings?saved=1&why=" + quote(why))
+            if path != "/run":
                 return self._send(404, "text/plain", b"not found")
             st = load_status(status_path)
             running = st.get("state") == "running" and time.time() - st.get("updated", 0) < 120
             if not running and run_cmd:
                 subprocess.Popen(run_cmd, start_new_session=True, stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL, close_fds=True)
+                                 stderr=subprocess.DEVNULL, close_fds=True, env=child_env)
                 time.sleep(1.5)   # 상태 파일이 생길 시간
             self.send_response(303)
             self.send_header("Location", "/")
@@ -358,11 +402,11 @@ def make_handler(db_path, status_path, run_cmd):
     return Handler
 
 
-def serve(db_path, host="127.0.0.1", port=8766, status_path=None):
+def serve(db_path, host="127.0.0.1", port=8766, status_path=None, child_env=None, get_key=None, save_key=None):
     db_path = Path(db_path)
     status_path = status_path or db_path.parent / "status.json"
     run_cmd = [sys.executable, str(Path(__file__).resolve().parent / "dart_server.py"), "run"]
-    server = ThreadingHTTPServer((host, port), make_handler(db_path, status_path, run_cmd))
+    server = ThreadingHTTPServer((host, port), make_handler(db_path, status_path, run_cmd, child_env, get_key, save_key))
     print(f"대시보드: http://{host}:{port}  (끄려면 Ctrl+C)", flush=True)
     try:
         server.serve_forever()
