@@ -4,7 +4,7 @@
 부동산 앱(`realestate`)을 이미 서버에 올려 두었다는 전제입니다. 서버·Tailscale·ntfy를 그대로 같이 씁니다.
 
 ```
-[오라클 서버]  realestate (대시보드 :443)   +   opendart (대시보드 :8443, 매일 20:13 수집)
+[오라클 서버]  realestate.xxxx.ts.net (부동산)   +   dart.xxxx.ts.net (DART, 매일 20:13 수집)
      │  Tailscale (나만 접속 가능한 사설망)
 [안드로이드 폰]  홈 화면 아이콘 2개  +  ntfy 알림 (같은 주제로 같이 받음)
 ```
@@ -26,7 +26,11 @@ cd ~/opendart
 - 부동산 앱의 **ntfy 주제**와 **Tailscale 주소**를 찾아 자동으로 설정합니다.
 - 매일 20:13 자동 수집과 대시보드를 등록합니다.
 
-마지막에 `폰 대시보드: https://realestate.xxxx.ts.net:8443` 같은 주소가 나옵니다.
+중간에 **DART 전용 Tailscale 로그인 주소**가 한 번 나옵니다. 브라우저에서 열고 **폰과 같은 계정**으로 로그인하세요.
+마지막에 `폰 대시보드: https://dart.xxxx.ts.net` 같은 **DART 전용 주소**가 나옵니다. 부동산 주소(`realestate.xxxx.ts.net`)와 따로입니다.
+
+> 같은 서버지만 Tailscale에는 `dart`라는 기기가 하나 더 생깁니다. Tailscale 관리 화면(login.tailscale.com → Machines)에서
+> `dart` 옆 **⋯ → Disable key expiry**를 눌러 두면 180일마다 다시 로그인할 필요가 없습니다(부동산 서버도 마찬가지).
 
 ## 2. 접속 확인 (일본 서버라면 꼭)
 
@@ -50,7 +54,7 @@ journalctl -u dart-daily -f        # 진행 상황 보기 (Ctrl+C로 보기만 �
 
 ## 4. 폰에서 열기
 
-1. 폰에서 Tailscale을 켠 상태로 1번에서 나온 주소(`…ts.net:8443`)를 크롬에서 엽니다.
+1. 폰에서 Tailscale을 켠 상태로 1번에서 나온 주소(`https://dart.xxxx.ts.net`)를 크롬에서 엽니다.
 2. 크롬 메뉴(⋮) → **홈 화면에 추가**. 부동산 아이콘 옆에 파란 막대그래프 아이콘이 생깁니다.
 3. 대시보드 위쪽 **부동산 ↗** 링크로 부동산 대시보드로 바로 갈 수 있습니다.
 
@@ -86,6 +90,6 @@ journalctl -u dart-daily -f        # 진행 상황 보기 (Ctrl+C로 보기만 �
 
 ## 문제가 생기면
 
-- **대시보드가 안 열림**: 폰의 Tailscale이 켜져 있는지, 주소 끝에 `:8443`이 있는지 확인합니다. 서버에서 `systemctl status dart-web`.
+- **대시보드가 안 열림**: 폰의 Tailscale이 켜져 있는지 확인합니다. 서버에서 `systemctl status dart-web tailscaled-dart`로 둘 다 active인지 봅니다.
 - **수집 실패 알림이 옴**: 서버에서 `journalctl -u dart-daily -n 50`으로 이유를 봅니다. "호출 한도"면 다음 날 자동으로 이어서 받습니다.
 - **부동산 앱이 느려짐**: DART 수집은 낮은 우선순위로 돌고 부동산 수집(19:17)과 시간이 겹치지 않게 20:13에 돕니다. 그래도 느리면 `.env`의 `DART_WORKERS`를 2로 줄이세요.

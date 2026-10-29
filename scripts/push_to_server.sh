@@ -50,7 +50,8 @@ if [ "$WITH_DATA" = 1 ]; then
 fi
 
 echo "▶ 서버에서 설치·재시작"
-$SSH "$SERVER" "cd ~/opendart && ./scripts/install_server.sh"
+# -t: 처음 설치 때 DART 전용 Tailscale 로그인 주소를 보여 주고 기다리기 위해
+$SSH -t "$SERVER" "cd ~/opendart && ./scripts/install_server.sh"
 
 API_KEY="$(read_setting api_key)"
 if [ -n "$API_KEY" ]; then

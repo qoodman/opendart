@@ -57,18 +57,44 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now dart-web.service dart-daily.timer
 sudo systemctl restart dart-web.service
 
+# ---- 대시보드 주소: DART 전용 Tailscale 연결로 https://dart.xxxx.ts.net ----
+TS_NAME="$(envget .env DART_TS_HOSTNAME)"; TS_NAME="${TS_NAME:-dart}"
+TSD="/run/tailscale-dart/tailscaled.sock"
+TS2() { sudo tailscale --socket="$TSD" "$@"; }
+ts_dns() { "$PY" -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null || true; }
 URL=""
-if command -v tailscale >/dev/null 2>&1 && tailscale status >/dev/null 2>&1; then
-  echo "▶ 대시보드를 Tailscale 안에서만 HTTPS로 공개 (포트 8443, 부동산 대시보드와 같은 주소)"
-  sudo tailscale serve --bg --https=8443 8766 >/dev/null
-  NAME="$(tailscale status --json | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null || true)"
-  if [ -n "$NAME" ]; then
-    URL="https://$NAME:8443"
-    [ -z "$(envget .env DASHBOARD_URL)" ] && envset DASHBOARD_URL "$URL"
-    [ -z "$(envget .env REALESTATE_URL)" ] && envset REALESTATE_URL "https://$NAME"
+if command -v tailscale >/dev/null 2>&1 && command -v tailscaled >/dev/null 2>&1; then
+  echo "▶ DART 전용 Tailscale 연결 ($TS_NAME)"
+  sed -e "s|__TAILSCALED__|$(command -v tailscaled)|g" scripts/systemd/tailscaled-dart.service \
+    | sudo tee /etc/systemd/system/tailscaled-dart.service >/dev/null
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now tailscaled-dart.service
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -S "$TSD" ] && break; sleep 1; done
+  if ! TS2 status >/dev/null 2>&1; then
+    echo "  처음 한 번 로그인이 필요합니다. 아래 주소를 브라우저에서 열고 폰과 같은 계정으로 로그인하세요."
+    TS2 up --hostname="$TS_NAME" --timeout=10m || true
+  fi
+  if TS2 status >/dev/null 2>&1; then
+    TS2 serve --bg 8766 >/dev/null
+    NAME="$(TS2 status --json | ts_dns)"
+    [ -n "$NAME" ] && URL="https://$NAME"
+    # 예전 방식(부동산 주소:8443)으로 열어 둔 것은 닫음
+    sudo tailscale serve --https=8443 off >/dev/null 2>&1 || true
+  else
+    echo "! 로그인이 끝나지 않았습니다. 다시 실행하면 이어서 진행합니다: ./scripts/install_server.sh"
+  fi
+  # 부동산 대시보드 주소 (기본 Tailscale)
+  if [ -z "$(envget .env REALESTATE_URL)" ] && tailscale status >/dev/null 2>&1; then
+    RE_NAME="$(tailscale status --json | ts_dns)"
+    [ -n "$RE_NAME" ] && envset REALESTATE_URL "https://$RE_NAME"
+  fi
+  if [ -n "$URL" ]; then
+    CUR="$(envget .env DASHBOARD_URL)"
+    # 비어 있거나 예전 :8443 주소면 새 주소로
+    if [ -z "$CUR" ] || [[ "$CUR" == *":8443"* ]]; then envset DASHBOARD_URL "$URL"; fi
   fi
 else
-  echo "! Tailscale이 없거나 로그인되어 있지 않습니다. 부동산 앱 안내(docs/SERVER.md 4번)대로 먼저 켜고 이 스크립트를 다시 실행하세요."
+  echo "! Tailscale이 설치되어 있지 않습니다. 부동산 앱 안내(docs/SERVER.md 4번)대로 먼저 설치하고 이 스크립트를 다시 실행하세요."
 fi
 
 echo

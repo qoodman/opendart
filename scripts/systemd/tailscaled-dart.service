@@ -1,0 +1,16 @@
+[Unit]
+Description=DART 대시보드 전용 Tailscale 연결 (주소: https://dart.xxxx.ts.net)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+# 서버의 기본 Tailscale(부동산 앱)과 따로 도는 두 번째 연결입니다.
+# 사용자 공간 모드라 서버의 네트워크 설정은 건드리지 않고, 대시보드로 들어오는 접속만 받습니다.
+ExecStart=__TAILSCALED__ --tun=userspace-networking --port=0 --statedir=/var/lib/tailscale-dart --socket=/run/tailscale-dart/tailscaled.sock
+RuntimeDirectory=tailscale-dart
+StateDirectory=tailscale-dart
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
