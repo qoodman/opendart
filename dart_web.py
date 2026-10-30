@@ -554,7 +554,8 @@ def view_stock(conn, code):
                  f'<td>{escape(str(r["제출일"]))}</td></tr>' for r in summ)
     t2 = "".join(f'<tr><td>{escape(str(r["변동일"]))}</td><td>{escape(str(r["보고자"]))}</td>'
                  f'<td>{escape(str(r["방법"]))}</td><td>{won(r["증감"])}</td><td>{won(r["단가"])}</td>'
-                 f'<td><a href="{dart_link(r["접수번호"])}">{escape(str(r["제출일"]))}</a></td></tr>' for r in rows)
+                 f'<td><a href="{dart_link(r["접수번호"])}">{escape(str(r["제출일"]))}</a> '
+                 f'<a class="muted" href="/parse?r={quote(str(r["접수번호"]))}">표 확인</a></td></tr>' for r in rows)
     chart = ""
     tgt, n_br = consensus(conn, code)
     last_close = None
@@ -778,6 +779,55 @@ def view_report_list(conn, q):
     body = (reports_last_line() + form + chips + ("".join(cards) or '<p class="muted">조건에 맞는 리포트가 없습니다.</p>')
             + pager(total, pg, link))
     return page("리포트", body)
+
+
+# ---------------- 공시 표 확인 ----------------
+def view_parse(conn, rno):
+    """공시 하나의 세부변동내역 표 원문과, 프로그램이 읽은 증감·단가를 나란히"""
+    if not re.fullmatch(r"\d{14}", rno or ""):
+        return None
+    import dart_engine as de
+    from bs4 import BeautifulSoup
+    cache = os.path.join(_DATA_DIR["path"] or ".", "dart_cache")
+    xml = de.read_zip(de.zpath(cache, rno))
+    if not xml:
+        return page("표 확인", f'<div class="card">이 서버에 원문이 없습니다 ({escape(rno)}).</div>')
+    note = ""
+    try:
+        pc = sqlite3.connect(os.path.join(cache, "parsed.sqlite"))
+        vers = [r[0] for r in pc.execute("SELECT ver FROM parsed WHERE rcept_no=?", (rno,))]
+        pc.close()
+        if vers and max(vers) < de.PARSE_VERSION:
+            note = ('<div class="card warn">이 공시는 아직 예전 방식으로 분석된 값이 화면에 쓰이고 있습니다. '
+                    '위쪽 <b>지금 수집 → 보고서만</b>을 한 번 돌리면 새 방식으로 다시 분석합니다.</div>')
+    except sqlite3.Error:
+        pass
+    stored = conn.execute("SELECT 변동일, 증감, 단가, 방법 FROM detail WHERE 접수번호=?", (rno,)).fetchall() \
+        if has_table(conn, "detail") else []
+    soup = BeautifulSoup(xml, de.PARSER)
+    blocks = []
+    for tb in soup.find_all("table"):
+        head = tb.get_text(" ")
+        if "변동일" not in head or "단가" not in head:
+            continue
+        trs = []
+        for tr in tb.find_all("tr"):
+            cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "te", "tu", "th"])]
+            if not any(cells):
+                continue
+            got = de.parse_row(cells)
+            res = (f'<span class="up">증감 {won(got[1])} · 단가 {won(got[2])}</span>' if got
+                   else '<span class="muted">-</span>')
+            trs.append("<tr>" + "".join(f"<td>{escape(c)}</td>" for c in cells) + f"<td>{res}</td></tr>")
+        blocks.append(f'<div class="scroll"><table>{"".join(trs)}</table></div>')
+    saved = "".join(f'<tr><td>{escape(str(r["변동일"]))}</td><td>{escape(str(r["방법"]))}</td>'
+                    f'<td>{won(r["증감"])}</td><td>{won(r["단가"])}</td></tr>' for r in stored)
+    body = (f'<div class="row"><b>공시 {escape(rno)}</b><a href="{dart_link(rno)}">DART 원문 ↗</a></div>{note}'
+            '<h2>원문 표와 읽은 값</h2><p class="muted">맨 오른쪽 칸이 프로그램이 읽은 증감·단가입니다. '
+            '틀린 줄이 있으면 이 화면을 캡처해서 보내 주세요.</p>' + ("".join(blocks) or '<p class="muted">세부변동내역 표가 없습니다.</p>')
+            + (f'<h2>화면에 쓰이는 값 (마지막 수집 기준)</h2><div class="scroll"><table><tr><th>변동일</th><th>방법</th>'
+               f'<th>증감</th><th>단가</th></tr>{saved}</table></div>' if saved else ""))
+    return page("표 확인", body)
 
 
 # ---------------- 시장 ----------------
@@ -1042,6 +1092,8 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     body = view_home(conn, q, st, need_key=bool(get_key) and not get_key(), S=S)
                 elif url.path == "/settings":
                     body = view_settings(get_key, q, S)
+                elif url.path == "/parse":
+                    body = view_parse(conn, q.get("r", ""))
                 elif url.path == "/market":
                     body = view_market(conn)
                 elif url.path == "/policy":
