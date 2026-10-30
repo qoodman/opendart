@@ -350,13 +350,7 @@ def save_results(detail, summary, run_info, prices=None, opens=None):
             conn.execute("ALTER TABLE summary_new RENAME TO summary")
             conn.execute("CREATE INDEX IF NOT EXISTS ix_detail_code ON detail(종목코드)")
             if prices is not None:
-                # 그래프용 일별 종가 (종목코드, 날짜 YYYY-MM-DD, 종가)
-                conn.execute("DROP TABLE IF EXISTS prices")
-                conn.execute("CREATE TABLE prices (code TEXT, date TEXT, close REAL, open REAL, PRIMARY KEY (code, date))")
-                opens = opens or {}
-                conn.executemany("INSERT OR REPLACE INTO prices VALUES (?, ?, ?, ?)",
-                                 [(c, f"{d[:4]}-{d[4:6]}-{d[6:]}", v, opens.get(c, {}).get(d))
-                                  for c, ps in prices.items() for d, v in ps.items()])
+                write_prices(conn, prices, opens)
             conn.execute("CREATE INDEX IF NOT EXISTS ix_detail_rno ON detail(접수번호)")
             conn.execute("INSERT INTO runs VALUES (?, ?, 1, ?)",
                          (run_info["started"], now, json.dumps(run_info, ensure_ascii=False)))
@@ -393,6 +387,69 @@ def add_report_prices(eng, prices):
                 out[code] = p
     print(f"[리포트] 리포트 종목 주가 {sum(1 for c in need if c in out)}/{len(need)}개", flush=True)
     return out
+
+
+def write_prices(conn, prices, opens=None):
+    """그래프·리포트용 일별 시가·종가를 prices 표에 덧붙임 (같은 날은 새 값으로)"""
+    conn.execute("CREATE TABLE IF NOT EXISTS prices (code TEXT, date TEXT, close REAL, open REAL, "
+                 "PRIMARY KEY (code, date))")
+    if "open" not in {r[1] for r in conn.execute("PRAGMA table_info(prices)")}:
+        conn.execute("ALTER TABLE prices ADD COLUMN open REAL")
+    opens = opens or {}
+    conn.executemany("INSERT OR REPLACE INTO prices (code, date, close, open) VALUES (?, ?, ?, ?)",
+                     [(c, f"{d[:4]}-{d[4:6]}-{d[6:]}", v, opens.get(c, {}).get(d))
+                      for c, ps in prices.items() for d, v in ps.items()])
+
+
+def reports_meta_path():
+    return data_dir() / "reports_last.json"
+
+
+def record_reports(result):
+    try:
+        reports_meta_path().write_text(json.dumps(
+            {"finished": dt.datetime.now().strftime("%Y-%m-%d %H:%M"), "result": result}, ensure_ascii=False),
+            encoding="utf-8")
+    except OSError:
+        pass
+
+
+def cmd_run_reports(args):
+    """리포트만 수집: 한경컨센서스·네이버 리포트 + 리포트 종목 주가 (DART 공시는 건드리지 않음)"""
+    from dart_engine import Engine
+    import research
+    cfg = make_config()
+    with RunLock():
+        os.makedirs(cfg.cache, exist_ok=True)
+        eng = Engine(cfg)
+        eng._set_stage("리포트 수집")
+        stop = threading.Event()
+
+        def beat():
+            while not stop.wait(5):
+                write_status(eng, "running")
+        threading.Thread(target=beat, daemon=True).start()
+        write_status(eng, "running")
+        try:
+            res = research.sync_all(results_db(), debug_dir=data_dir(), log=print,
+                                    use_hk=env("HK_CONSENSUS", "1") != "0", use_nv=env("NAVER_RESEARCH", "1") != "0")
+            record_reports(res)
+            if env("DART_PRICES", "1") != "0":
+                eng._set_stage("리포트 종목 주가")
+                prices = add_report_prices(eng, {})
+                conn = sqlite3.connect(results_db())
+                with conn:
+                    write_prices(conn, prices, eng.opens)
+                conn.close()
+        except Exception as e:
+            stop.set()
+            traceback.print_exc()
+            write_status(eng, "failed", {"error": f"리포트 수집 실패: {e}"})
+            return 1
+        stop.set()
+        write_status(eng, "done", {"stage": "리포트 수집 완료"})
+        print(f"리포트 수집 완료: {res}", flush=True)
+        return 0
 
 
 def record_failure(started, message):
@@ -452,6 +509,9 @@ def write_status(eng, state, extra=None):
 
 
 def cmd_run(args):
+    only = getattr(args, "only", None) or "all"
+    if only == "reports":
+        return cmd_run_reports(args)
     from dart_engine import Engine, DartError, Stopped, summarize, HEARTBEAT
     cfg = make_config()
     started = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -499,7 +559,8 @@ def cmd_run(args):
         summary, _ = summarize(detail)
         info = dict(started=started, start=cfg.start, end=cfg.end, calls=res["calls"],
                     complete=res["complete"], rows=len(detail), excel=res["path"] or "")
-        use_hk, use_nv = env("HK_CONSENSUS", "1") != "0", env("NAVER_RESEARCH", "1") != "0"
+        use_hk = only == "all" and env("HK_CONSENSUS", "1") != "0"
+        use_nv = only == "all" and env("NAVER_RESEARCH", "1") != "0"
         if use_hk or use_nv:
             # 증권사 리포트·목표주가. 실패해도 DART 결과는 그대로 저장
             write_status(eng, "running", {"stage": "증권사 리포트"})
@@ -507,6 +568,7 @@ def cmd_run(args):
                 import research
                 info["reports"] = research.sync_all(results_db(), debug_dir=data_dir(), log=print,
                                                     use_hk=use_hk, use_nv=use_nv)
+                record_reports(info["reports"])
             except Exception as e:
                 info["reports"] = {"error": str(e)[:300]}
                 print(f"리포트 수집 실패: {e}", flush=True)
@@ -573,7 +635,7 @@ def cmd_tick(args):
         return 0
     state.write_text(slot)   # 실패해도 10분마다 되풀이하지 않게 먼저 기록
     print(f"자동 수집 시각 {slot} → 수집 시작", flush=True)
-    return cmd_run(argparse.Namespace(quiet=False))
+    return cmd_run(argparse.Namespace(quiet=False, only="all"))
 
 
 # ---------------- 프로그램 업데이트 ----------------
@@ -791,6 +853,8 @@ def main(argv=None):
     sub = p.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="수집·분석 한 번 실행")
     r.add_argument("--quiet", action="store_true", help="알림 보내지 않기")
+    r.add_argument("--only", choices=["all", "dart", "reports"], default="all",
+                   help="all: 보고서+리포트, dart: DART 보고서만, reports: 증권사 리포트만")
     w = sub.add_parser("web", help="대시보드")
     w.add_argument("--host", default=env("DART_WEB_HOST", "127.0.0.1"))
     w.add_argument("--port", type=int, default=int(env("DART_WEB_PORT", "8766")))

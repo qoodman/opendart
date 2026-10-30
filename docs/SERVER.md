@@ -101,7 +101,7 @@ journalctl -u dart-daily -f        # 진행 상황 보기 (Ctrl+C로 보기만 �
 |---|---|
 | 결과 보기 | 폰 홈 화면의 파란 아이콘 (Tailscale 켜진 상태) |
 | 코드 업데이트 반영 | 대시보드 **설정 → 업데이트 → 지금 업데이트** (폰에서 가능). '매일 새벽 5시에 자동 업데이트'를 켜 두면 알아서 합니다. 서버에서 직접: `~/opendart/scripts/update_server.sh` |
-| 지금 바로 수집 | 대시보드의 **지금 수집**, 또는 서버에서 `sudo systemctl start --no-block dart-daily` |
+| 지금 바로 수집 | 대시보드 위쪽 **지금 수집 ▾** → 전체 / 보고서만(DART) / 리포트만. 서버에서: `.venv/bin/python dart_server.py run --only reports` |
 | 수집 기록 보기 | 서버에서 `journalctl -u dart-tick -u dart-daily -n 50` |
 | 설정 바꾸기 | 대시보드 위쪽 **설정**: 조회 기간·검색어·자동 수집 시각·평일만·주가/목표주가·알림 기준·ntfy 주제·바로가기 링크·API 키 |
 

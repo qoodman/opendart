@@ -27,6 +27,11 @@ a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 header{padding:12px 16px;border-bottom:1px solid var(--line);display:flex;gap:14px;
 align-items:center;flex-wrap:wrap}header b{font-size:17px}header nav a{margin-right:12px}
 .hrow{display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%}
+.runmenu{position:relative}.runmenu summary{list-style:none}.runmenu summary::-webkit-details-marker{display:none}
+.runmenu .menu{position:absolute;right:0;top:calc(100% + 6px);z-index:5;background:var(--card);border:1px solid var(--line);
+border-radius:12px;box-shadow:0 6px 18px rgba(0,0,0,.15);padding:6px;display:flex;flex-direction:column;min-width:210px}
+.runmenu .menu button{background:none;color:var(--fg);text-align:left;padding:10px 12px;border-radius:8px}
+.runmenu .menu button:hover{background:var(--chip)}.runmenu .menu .muted{margin-left:6px}
 .runform{margin:0}.runbtn{font:inherit;font-size:14px;padding:6px 12px;border-radius:999px;border:0;
 background:var(--accent);color:var(--bg);cursor:pointer;white-space:nowrap;margin-left:auto}
 a.runbtn.busy{background:var(--chip);color:var(--fg);text-decoration:none}
@@ -106,8 +111,12 @@ def run_widget():
                 "b.textContent='수집 중'+(s.total?' '+Math.round(s.done/s.total*100)+'%':'');}"
                 "else{clearInterval(t);b.textContent='수집 끝 · 새로고침';b.href=location.href;}}).catch(()=>{});},10000);})();"
                 "</script>")
-    return ('<form method="post" action="/run" class="runform">'
-            '<button class="runbtn" type="submit">지금 수집</button></form>')
+    return ('<details class="runmenu"><summary class="runbtn">지금 수집 ▾</summary>'
+            '<form method="post" action="/run" class="menu">'
+            '<button name="what" value="all">전체 <span class="muted">보고서 + 리포트</span></button>'
+            '<button name="what" value="dart">보고서만 <span class="muted">DART 공시</span></button>'
+            '<button name="what" value="reports">리포트만 <span class="muted">몇 분이면 끝</span></button>'
+            '</form></details>')
 
 
 def page(title, body, refresh=False, charts=False):
@@ -623,6 +632,24 @@ def summary_fold(r):
             f'<div style="white-space:pre-wrap;font-size:14px;margin-top:4px">{escape(text)}</div></details>')
 
 
+_DATA_DIR = {"path": None}
+
+
+def reports_last_line():
+    try:
+        m = json.loads((Path(_DATA_DIR["path"]) / "reports_last.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return ""
+    parts = []
+    for src, label in (("hk", "한경"), ("nv", "네이버")):
+        v = (m.get("result") or {}).get(src)
+        if v is None:
+            continue
+        parts.append(f"{label} {'실패' if isinstance(v, str) else f'새 {v}건'}")
+    return (f'<div class="muted" style="margin-bottom:8px">리포트 마지막 수집 {escape(m.get("finished", ""))}'
+            + (f' · {" · ".join(parts)}' if parts else "") + "</div>")
+
+
 def view_report_list(conn, q):
     if not has_table(conn, "reports"):
         return page("리포트", '<p class="muted">다음 수집이 끝나면 증권사 리포트가 여기에 모입니다.</p>')
@@ -709,7 +736,7 @@ def view_report_list(conn, q):
     keep = {k: v for k, v in {"q": text, "b": broker, "d": d if d != "30" else "", "src": src, "only": only,
                               "sort": sort if sort != "date" else ""}.items() if v}
     link = lambda n: "/reports?" + urlencode({**keep, "p": n})   # noqa: E731
-    body = (form + chips + ("".join(cards) or '<p class="muted">조건에 맞는 리포트가 없습니다.</p>')
+    body = (reports_last_line() + form + chips + ("".join(cards) or '<p class="muted">조건에 맞는 리포트가 없습니다.</p>')
             + pager(total, pg, link))
     return page("리포트", body)
 
@@ -731,8 +758,12 @@ def tgt_line(conn, code, close):
 
 
 def view_ideas(conn, q):
-    if not has_table(conn, "summary") or not has_table(conn, "prices"):
-        return page("아이디어", '<p class="muted">다음 수집이 끝나면 볼 수 있습니다. (주가 데이터 필요)</p>')
+    if not has_table(conn, "summary"):
+        return page("아이디어", '<div class="card">보고서(DART) 수집이 한 번 끝나야 볼 수 있습니다. '
+                              '위쪽 <b>지금 수집 → 보고서만</b>을 눌러 주세요.</div>')
+    if not has_table(conn, "prices"):
+        return page("아이디어", '<div class="card">주가 데이터가 아직 없습니다. 위쪽 <b>지금 수집 → 보고서만</b>을 '
+                              '한 번 돌리면 볼 수 있습니다. (설정 → 수집의 \'주가 받기\'가 켜져 있어야 합니다)</div>')
     cols = {r[1] for r in conn.execute("PRAGMA table_info(summary)")}
     tab = q.get("t") if q.get("t") in IDEA_TABS else "cheap"
     w = q.get("w") if q.get("w") in WINDOWS else "90"
@@ -778,7 +809,15 @@ def view_ideas(conn, q):
     note = ('<p class="muted">살펴볼 후보를 찾는 화면입니다. 공시는 매매 후 최대 5영업일 뒤에 나오고, '
             '국민연금처럼 큰 기관은 비중 조절로 사고팔 때가 많아 기본으로 뺐습니다.</p>')
     if not ideas:
-        return page("아이디어", tabs + form + note + '<p class="muted">조건에 맞는 종목이 없습니다.</p>')
+        priced = sum(1 for r in rows if r["code"] in closes)
+        why = (f'{WINDOWS[w]} 기록이 있는 종목이 없습니다. ' if not rows else
+               f'{WINDOWS[w]} 기록이 있는 종목 {len(rows)}개 중 주가가 있는 종목 {priced}개에서 '
+               + ("최근 종가가 기관 평단보다 낮은 종목이 없습니다." if tab == "cheap"
+                  else "기관 2곳 이상이 함께 산 종목이 없습니다.") if rows else "")
+        hint = "기간을 늘리거나 '국민연금 포함', 시장 전체로 바꿔 보세요." if len(rows) < 5 or tab == "cluster" else ""
+        if rows and not priced:
+            hint = "주가가 아직 없습니다. 위쪽 지금 수집 → 보고서만을 한 번 돌려 주세요."
+        return page("아이디어", tabs + form + note + f'<div class="card">{escape(why)}<div class="muted">{escape(hint)}</div></div>')
     cards = []
     for k, i in enumerate(ideas[:30], 1):
         r = i["r"]
@@ -879,13 +918,14 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                                   page("없는 페이지", '<p>찾는 페이지나 종목이 없습니다.</p><p><a href="/">보고서로</a></p>'))
             self._send(200, "text/html; charset=utf-8", body)
 
-        def _start_run(self):
-            """수집 시작 (이미 돌고 있으면 False)"""
+        def _start_run(self, what="all"):
+            """수집 시작 (이미 돌고 있으면 False). what: all / dart / reports"""
             st = load_status(status_path)
             running = st.get("state") == "running" and time.time() - st.get("updated", 0) < 120
             if running or not run_cmd:
                 return False
-            subprocess.Popen(run_cmd, start_new_session=True, stdout=subprocess.DEVNULL,
+            what = what if what in ("all", "dart", "reports") else "all"
+            subprocess.Popen(run_cmd + ["--only", what], start_new_session=True, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, close_fds=True, env=child_env)
             time.sleep(1.5)   # 상태 파일이 생길 시간
             return True
@@ -950,7 +990,9 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 return self._redirect("/settings?saved=1&why=" + quote(why))
             if path != "/run":
                 return self._send(404, "text/plain", b"not found")
-            self._start_run()
+            n = min(int(self.headers.get("Content-Length") or 0), 4096)
+            form = parse_qs(self.rfile.read(n).decode("utf-8", "ignore")) if n else {}
+            self._start_run((form.get("what") or ["all"])[0])
             back = urlparse(self.headers.get("Referer") or "/")
             where = (back.path or "/") + (f"?{back.query}" if back.query else "")
             self.send_response(303)
@@ -967,6 +1009,7 @@ def serve(db_path, host="127.0.0.1", port=8766, status_path=None, child_env=None
           settings_api=None):
     db_path = Path(db_path)
     status_path = status_path or db_path.parent / "status.json"
+    _DATA_DIR["path"] = str(db_path.parent)
     run_cmd = [sys.executable, str(Path(__file__).resolve().parent / "dart_server.py"), "run"]
     server = ThreadingHTTPServer((host, port), make_handler(db_path, status_path, run_cmd, child_env, get_key, save_key, settings_api))
     print(f"대시보드: http://{host}:{port}  (끄려면 Ctrl+C)", flush=True)
