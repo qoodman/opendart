@@ -339,11 +339,34 @@ def pager(total, pg, link):
     return '<div class="pager">' + "".join(out) + "</div>"
 
 
-def view_home(conn, q, st, need_key=False):
+def collect_box(S, q):
+    """보고서 화면 위쪽: 지금 수집 조건(보고서명 검색어·본문 포함 단어)을 보고 바로 바꾸기"""
+    if not S:
+        return ""
+    v = S["values"]
+    kw, bw = v.get("DART_KEYWORD", ""), v.get("DART_BODY_WORD", "")
+    msg = f'<div style="margin-top:6px">{escape(q["cm"])}</div>' if q.get("cm") else ""
+    return (f'<details class="card"{" open" if q.get("cm") else ""}><summary>수집 조건: 보고서명 <b>{escape(kw)}</b>'
+            f' · 본문 <b>{escape(bw)}</b> <span class="muted">바꾸기</span></summary>'
+            '<form method="post" action="/settings/collect" style="margin-top:8px">'
+            '<label class="set">보고서명 검색어</label>'
+            f'<input type="text" name="DART_KEYWORD" value="{escape(kw)}" style="width:100%">'
+            '<div class="muted">DART 주식등의대량보유상황보고서 중 제목에 이 말이 든 것만 모읍니다. 예: 상황보고, 일반, 약식</div>'
+            '<label class="set">본문 포함 단어</label>'
+            f'<input type="text" name="DART_BODY_WORD" value="{escape(bw)}" style="width:100%">'
+            '<div class="muted">공시 본문에 이 말이 든 것만 분석합니다. 예: 단순투자, 일반투자, 경영참가</div>'
+            '<div class="filters" style="margin-top:10px"><button name="run" value="0" class="ghost">저장</button>'
+            '<button name="run" value="1">저장하고 지금 수집</button></div>'
+            '<div class="muted">바꾸면 다음 수집부터 새 조건으로 모읍니다. 지금 목록은 이전 조건으로 모은 것입니다.</div>'
+            f'{msg}</form></details>')
+
+
+def view_home(conn, q, st, need_key=False, S=None):
     from urllib.parse import urlencode
     box, running = status_box(conn, st)
     if need_key and not running:
         box = key_form("API 키가 없어서 수집할 수 없습니다. 여기에 넣으면 바로 저장됩니다.", True) + box
+    box += collect_box(S, q)
     if not has_table(conn, "summary"):
         return page("DART 단순투자", box, refresh=running)
     cols = {r[1] for r in conn.execute("PRAGMA table_info(summary)")}
@@ -763,7 +786,7 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                         return self._send(200, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                           data, [("Content-Disposition", f"attachment; filename*=UTF-8''{fname}")])
                 elif url.path == "/":
-                    body = view_home(conn, q, st, need_key=bool(get_key) and not get_key())
+                    body = view_home(conn, q, st, need_key=bool(get_key) and not get_key(), S=S)
                 elif url.path == "/settings":
                     body = view_settings(get_key, q, S)
                 elif url.path == "/reports":
@@ -783,6 +806,17 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                                   page("없는 페이지", '<p>찾는 페이지나 종목이 없습니다.</p><p><a href="/">보고서로</a></p>'))
             self._send(200, "text/html; charset=utf-8", body)
 
+        def _start_run(self):
+            """수집 시작 (이미 돌고 있으면 False)"""
+            st = load_status(status_path)
+            running = st.get("state") == "running" and time.time() - st.get("updated", 0) < 120
+            if running or not run_cmd:
+                return False
+            subprocess.Popen(run_cmd, start_new_session=True, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, close_fds=True, env=child_env)
+            time.sleep(1.5)   # 상태 파일이 생길 시간
+            return True
+
         def _redirect(self, where):
             self.send_response(303)
             self.send_header("Location", where)
@@ -801,6 +835,21 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 if errors:
                     qs["errs"] = json.dumps(errors, ensure_ascii=False)
                 return self._redirect("/settings?" + urlencode(qs))
+            if path == "/settings/collect" and settings_api:
+                n = min(int(self.headers.get("Content-Length") or 0), 65536)
+                form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore"),
+                                                     keep_blank_values=True).items()}
+                changed, errors = settings()["apply"](form, only=["DART_KEYWORD", "DART_BODY_WORD"])
+                if errors:
+                    msg = "✖ " + " ".join(errors.values())
+                else:
+                    msg = "✔ 저장했습니다." if changed else "바뀐 조건이 없습니다."
+                    if form.get("run") == "1":
+                        if self._start_run():
+                            msg += " 수집을 시작했습니다."
+                        else:
+                            msg += " 이미 수집 중이라 끝난 뒤 다시 눌러 주세요."
+                return self._redirect("/?" + urlencode({"cm": msg}))
             if path in ("/settings/update-check", "/settings/update-run") and settings_api:
                 n = min(int(self.headers.get("Content-Length") or 0), 65536)
                 self.rfile.read(n)          # 함께 온 설정 칸 값은 쓰지 않음
@@ -828,12 +877,7 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 return self._redirect("/settings?saved=1&why=" + quote(why))
             if path != "/run":
                 return self._send(404, "text/plain", b"not found")
-            st = load_status(status_path)
-            running = st.get("state") == "running" and time.time() - st.get("updated", 0) < 120
-            if not running and run_cmd:
-                subprocess.Popen(run_cmd, start_new_session=True, stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL, close_fds=True, env=child_env)
-                time.sleep(1.5)   # 상태 파일이 생길 시간
+            self._start_run()
             self.send_response(303)
             self.send_header("Location", "/")
             self.end_headers()

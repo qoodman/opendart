@@ -201,10 +201,12 @@ def current_settings():
     return {key: vals.get(key, "") or default for _, key, _, _, default, _ in SETTINGS_SPEC}
 
 
-def apply_settings(form):
-    """설정 화면 저장. (바뀐 이름 목록, {키: 오류})"""
+def apply_settings(form, only=None):
+    """설정 화면 저장. only를 주면 그 키들만. (바뀐 이름 목록, {키: 오류})"""
     cur, changed, errors = current_settings(), [], {}
     for _, key, label, kind, default, _ in SETTINGS_SPEC:
+        if only is not None and key not in only:
+            continue
         if kind == "bool":
             raw = form.get(key, "0")          # 체크 해제된 칸은 전송되지 않음
         elif key not in form:
