@@ -316,7 +316,7 @@ DETAIL_COLS = ["종목명", "종목코드", "회사", "보고서", "제출일", 
                "보고자", "변동일", "방법", "종류", "증감", "단가", "시장"]
 
 
-def save_results(detail, summary, run_info, prices=None):
+def save_results(detail, summary, run_info, prices=None, opens=None):
     """대시보드가 읽을 results.sqlite 갱신. 새로 본 공시(접수번호) 목록을 돌려줌."""
     import pandas as pd
     path = results_db()
@@ -352,9 +352,11 @@ def save_results(detail, summary, run_info, prices=None):
             if prices is not None:
                 # 그래프용 일별 종가 (종목코드, 날짜 YYYY-MM-DD, 종가)
                 conn.execute("DROP TABLE IF EXISTS prices")
-                conn.execute("CREATE TABLE prices (code TEXT, date TEXT, close REAL, PRIMARY KEY (code, date))")
-                conn.executemany("INSERT OR REPLACE INTO prices VALUES (?, ?, ?)",
-                                 [(c, f"{d[:4]}-{d[4:6]}-{d[6:]}", v) for c, ps in prices.items() for d, v in ps.items()])
+                conn.execute("CREATE TABLE prices (code TEXT, date TEXT, close REAL, open REAL, PRIMARY KEY (code, date))")
+                opens = opens or {}
+                conn.executemany("INSERT OR REPLACE INTO prices VALUES (?, ?, ?, ?)",
+                                 [(c, f"{d[:4]}-{d[4:6]}-{d[6:]}", v, opens.get(c, {}).get(d))
+                                  for c, ps in prices.items() for d, v in ps.items()])
             conn.execute("CREATE INDEX IF NOT EXISTS ix_detail_rno ON detail(접수번호)")
             conn.execute("INSERT INTO runs VALUES (?, ?, 1, ?)",
                          (run_info["started"], now, json.dumps(run_info, ensure_ascii=False)))
@@ -515,7 +517,7 @@ def cmd_run(args):
                 prices = add_report_prices(eng, prices)
             except Exception as e:
                 print(f"리포트 종목 주가 실패: {e}", flush=True)
-        new, first_run = save_results(detail, summary, info, prices)
+        new, first_run = save_results(detail, summary, info, prices, getattr(eng, "opens", None))
         write_status(eng, "done", {"new": len(new), "complete": res["complete"]})
         if first_run:
             print(f"첫 실행: 기준선 저장 (공시 {len({d['접수번호'] for d in detail})}건). 다음부터 새 공시를 알립니다.")

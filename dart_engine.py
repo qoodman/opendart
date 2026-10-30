@@ -185,12 +185,22 @@ def summarize(detail):
 
 # ---------------- 제출일 주가 (네이버 증권 일별 시세) ----------------
 PRICE_URL = "https://fchart.stock.naver.com/sise.nhn"
-_PRICE_RE = re.compile(rb'data="(\d{8})\|[\d.]*\|[\d.]*\|[\d.]*\|([\d.]+)\|')
+_PRICE_RE = re.compile(rb'data="(\d{8})\|([\d.]*)\|[\d.]*\|[\d.]*\|([\d.]+)\|')
+
+
+def parse_ohlc(content):
+    """네이버 일별 시세 응답 → ({YYYYMMDD: 종가}, {YYYYMMDD: 시가})"""
+    closes, opens = {}, {}
+    for d, o, c in _PRICE_RE.findall(content or b""):
+        closes[d.decode()] = float(c)
+        if o:
+            opens[d.decode()] = float(o)
+    return closes, opens
 
 
 def parse_prices(content):
     """네이버 일별 시세 응답 → {YYYYMMDD: 종가}"""
-    return {d.decode(): float(c) for d, c in _PRICE_RE.findall(content or b"")}
+    return parse_ohlc(content)[0]
 
 
 def price_on(prices, ymd):
@@ -225,6 +235,7 @@ class Engine:
         self._lock = threading.Lock()
         self._next_ok = 0.0
         self.calls = self.errors = self.inflight = 0
+        self.opens = {}     # 종목코드 → {YYYYMMDD: 시가} (서버 대시보드용)
         self.started = self.last_ok = time.time()
         self.stage, self.done, self.total, self.stage_t0 = "준비", 0, 0, time.time()
         self.session = requests.Session()
@@ -526,7 +537,8 @@ class Engine:
         try:
             with open(path, encoding="utf-8") as f:
                 c = json.load(f)
-            if c.get("fetched") == today and c.get("since", "99999999") <= since:
+            if c.get("fetched") == today and c.get("since", "99999999") <= since and "opens" in c:
+                self.opens[code] = c["opens"]
                 return c["prices"]
         except (OSError, ValueError):
             pass
@@ -534,12 +546,13 @@ class Engine:
         count = min(max(days + 30, 30), 8000)
         r = self.session.get(PRICE_URL, timeout=self.cfg.timeout, headers={"User-Agent": "Mozilla/5.0"},
                              params=dict(symbol=code, timeframe="day", count=count, requestType=0))
-        prices = parse_prices(r.content)
+        prices, opens = parse_ohlc(r.content)
+        self.opens[code] = opens
         if prices:
             os.makedirs(folder, exist_ok=True)
             tmp = path + ".part"
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(dict(fetched=today, since=since, prices=prices), f)
+                json.dump(dict(fetched=today, since=since, prices=prices, opens=opens), f)
             os.replace(tmp, path)
         return prices
 

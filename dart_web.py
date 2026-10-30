@@ -529,16 +529,24 @@ def op_ko(op):
     return OPINION_KO.get(re.sub(r"[\s_-]", "", str(op)).lower(), str(op))
 
 
-def close_on(conn, code, date):
-    """그 날(휴장이면 직전 거래일) 종가"""
+def day_prices(conn, code, date):
+    """그 날(휴장이면 직전 거래일)의 (시가, 종가). 없으면 (None, None)"""
     if not code or not date:
-        return None
+        return None, None
     try:
-        r = conn.execute("SELECT close FROM prices WHERE code=? AND date<=? ORDER BY date DESC LIMIT 1",
+        r = conn.execute("SELECT open, close FROM prices WHERE code=? AND date<=? ORDER BY date DESC LIMIT 1",
                          (code, date)).fetchone()
-    except sqlite3.OperationalError:
-        return None
-    return r[0] if r else None
+    except sqlite3.OperationalError:          # 시가 칸이 없는 예전 표
+        try:
+            r = conn.execute("SELECT NULL, close FROM prices WHERE code=? AND date<=? ORDER BY date DESC LIMIT 1",
+                             (code, date)).fetchone()
+        except sqlite3.OperationalError:
+            return None, None
+    return (r[0], r[1]) if r else (None, None)
+
+
+def close_on(conn, code, date):
+    return day_prices(conn, code, date)[1]
 
 
 def upside(target, close):
@@ -571,10 +579,11 @@ def view_reports(conn, code, tgt, n_br, close):
     trs = "".join(
         f'<tr><td>{escape(r["date"])}</td><td>{escape(r["broker"] or "")}</td>'
         f'<td>{won(r["target"]) if r["target"] else "-"}</td>'
+        f'<td>{won(day_prices(conn, code, r["date"])[0])}</td>'
         f'<td>{won(close_on(conn, code, r["date"]))}</td><td>{escape(op_ko(r["opinion"]))}</td>'
         f'<td>{title_link(r)} <span class="muted">{SRC_CHIP.get(r["source"], "")}</span></td></tr>' for r in rows)
     return (f'<h2>증권사 목표주가</h2>{head}'
-            f'<div class="scroll"><table><tr><th>날짜</th><th>증권사</th><th>목표가</th><th>당일 종가</th><th>의견</th><th>제목</th></tr>'
+            f'<div class="scroll"><table><tr><th>날짜</th><th>증권사</th><th>목표가</th><th>당일 시가</th><th>당일 종가</th><th>의견</th><th>제목</th></tr>'
             f'{trs}</table></div><p><a href="/reports?q={quote(code)}&d=180">이 종목 리포트 모두 보기 →</a></p>')
 
 
@@ -655,13 +664,14 @@ def view_report_list(conn, q):
         in_dart = r["code"] in dart_codes
         stock_href = f'/stock?code={quote(r["code"])}' if in_dart else naver_link(r["code"])
         close = closes.get(r["code"], (None, None))[1]
-        day_close = close_on(conn, r["code"], r["date"])
+        day_open, day_close = day_prices(conn, r["code"], r["date"])
         op = op_ko(r["opinion"])
         tgt = (f'목표가 <b>{won(r["target"])}원</b>' if r["target"] else '<span class="muted">목표가 없음</span>') \
             + (f" · {escape(op)}" if op else "")
         prices = []
         if day_close:
-            prices.append(f'리포트 날 종가 {won(day_close)}원 {upside(r["target"], day_close) if r["target"] else ""}')
+            prices.append((f'리포트 날 시가 {won(day_open)}원 · ' if day_open else "리포트 날 ")
+                          + f'종가 {won(day_close)}원 {upside(r["target"], day_close) if r["target"] else ""}')
         if close and close != day_close:
             prices.append(f'최근 종가 {won(close)}원 {upside(r["target"], close) if r["target"] else ""}')
         price_line = f'<div class="muted" style="color:var(--fg)">{" · ".join(prices)}</div>' if prices else ""
