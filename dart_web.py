@@ -41,7 +41,11 @@ border-radius:999px;background:var(--chip);font-size:12px;margin-right:4px}
 .bar span{display:block;height:100%;background:var(--accent)}
 table{border-collapse:collapse;width:100%;font-size:13px}td,th{border-bottom:1px solid var(--line);
 padding:5px 6px;text-align:left;white-space:nowrap}th{color:var(--muted);font-weight:500}
-.scroll{overflow-x:auto}.pager{display:flex;gap:12px;margin-top:10px}
+.scroll{overflow-x:auto}.pager{display:flex;gap:6px;margin-top:12px;flex-wrap:wrap;align-items:center}
+.pager a,.pager b{min-width:34px;padding:5px 8px;text-align:center;border:1px solid var(--line);
+border-radius:8px;background:var(--card)}.pager b.cur{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+.num{display:inline-block;min-width:22px;margin-right:6px;color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums}
+details summary{cursor:pointer;color:var(--accent);margin-bottom:4px}
 h2{font-size:16px;margin:18px 0 8px}
 """
 
@@ -167,12 +171,25 @@ def run_button():
             '<button class="ghost" type="submit">지금 수집</button><a class="muted" href="/settings">API 키 설정</a></form>')
 
 
-def summary_card(r):
-    return (f'<div class="card"><div class="row"><div><a class="big" href="/stock?code={quote(str(r["종목코드"] or ""))}">'
-            f'{escape(str(r["종목명"]))}</a> <span class="muted">{escape(str(r["종목코드"] or ""))}</span></div>'
+def eok(v):
+    """원 → '12.3억' / '4,500만'"""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return "-"
+    return f"{v / 1e8:,.1f}억" if v >= 1e8 else f"{v / 1e4:,.0f}만"
+
+
+def summary_card(r, num=None):
+    keys = r.keys()
+    market = r["시장"] if "시장" in keys and r["시장"] else ""
+    n = f'<span class="num">{num}</span>' if num else ""
+    mk = f' <span class="chip">{escape(market)}</span>' if market else ""
+    return (f'<div class="card"><div class="row"><div>{n}<a class="big" href="/stock?code={quote(str(r["종목코드"] or ""))}">'
+            f'{escape(str(r["종목명"]))}</a> <span class="muted">{escape(str(r["종목코드"] or ""))}</span>{mk}</div>'
             f'<div class="muted">제출 {escape(str(r["제출일"]))}</div></div>'
             f'<div>{escape(str(r["제출인"]))} · 변동일 {escape(str(r["변동일"]))}</div>'
-            f'<div>매수 {won(r["매수수량"])}주 · 평균 <b>{won(r["평균매수단가"])}원</b>'
+            f'<div>매수 {won(r["매수수량"])}주 ({eok(r["매수금액"])}) · 평균 <b>{won(r["평균매수단가"])}원</b>'
             f' · 제출일 종가 {won(r["제출일종가"])}원 {gap(r["제출일종가"], r["평균매수단가"])}</div></div>')
 
 
@@ -207,37 +224,101 @@ def view_settings(get_key, q):
     return page("설정", body)
 
 
+PERIODS = {"": "전체 기간", "7": "최근 1주", "30": "최근 1달", "90": "최근 3달", "180": "최근 6달"}
+MARKET_OPTS = {"": "시장 전체", "코스피": "코스피", "코스닥": "코스닥", "코넥스": "코넥스"}
+AMOUNTS = {"": "매수금액 전체", "100000000": "1억 이상", "1000000000": "10억 이상",
+           "10000000000": "100억 이상", "100000000000": "1,000억 이상"}
+PRICE_VS = {"": "종가 전체", "below": "종가 < 평균매수단가", "above": "종가 > 평균매수단가"}
+FILTERS = {"d": PERIODS, "m": MARKET_OPTS, "amt": AMOUNTS, "pv": PRICE_VS}
+
+
+def select(name, opts, cur):
+    return (f'<select name="{name}">' + "".join(
+        f'<option value="{escape(k)}"{" selected" if k == cur else ""}>{escape(v)}</option>'
+        for k, v in opts.items()) + "</select>")
+
+
+def pager(total, pg, link):
+    """1 2 3 … 처럼 번호로 된 페이지 이동"""
+    pages = max((total + PAGE_SIZE - 1) // PAGE_SIZE, 1)
+    if pages == 1:
+        return ""
+    show = sorted({1, pages, *range(max(pg - 2, 1), min(pg + 2, pages) + 1)})
+    out, prev = [], 0
+    if pg > 1:
+        out.append(f'<a href="{link(pg - 1)}">‹</a>')
+    for n in show:
+        if n - prev > 1:
+            out.append('<span class="muted">…</span>')
+        out.append(f'<b class="cur">{n}</b>' if n == pg else f'<a href="{link(n)}">{n}</a>')
+        prev = n
+    if pg < pages:
+        out.append(f'<a href="{link(pg + 1)}">›</a>')
+    return '<div class="pager">' + "".join(out) + "</div>"
+
+
 def view_home(conn, q, st, need_key=False):
+    from urllib.parse import urlencode
     box, running = status_box(conn, st)
     if need_key and not running:
         box = key_form("API 키가 없어서 수집할 수 없습니다. 여기에 넣으면 바로 저장됩니다.", True) + box
     if not has_table(conn, "summary"):
         return page("DART 단순투자", box, refresh=running)
-    text = q.get("q", "").strip()
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(summary)")}
+    text, who = q.get("q", "").strip(), q.get("who", "").strip()
+    f = {k: (q.get(k, "") if q.get(k, "") in opts else "") for k, opts in FILTERS.items()}
     sort = q.get("sort", "submit") if q.get("sort") in SORTS else "submit"
-    pg = max(int(q.get("p", "1") or 1) if str(q.get("p", "1")).isdigit() else 1, 1)
-    where, args = "", []
+    pg = int(q["p"]) if str(q.get("p", "")).isdigit() and int(q["p"]) > 0 else 1
+
+    conds, args = [], []
     if text:
-        where = "WHERE 종목명 LIKE ? OR 종목코드 LIKE ? OR 제출인 LIKE ?"
-        args = [f"%{text}%"] * 3
-    order = SORTS[sort][1]
-    if sort == "gap":
-        where = (where + " AND " if where else "WHERE ") + "제출일종가 IS NOT NULL AND 평균매수단가 > 0"
+        conds.append("(종목명 LIKE ? OR 종목코드 LIKE ?)")
+        args += [f"%{text}%"] * 2
+    if who:
+        conds.append("제출인 LIKE ?")
+        args.append(f"%{who}%")
+    if f["d"]:
+        conds.append("제출일 >= ?")
+        args.append((dt.date.today() - dt.timedelta(days=int(f["d"]))).isoformat())
+    if f["m"] and "시장" in cols:
+        conds.append("시장 = ?")
+        args.append(f["m"])
+    if f["amt"]:
+        conds.append("매수금액 >= ?")
+        args.append(float(f["amt"]))
+    if f["pv"] or sort == "gap":
+        conds.append("제출일종가 IS NOT NULL AND 평균매수단가 > 0")
+    if f["pv"] == "below":
+        conds.append("제출일종가 < 평균매수단가")
+    elif f["pv"] == "above":
+        conds.append("제출일종가 > 평균매수단가")
+    where = ("WHERE " + " AND ".join(conds)) if conds else ""
     total = conn.execute(f"SELECT COUNT(*) FROM summary {where}", args).fetchone()[0]
-    rows = conn.execute(f"SELECT * FROM summary {where} ORDER BY {order} LIMIT ? OFFSET ?",
+    pages = max((total + PAGE_SIZE - 1) // PAGE_SIZE, 1)
+    pg = min(pg, pages)
+    rows = conn.execute(f"SELECT * FROM summary {where} ORDER BY {SORTS[sort][1]} LIMIT ? OFFSET ?",
                         args + [PAGE_SIZE, (pg - 1) * PAGE_SIZE]).fetchall()
-    opts = "".join(f'<option value="{k}"{" selected" if k == sort else ""}>{v[0]}</option>' for k, v in SORTS.items())
-    form = (f'<form class="filters" method="get"><input type="search" name="q" value="{escape(text)}" '
-            f'placeholder="종목명·종목코드·제출인"><select name="sort">{opts}</select><button>보기</button></form>')
-    cards = "".join(summary_card(r) for r in rows) or '<p class="muted">조건에 맞는 매수 내역이 없습니다.</p>'
-    base = f"/?q={quote(text)}&sort={sort}"
-    nav = '<div class="pager">'
-    if pg > 1:
-        nav += f'<a href="{base}&p={pg - 1}">← 이전</a>'
-    if pg * PAGE_SIZE < total:
-        nav += f'<a href="{base}&p={pg + 1}">다음 →</a>'
-    nav += f'<span class="muted">{total:,}건 중 {(pg - 1) * PAGE_SIZE + 1 if total else 0:,}–{min(pg * PAGE_SIZE, total):,}</span></div>'
-    return page("DART 단순투자", box + form + cards + nav, refresh=running)
+
+    active = [FILTERS[k][v] for k, v in f.items() if v] + ([f"제출인: {who}"] if who else [])
+    form = (f'<form method="get"><div class="filters"><input type="search" name="q" value="{escape(text)}" '
+            f'placeholder="종목명·종목코드"><button>보기</button></div>'
+            f'<details{" open" if active else ""}><summary>필터·정렬{f" ({len(active)})" if active else ""}</summary>'
+            f'<div class="filters" style="margin-top:8px">{select("d", PERIODS, f["d"])}'
+            + (select("m", MARKET_OPTS, f["m"]) if "시장" in cols else "")
+            + f'{select("amt", AMOUNTS, f["amt"])}{select("pv", PRICE_VS, f["pv"])}'
+            f'<input type="search" name="who" value="{escape(who)}" placeholder="제출인 (예: 국민연금)">'
+            f'{select("sort", {k: v[0] for k, v in SORTS.items()}, sort)}<button>적용</button></div></details></form>')
+    chips = ""
+    if active or text:
+        chips = ('<div style="margin:4px 0 10px">' + "".join(f'<span class="chip">{escape(a)}</span>' for a in active)
+                 + f'<span class="muted">{total:,}건</span> · <a href="/">초기화</a></div>')
+    start = (pg - 1) * PAGE_SIZE
+    cards = "".join(summary_card(r, start + i + 1) for i, r in enumerate(rows)) \
+        or '<p class="muted">조건에 맞는 매수 내역이 없습니다.</p>'
+    keep = {k: v for k, v in {"q": text, "who": who, "sort": sort if sort != "submit" else "", **f}.items() if v}
+    link = lambda n: "/?" + urlencode({**keep, "p": n})   # noqa: E731
+    info = f'<div class="muted" style="margin-top:6px">{total:,}건 중 {start + 1 if total else 0:,}–{min(start + PAGE_SIZE, total):,}</div>'
+    return page("DART 단순투자", box + form + chips + cards + pager(total, pg, link) + info, refresh=running)
 
 
 def view_new(conn, q):

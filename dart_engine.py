@@ -154,6 +154,9 @@ def parse_one(rp, cache, body_word):
     return rows
 
 
+MARKETS = {"Y": "코스피", "K": "코스닥", "N": "코넥스", "E": "기타"}   # DART corp_cls
+
+
 def _ymd(s):
     s = _norm_date(s)
     return f"{s[:4]}-{s[4:6]}-{s[6:8]}" if len(s) == 8 else s
@@ -171,7 +174,8 @@ def summarize(detail):
     df = df[cols]
     buy = df[(df["증감"] > 0) & df["단가"].notna() & (df["단가"] > 0)].copy()
     buy["금액"] = buy["증감"] * buy["단가"]
-    summary = (buy.groupby(["종목명", "종목코드", "제출인", "제출일", "제출일종가", "변동일"], dropna=False)
+    keys = ["종목명", "종목코드"] + (["시장"] if "시장" in buy.columns else []) + ["제출인", "제출일", "제출일종가", "변동일"]
+    summary = (buy.groupby(keys, dropna=False)
                   .agg(매수수량=("증감", "sum"), 매수금액=("금액", "sum"))
                   .reset_index())
     summary["평균매수단가"] = (summary["매수금액"] / summary["매수수량"]).round(0)
@@ -506,8 +510,10 @@ class Engine:
         detail = []
         for rp in avail:
             name = rp.get("stock_name") or rp["corp_name"]
+            market = MARKETS.get(rp.get("corp_cls", ""), "")
             for row in done.get(rp["rcept_no"], []):
-                detail.append({**row, "종목명": name})   # 종목명은 최신 목록 기준으로
+                # 종목명은 최신 목록 기준, 시장 구분은 공시 목록에서
+                detail.append({**row, "종목명": name, "시장": market})
         self.log(f"[3단계] 분석 완료  매매내역 {len(detail)}행")
         return detail
 
