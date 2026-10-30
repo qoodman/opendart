@@ -33,7 +33,7 @@ except ImportError:
 
 BASE = "https://opendart.fss.or.kr/api"
 DATE_RE = re.compile(r"(\d{4})\s*[.\-년/]\s*(\d{1,2})\s*[.\-월/]\s*(\d{1,2})")
-PARSE_VERSION = 3       # 분석 결과 형식이 바뀌면 올림 (저장된 분석 결과를 다시 만듦)
+PARSE_VERSION = 4       # 분석 결과 형식이 바뀌면 올림 (저장된 분석 결과를 다시 만듦)
 HEARTBEAT = 30          # 명령줄 버전의 ♥ 줄 간격(초)
 WARN_IDLE = 90          # 응답 없음 경고(초)
 DEAD_IDLE = 180         # 다시 시작 권장(초)
@@ -194,6 +194,8 @@ def parse_one(rp, cache, body_word):
             got = parse_row(cells)
             if got:
                 di, qty, price, method, kind = got
+                if price is not None and qty and abs(price) == abs(qty):
+                    price = None      # 단가 칸이 아니라 수량을 한 번 더 읽은 것 → 비움 (틀린 평균단가 방지)
             else:
                 # 예전 방식 (날짜 칸 기준 고정 위치). 단가가 수량과 같으면 잘못 읽은 것이라 비움
                 di = next((i for i, c in enumerate(cells) if DATE_RE.search(c)), None)
