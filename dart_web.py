@@ -241,6 +241,31 @@ def setting_field(key, label, kind, help_, val, choices, err):
     return f'<label class="set">{escape(label)}</label>{ctl}{h}{e}'
 
 
+def update_box(u):
+    """설정 → 업데이트 카드 안쪽: 지금 버전, 새 버전 여부, 버튼, 최근 기록"""
+    c = u.get("check") or {}
+    if u.get("running"):
+        state = '<div class="warn">업데이트하는 중입니다… 1~3분 뒤 새로고침하세요.</div>'
+    elif c.get("error"):
+        state = f'<div class="warn">{escape(c["error"])}</div>'
+    elif c.get("behind"):
+        items = "".join(f"<li>{escape(x)}</li>" for x in c.get("items", []))
+        state = (f'<div><b>새 버전이 있습니다</b> ({c["behind"]}개 변경, {escape(c.get("checked", ""))} 확인)</div>'
+                 f'<ul class="muted" style="margin:4px 0 0;padding-left:18px">{items}</ul>')
+    elif "behind" in c:
+        state = f'<div class="muted">최신 버전입니다 ({escape(c.get("checked", ""))} 확인)</div>'
+    else:
+        state = '<div class="muted">아직 확인하지 않았습니다.</div>'
+    log = ""
+    if u.get("log"):
+        log = ('<details style="margin-top:6px"><summary>최근 업데이트 기록</summary>'
+               f'<pre style="white-space:pre-wrap;font-size:12px;margin:6px 0 0">{escape(chr(10).join(u["log"]))}</pre></details>')
+    return (f'<div class="muted">지금 버전: {escape(u.get("current", ""))}</div>{state}'
+            '<div class="filters" style="margin-top:8px">'
+            '<button class="ghost" formaction="/settings/update-check" formmethod="post">새 버전 확인</button>'
+            '<button formaction="/settings/update-run" formmethod="post">지금 업데이트</button></div>' + log)
+
+
 def view_settings(get_key, q, S=None):
     cur = get_key() if get_key else ""
     msg, bad = "", False
@@ -270,6 +295,8 @@ def view_settings(get_key, q, S=None):
             extra = ""
             if g == "수집" and nxt:
                 extra = f'<div class="muted">다음 자동 수집: {nxt:%m-%d %H:%M}</div>'
+            if g == "업데이트" and "update_info" in S:
+                extra = update_box(S["update_info"]())
             form += f'<div class="card"><b>{g}</b>{extra}{"".join(fields)}</div>'
         body = (note + body + '<form method="post" action="/settings/save">' + form
                 + '<button style="width:100%;padding:11px">설정 저장</button></form>'
@@ -767,6 +794,18 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 if errors:
                     qs["errs"] = json.dumps(errors, ensure_ascii=False)
                 return self._redirect("/settings?" + urlencode(qs))
+            if path in ("/settings/update-check", "/settings/update-run") and settings_api:
+                n = min(int(self.headers.get("Content-Length") or 0), 65536)
+                self.rfile.read(n)          # 함께 온 설정 칸 값은 쓰지 않음
+                S = settings()
+                if path.endswith("check"):
+                    res = S["check_update"]()
+                    msg = (f"✖ {res['error']}" if res.get("error") else
+                           f"새 버전이 있습니다 ({res['behind']}개 변경)" if res.get("behind") else "✔ 최신 버전입니다")
+                else:
+                    ok, why = S["start_update"]()
+                    msg = ("✔ " if ok else "✖ ") + why
+                return self._redirect("/settings?" + urlencode({"nt": msg}))
             if path == "/settings/notify-test" and settings_api:
                 ok, why = settings()["test_notify"]()
                 return self._redirect("/settings?" + urlencode({"nt": ("✔ " if ok else "✖ ") + why}))

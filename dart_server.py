@@ -125,6 +125,8 @@ SETTINGS_SPEC = [
     ("알림", "NTFY_TOPIC", "ntfy 주제", "text?", "", "폰 ntfy 앱에서 구독한 주제 이름. 부동산 앱과 같게 두면 한 곳에서 받습니다."),
     ("알림", "DART_NOTIFY_MIN_AMOUNT", "알림 기준", "choice", "0", "이보다 작은 매수만 있는 공시는 알리지 않습니다."),
     ("알림", "DART_NOTIFY_EX_NPS", "국민연금 공시는 알리지 않기", "bool", "0", ""),
+    ("업데이트", "DART_AUTO_UPDATE", "매일 새벽 5시에 자동 업데이트", "bool", "0",
+     "GitHub에 새 버전이 있으면 받아서 설치합니다. 수집 중이면 다음 날로 미룹니다."),
     ("화면", "DASHBOARD_URL", "이 대시보드 주소", "url", "", "알림을 눌렀을 때 열 주소. 예: https://dart.xxxx.ts.net"),
     ("화면", "REALESTATE_URL", "부동산 대시보드 주소", "url", "", "위쪽 메뉴의 '부동산 ↗' 링크"),
     ("화면", "NAV_LINKS", "다른 대시보드 바로가기", "links", "", "한 줄에 하나씩 '이름 | 주소'. 위쪽 메뉴에 붙습니다."),
@@ -511,6 +513,10 @@ def last_run_started():
 def cmd_tick(args):
     """10분마다 타이머가 부름: 설정한 자동 수집 시각이 지났고 아직 안 돌았으면 수집."""
     now = dt.datetime.now()
+    try:
+        auto_update_tick(now)
+    except Exception as e:
+        print(f"자동 업데이트 확인 실패: {e}", flush=True)
     if env("DART_WEEKDAYS_ONLY", "0") == "1" and now.weekday() >= 5:
         return 0
     due = [dt.datetime.combine(now.date(), t) for t in run_times() if dt.datetime.combine(now.date(), t) <= now]
@@ -527,6 +533,91 @@ def cmd_tick(args):
     state.write_text(slot)   # 실패해도 10분마다 되풀이하지 않게 먼저 기록
     print(f"자동 수집 시각 {slot} → 수집 시작", flush=True)
     return cmd_run(argparse.Namespace(quiet=False))
+
+
+# ---------------- 프로그램 업데이트 ----------------
+def _git(*args, timeout=60):
+    import subprocess
+    r = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True, timeout=timeout)
+    return r.returncode, (r.stdout + r.stderr).strip()
+
+
+def update_log():
+    return data_dir() / "update.log"
+
+
+def update_running():
+    import subprocess
+    r = subprocess.run(["systemctl", "is-active", "--quiet", "dart-update"], capture_output=True)
+    return r.returncode == 0
+
+
+def update_info():
+    """설정 화면용: 지금 버전, 마지막 확인 결과, 마지막 업데이트 기록"""
+    _, cur = _git("log", "-1", "--format=%h · %cd", "--date=format:%Y-%m-%d %H:%M")
+    try:
+        check = json.loads((data_dir() / "update_check.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        check = {}
+    try:
+        log = update_log().read_text(encoding="utf-8").splitlines()[-12:]
+    except OSError:
+        log = []
+    return dict(current=cur, check=check, log=log, running=update_running())
+
+
+def check_update():
+    """GitHub에 새 버전이 있는지 확인 → {'behind': n, 'items': [제목…]} 또는 {'error': …}"""
+    code, out = _git("fetch", "-q", timeout=60)
+    if code != 0:
+        res = {"error": f"GitHub 확인 실패: {out[-200:]}"}
+    else:
+        _, n = _git("rev-list", "--count", "HEAD..@{u}")
+        _, items = _git("log", "--format=%s", "HEAD..@{u}")
+        res = {"behind": int(n or 0), "items": items.splitlines()[:10]}
+    res["checked"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    (data_dir() / "update_check.json").write_text(json.dumps(res, ensure_ascii=False), encoding="utf-8")
+    return res
+
+
+def start_update():
+    """업데이트를 별도 작업으로 시작 (대시보드가 재시작돼도 끊기지 않게). (성공 여부, 문구)"""
+    import subprocess, pwd
+    if is_running():
+        return False, "수집 중에는 업데이트하지 않습니다. 끝난 뒤 다시 눌러 주세요."
+    if update_running():
+        return False, "이미 업데이트 중입니다."
+    if subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode != 0:
+        return False, "이 서버에서는 화면에서 업데이트할 권한이 없습니다. SSH로 scripts/update_server.sh를 실행하세요."
+    user = pwd.getpwuid(os.getuid())
+    log = update_log()
+    cmd = ["sudo", "-n", "systemd-run", "--unit=dart-update", "--collect", f"--uid={user.pw_name}",
+           f"--setenv=HOME={user.pw_dir}", f"--setenv=PATH={user.pw_dir}/.local/bin:/usr/local/bin:/usr/bin:/bin",
+           "/bin/bash", "-c", f"'{ROOT}/scripts/update_server.sh' >> '{log}' 2>&1"]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        return False, f"업데이트를 시작하지 못했습니다: {(r.stderr or r.stdout)[-200:]}"
+    return True, "업데이트를 시작했습니다. 1~3분 뒤 이 화면을 새로고침하세요. 중간에 화면이 잠깐 끊길 수 있습니다."
+
+
+def auto_update_tick(now):
+    """설정에서 켜면 매일 05:07 이후 한 번 업데이트"""
+    if env("DART_AUTO_UPDATE", "0") != "1" or now.time() < dt.time(5, 7):
+        return
+    state = data_dir() / "last_update_day.txt"
+    today = now.date().isoformat()
+    if (state.read_text().strip() if state.exists() else "") == today or is_running():
+        return
+    state.write_text(today)
+    res = check_update()
+    if res.get("behind"):
+        ok, msg = start_update()
+        print(f"자동 업데이트: {msg}", flush=True)
+
+
+def cmd_update(args):
+    import subprocess
+    return subprocess.call(["bash", str(ROOT / "scripts" / "update_server.sh")])
 
 
 # ---------------- 그 밖의 명령 ----------------
@@ -645,7 +736,8 @@ def cmd_web(args):
         DOTENV_KEYS.update(read_env_file())
         return dict(spec=SETTINGS_SPEC, choices=CHOICES, values=current_settings(), apply=apply_settings,
                     next_run=next_auto_run(), links=parse_links(env("NAV_LINKS")),
-                    realestate=env("REALESTATE_URL"), test_notify=cmd_notify_test_web)
+                    realestate=env("REALESTATE_URL"), test_notify=cmd_notify_test_web,
+                    update_info=update_info, check_update=check_update, start_update=start_update)
     serve(results_db(), host=args.host, port=args.port, child_env=child_env,
           get_key=lambda: read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", ""),
           save_key=save_key, settings_api=settings_api)
@@ -662,6 +754,7 @@ def main(argv=None):
     w.add_argument("--host", default=env("DART_WEB_HOST", "127.0.0.1"))
     w.add_argument("--port", type=int, default=int(env("DART_WEB_PORT", "8766")))
     sub.add_parser("tick", help="자동 수집 시각이면 수집 (타이머용)")
+    sub.add_parser("update", help="최신 코드 받아 설치")
     sub.add_parser("net-check")
     sub.add_parser("notify-test")
     sub.add_parser("status")
@@ -676,7 +769,7 @@ def main(argv=None):
     a = p.parse_args(argv)
     return {"run": cmd_run, "web": cmd_web, "net-check": cmd_net_check, "notify-test": cmd_notify_test,
             "status": cmd_status, "set-env": cmd_set_env, "hk-check": cmd_hk_check, "reports-check": cmd_hk_check,
-            "tick": cmd_tick}[a.cmd](a)
+            "tick": cmd_tick, "update": cmd_update}[a.cmd](a)
 
 
 if __name__ == "__main__":
