@@ -895,6 +895,29 @@ def cmd_hk_check(args):
     return 1 if bad else 0
 
 
+def cmd_parse_check(args):
+    """한 공시의 세부변동내역 표를 어떻게 읽었는지 보여 줌 (평균단가가 이상할 때 확인용)"""
+    from bs4 import BeautifulSoup
+    import dart_engine as de
+    cache = make_config().cache
+    xml = de.read_zip(de.zpath(cache, args.rcept_no))
+    if not xml:
+        print(f"원문이 없습니다: {de.zpath(cache, args.rcept_no)}")
+        return 1
+    soup = BeautifulSoup(xml, de.PARSER)
+    for tb in soup.find_all("table"):
+        head = tb.get_text(" ")
+        if "변동일" not in head or "단가" not in head:
+            continue
+        for tr in tb.find_all("tr"):
+            cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "te", "tu", "th"])]
+            got = de.parse_row(cells)
+            print(" | ".join(cells)[:200])
+            if got:
+                print(f"   → 변동일 {cells[got[0]]} · 증감 {got[1]:,.0f} · 단가 {got[2] if got[2] is None else f'{got[2]:,.0f}'} · {got[3]}")
+    return 0
+
+
 def cmd_market_check(args):
     import stock_market
     keys = {k: bool(env_shared(k)) for k in ("ECOS_API_KEY", "DATA_GO_KR_KEY", "LAW_OC", "ASSEMBLY_API_KEY")}
@@ -951,6 +974,8 @@ def main(argv=None):
     r.add_argument("--only", choices=["all", "dart", "reports", "market"], default="all",
                    help="all: 전체, dart: DART 보고서만, reports: 증권사 리포트만, market: 시장·정책만")
     sub.add_parser("market-check", help="시장 지표·정책 소식을 받아 보고 결과 보기")
+    pc = sub.add_parser("parse-check", help="한 공시의 표를 어떻게 읽었는지 보기")
+    pc.add_argument("rcept_no", help="접수번호 (14자리)")
     w = sub.add_parser("web", help="대시보드")
     w.add_argument("--host", default=env("DART_WEB_HOST", "127.0.0.1"))
     w.add_argument("--port", type=int, default=int(env("DART_WEB_PORT", "8766")))
@@ -969,7 +994,7 @@ def main(argv=None):
     se.add_argument("--if-empty", action="store_true", help="비어 있을 때만")
     a = p.parse_args(argv)
     return {"run": cmd_run, "web": cmd_web, "net-check": cmd_net_check, "notify-test": cmd_notify_test,
-            "status": cmd_status, "set-env": cmd_set_env, "hk-check": cmd_hk_check, "reports-check": cmd_hk_check, "market-check": cmd_market_check,
+            "status": cmd_status, "set-env": cmd_set_env, "hk-check": cmd_hk_check, "reports-check": cmd_hk_check, "market-check": cmd_market_check, "parse-check": cmd_parse_check,
             "tick": cmd_tick, "update": cmd_update}[a.cmd](a)
 
 

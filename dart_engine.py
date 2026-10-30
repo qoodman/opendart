@@ -33,7 +33,7 @@ except ImportError:
 
 BASE = "https://opendart.fss.or.kr/api"
 DATE_RE = re.compile(r"(\d{4})\s*[.\-년/]\s*(\d{1,2})\s*[.\-월/]\s*(\d{1,2})")
-PARSE_VERSION = 2       # 분석 결과 형식이 바뀌면 올림 (저장된 분석 결과를 다시 만듦)
+PARSE_VERSION = 3       # 분석 결과 형식이 바뀌면 올림 (저장된 분석 결과를 다시 만듦)
 HEARTBEAT = 30          # 명령줄 버전의 ♥ 줄 간격(초)
 WARN_IDLE = 90          # 응답 없음 경고(초)
 DEAD_IDLE = 180         # 다시 시작 권장(초)
@@ -125,6 +125,58 @@ def read_zip(path):
     return txt
 
 
+_NUM_CELL = re.compile(r"^[-+△▲▽(]?\s*[\d,]+(?:\.\d+)?\s*\)?$")
+
+
+def _is_num(c):
+    return bool(_NUM_CELL.match((c or "").replace(" ", "")))
+
+
+def _signed(c):
+    """'(300)'·'△300'·'-300' → -300"""
+    v = num(c)
+    if v is None:
+        return None
+    t = (c or "").strip()
+    if t.startswith(("(", "△", "▽", "-")) and v > 0:
+        return -v
+    return v
+
+
+def parse_row(cells):
+    """세부변동내역 한 줄 → (변동일 칸 위치, 증감, 단가, 방법, 종류) 또는 None.
+    '변동 전 + 증감 = 변동 후'가 맞는 연속된 숫자 세 칸으로 증감을 찾고, 그다음 숫자 칸을 단가로 봅니다.
+    (생년월일 칸이 날짜로 잡히거나 표 모양이 조금 달라도 칸이 밀리지 않게)"""
+    dates = [i for i, c in enumerate(cells) if DATE_RE.search(c) and not _is_num(c)]
+    if not dates:
+        return None
+    for k in range(dates[0] + 1, len(cells) - 2):
+        a_, b_, c_ = cells[k], cells[k + 1], cells[k + 2]
+        if not (_is_num(a_) and _is_num(b_) and _is_num(c_)):
+            continue
+        before, chg, after = num(a_), _signed(b_), num(c_)
+        if None in (before, chg, after):
+            continue
+        tol = max(1.0, abs(after) * 1e-6)
+        if abs(before + chg - after) <= tol:
+            delta = chg
+        elif abs(before - abs(chg) - after) <= tol:      # 감소인데 부호가 빠진 경우
+            delta = -abs(chg)
+        elif abs(before + abs(chg) - after) <= tol:
+            delta = abs(chg)
+        else:
+            continue
+        di = max(i for i in dates if i < k)               # 숫자 바로 앞의 날짜가 변동일
+        price = None
+        for j in range(k + 3, len(cells)):
+            if _is_num(cells[j]):
+                price = num(cells[j])
+                break
+        texts = [c for c in cells[di + 1:k] if c and not _is_num(c)]
+        return di, delta, price, (texts[0] if texts else ""), (texts[1] if len(texts) > 1 else "")
+    return None
+
+
 def parse_one(rp, cache, body_word):
     xml = read_zip(zpath(cache, rp["rcept_no"]))
     if body_word and body_word not in xml:   # 본문 필터: 파싱 전에 문자열로 먼저 거름
@@ -139,9 +191,18 @@ def parse_one(rp, cache, body_word):
             continue
         for tr in tb.find_all("tr"):
             cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "te", "tu", "th"])]
-            di = next((i for i, c in enumerate(cells) if DATE_RE.search(c)), None)
-            if di is None or len(cells) < di + 7:
-                continue
+            got = parse_row(cells)
+            if got:
+                di, qty, price, method, kind = got
+            else:
+                # 예전 방식 (날짜 칸 기준 고정 위치). 단가가 수량과 같으면 잘못 읽은 것이라 비움
+                di = next((i for i, c in enumerate(cells) if DATE_RE.search(c)), None)
+                if di is None or len(cells) < di + 7:
+                    continue
+                qty, price = num(cells[di + 4]), num(cells[di + 6])
+                method, kind = cells[di + 1], cells[di + 2]
+                if price is not None and qty is not None and abs(price) == abs(qty):
+                    price = None
             y, mo, d = DATE_RE.search(cells[di]).groups()
             rows.append(dict(
                 종목명=rp.get("stock_name") or rp["corp_name"], 종목코드=rp.get("stock_code"),
@@ -149,8 +210,7 @@ def parse_one(rp, cache, body_word):
                 제출일=_ymd(rp["rcept_dt"]), 접수번호=rp["rcept_no"], 보유목적=purpose,
                 제출인=rp["flr_nm"], 보고자=cells[0],
                 변동일=f"{y}-{int(mo):02d}-{int(d):02d}",
-                방법=cells[di+1], 종류=cells[di+2],
-                증감=num(cells[di+4]), 단가=num(cells[di+6])))
+                방법=method, 종류=kind, 증감=qty, 단가=price))
     return rows
 
 
