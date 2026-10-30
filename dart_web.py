@@ -25,7 +25,11 @@ CSS = """
 font:15px/1.5 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR",sans-serif}
 a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 header{padding:12px 16px;border-bottom:1px solid var(--line);display:flex;gap:14px;
-align-items:baseline;flex-wrap:wrap}header b{font-size:17px}header nav a{margin-right:12px}
+align-items:center;flex-wrap:wrap}header b{font-size:17px}header nav a{margin-right:12px}
+.hrow{display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%}
+.runform{margin:0}.runbtn{font:inherit;font-size:14px;padding:6px 12px;border-radius:999px;border:0;
+background:var(--accent);color:var(--bg);cursor:pointer;white-space:nowrap;margin-left:auto}
+a.runbtn.busy{background:var(--chip);color:var(--fg);text-decoration:none}
 main{max-width:980px;margin:0 auto;padding:14px 16px 40px}
 form.filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
 input,select{font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:8px;
@@ -87,7 +91,23 @@ def icon_png(size):
 _ICONS = {}
 
 
-_NAV = {"realestate": "", "links": []}   # 요청마다 설정에서 새로 채움
+_NAV = {"realestate": "", "links": [], "status": {}}   # 요청마다 설정·진행 상황으로 새로 채움
+
+
+def run_widget():
+    """모든 화면 위쪽 오른쪽: '지금 수집' 버튼, 수집 중이면 진행률"""
+    st = _NAV.get("status") or {}
+    if st.get("state") == "running" and time.time() - st.get("updated", 0) < 120:
+        total, done = st.get("total") or 0, st.get("done") or 0
+        pct = f" {done / total:.0%}" if total else ""
+        return (f'<a class="runbtn busy" id="runbusy" href="/">수집 중{pct}</a>'
+                "<script>(function(){const b=document.getElementById('runbusy');const t=setInterval(()=>{"
+                "fetch('/health').then(r=>r.json()).then(s=>{if(s.state==='running'){"
+                "b.textContent='수집 중'+(s.total?' '+Math.round(s.done/s.total*100)+'%':'');}"
+                "else{clearInterval(t);b.textContent='수집 끝 · 새로고침';b.href=location.href;}}).catch(()=>{});},10000);})();"
+                "</script>")
+    return ('<form method="post" action="/run" class="runform">'
+            '<button class="runbtn" type="submit">지금 수집</button></form>')
 
 
 def page(title, body, refresh=False, charts=False):
@@ -101,7 +121,7 @@ def page(title, body, refresh=False, charts=False):
 <link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#2b5a9e">
 <link rel="icon" href="/icon-192.png"><link rel="apple-touch-icon" href="/icon-192.png">
 </head><body>
-<header><b>DART 단순투자</b><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/reports">리포트</a><a href="/new">새 공시</a>
+<header><div class="hrow"><b>DART 단순투자</b>{run_widget()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/reports">리포트</a><a href="/new">새 공시</a>
 <a href="/excel">엑셀</a><a href="/settings">설정</a>{extra}</nav>
 </header><main>{body}</main>{"<script>" + CHART_JS + "</script>" if charts else ""}</body></html>""".encode()
 
@@ -164,7 +184,8 @@ def status_box(conn, st):
         last = conn.execute("SELECT started, finished, ok, info FROM runs ORDER BY rowid DESC LIMIT 1").fetchone()
     if not last:
         return ('<div class="card"><div class="status"><span class="dot"></span>'
-                '<b>아직 수집 결과가 없습니다</b></div>' + run_button() + '</div>'), False
+                '<b>아직 수집 결과가 없습니다</b></div>'
+                '<div class="muted">위쪽 오른쪽 <b>지금 수집</b>을 누르면 시작합니다.</div></div>'), False
     info = json.loads(last["info"] or "{}")
     if last["ok"]:
         part = "" if info.get("complete", True) else ' · <span class="warn">일부만 받음(다음 실행 때 이어서)</span>'
@@ -174,12 +195,12 @@ def status_box(conn, st):
     else:
         txt = (f'<span class="dot bad"></span><b>수집 실패 {escape(last["finished"])}</b>'
                f'<span class="muted warn">{escape(info.get("error", ""))}</span>')
-    return f'<div class="card"><div class="status" style="flex-wrap:wrap">{txt}</div>{run_button()}</div>', False
+    return f'<div class="card"><div class="status" style="flex-wrap:wrap">{txt}</div></div>', False
 
 
 def run_button():
-    return ('<form method="post" action="/run" style="margin-top:6px;display:flex;gap:12px;align-items:center">'
-            '<button class="ghost" type="submit">지금 수집</button><a class="muted" href="/settings">API 키 설정</a></form>')
+    return ('<form method="post" action="/run" style="margin-top:6px">'
+            '<button class="ghost" type="submit">지금 수집</button></form>')
 
 
 def eok(v):
@@ -822,6 +843,7 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 return self._send(204, "text/plain", b"")
             S = settings()
             st = load_status(status_path)
+            _NAV["status"] = st
             if url.path == "/health":
                 return self._send(200, "application/json", json.dumps(st, ensure_ascii=False).encode())
             conn = sqlite3.connect(f"file:{quote(str(db_path))}?mode=ro", uri=True) if Path(db_path).exists() else sqlite3.connect(":memory:")
@@ -929,8 +951,10 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
             if path != "/run":
                 return self._send(404, "text/plain", b"not found")
             self._start_run()
+            back = urlparse(self.headers.get("Referer") or "/")
+            where = (back.path or "/") + (f"?{back.query}" if back.query else "")
             self.send_response(303)
-            self.send_header("Location", "/")
+            self.send_header("Location", where if where.startswith("/") else "/")
             self.end_headers()
 
         def log_message(self, *args):  # 조용히
