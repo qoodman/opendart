@@ -4,7 +4,7 @@
 부동산 앱(`realestate`)을 이미 서버에 올려 두었다는 전제입니다. 서버·Tailscale·ntfy를 그대로 같이 씁니다.
 
 ```
-[오라클 서버]  realestate.xxxx.ts.net (부동산)   +   dart.xxxx.ts.net (DART, 매일 20:13 수집)
+[오라클 서버]  realestate.xxxx.ts.net (부동산)   +   dart.xxxx.ts.net (DART, 매일 자동 수집 · 시각은 설정에서)
      │  Tailscale (나만 접속 가능한 사설망)
 [안드로이드 폰]  홈 화면 아이콘 2개  +  ntfy 알림 (같은 주제로 같이 받음)
 ```
@@ -24,7 +24,7 @@ cd ~/opendart
 - **--with-data**: 맥 앱이 받아 둔 원문(`문서/DART단순투자/dart_cache`)을 서버로 복사합니다. 서버가 처음부터 수만 건을 다시 받지 않아도 됩니다.
 - 맥 앱에 넣어 둔 **API 키**를 서버 설정(`.env`)에 넣습니다.
 - 부동산 앱의 **ntfy 주제**와 **Tailscale 주소**를 찾아 자동으로 설정합니다.
-- 매일 20:13 자동 수집과 대시보드를 등록합니다.
+- 매일 자동 수집(기본 20:13, 대시보드 **설정**에서 바꿈)과 대시보드를 등록합니다.
 
 중간에 **DART 전용 Tailscale 로그인 주소**가 한 번 나옵니다. 브라우저에서 열고 **폰과 같은 계정**으로 로그인하세요.
 마지막에 `폰 대시보드: https://dart.xxxx.ts.net` 같은 **DART 전용 주소**가 나옵니다. 부동산 주소(`realestate.xxxx.ts.net`)와 따로입니다.
@@ -99,11 +99,11 @@ journalctl -u dart-daily -f        # 진행 상황 보기 (Ctrl+C로 보기만 �
 | 결과 보기 | 폰 홈 화면의 파란 아이콘 (Tailscale 켜진 상태) |
 | 코드 업데이트 반영 | 맥에서 `cd ~/opendart && git pull && ./scripts/push_to_server.sh` |
 | 지금 바로 수집 | 대시보드의 **지금 수집**, 또는 서버에서 `sudo systemctl start --no-block dart-daily` |
-| 수집 기록 보기 | 서버에서 `journalctl -u dart-daily -n 50` |
-| 설정 바꾸기 | 서버에서 `nano ~/opendart/.env` (기간 `DART_DAYS`, 검색어 등) |
+| 수집 기록 보기 | 서버에서 `journalctl -u dart-tick -u dart-daily -n 50` |
+| 설정 바꾸기 | 대시보드 위쪽 **설정**: 조회 기간·검색어·자동 수집 시각·평일만·주가/목표주가·알림 기준·ntfy 주제·바로가기 링크·API 키 |
 
 ## 문제가 생기면
 
 - **대시보드가 안 열림**: 폰의 Tailscale이 켜져 있는지 확인합니다. 서버에서 `systemctl status dart-web tailscaled-dart`로 둘 다 active인지 봅니다.
-- **수집 실패 알림이 옴**: 서버에서 `journalctl -u dart-daily -n 50`으로 이유를 봅니다. "호출 한도"면 다음 날 자동으로 이어서 받습니다.
-- **부동산 앱이 느려짐**: DART 수집은 낮은 우선순위로 돌고 부동산 수집(19:17)과 시간이 겹치지 않게 20:13에 돕니다. 그래도 느리면 `.env`의 `DART_WORKERS`를 2로 줄이세요.
+- **수집 실패 알림이 옴**: 서버에서 `journalctl -u dart-tick -u dart-daily -n 50`으로 이유를 봅니다. "호출 한도"면 다음 날 자동으로 이어서 받습니다.
+- **부동산 앱이 느려짐**: DART 수집은 낮은 우선순위로 돌고 부동산 수집(19:17)과 시간이 겹치지 않게 20:13에 돕니다. 그래도 느리면 대시보드 **설정 → 성능**에서 동시 다운로드 수를 2로 줄이세요.

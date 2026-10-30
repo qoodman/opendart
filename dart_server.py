@@ -10,7 +10,7 @@ DART 단순투자 — 서버용 (오라클 클라우드 등 리눅스 서버에�
 
 설정은 같은 폴더의 .env 파일 (.env.example 참고).
 """
-import os, sys, json, time, sqlite3, argparse, threading, traceback, datetime as dt, multiprocessing
+import os, re, sys, json, time, sqlite3, argparse, threading, traceback, datetime as dt, multiprocessing
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -106,6 +106,142 @@ def make_config():
         daily_budget=int(env("DART_DAILY_BUDGET", "39000")), list_refresh=True)
 
 
+# ---------------- 설정 화면에서 바꿀 수 있는 값 ----------------
+AMOUNT_OPTS = {"0": "모든 공시", "100000000": "매수 1억 이상", "1000000000": "매수 10억 이상",
+               "10000000000": "매수 100억 이상"}
+SETTINGS_SPEC = [
+    # (그룹, 키, 이름, 종류, 기본값, 설명)
+    ("수집", "DART_DAYS", "조회 기간(일)", "int:30:1825", "365", "오늘부터 며칠 전까지 공시를 봅니다. 늘리면 다음 수집 때 그만큼 더 받습니다."),
+    ("수집", "DART_START", "시작일 고정", "date", "", "예: 20260101. 비우면 위의 조회 기간을 씁니다."),
+    ("수집", "DART_KEYWORD", "보고서명 검색어", "text", "상황보고", ""),
+    ("수집", "DART_BODY_WORD", "본문 포함 단어", "text", "단순투자", "바꾸면 저장된 원문을 다시 분석합니다."),
+    ("수집", "DART_RUN_TIMES", "자동 수집 시각", "times", "20:13", "24시간 형식. 여러 번이면 쉼표로: 08:30, 20:13"),
+    ("수집", "DART_WEEKDAYS_ONLY", "평일에만 자동 수집", "bool", "0", ""),
+    ("수집", "DART_PRICES", "주가 받기 (네이버 증권)", "bool", "1", "제출일 종가·최근 종가·그래프에 필요합니다."),
+    ("수집", "HK_CONSENSUS", "증권사 목표주가 받기 (한경컨센서스)", "bool", "1", ""),
+    ("알림", "DART_NOTIFY", "새 공시 알림 보내기", "bool", "1", ""),
+    ("알림", "NTFY_TOPIC", "ntfy 주제", "text?", "", "폰 ntfy 앱에서 구독한 주제 이름. 부동산 앱과 같게 두면 한 곳에서 받습니다."),
+    ("알림", "DART_NOTIFY_MIN_AMOUNT", "알림 기준", "choice", "0", "이보다 작은 매수만 있는 공시는 알리지 않습니다."),
+    ("알림", "DART_NOTIFY_EX_NPS", "국민연금 공시는 알리지 않기", "bool", "0", ""),
+    ("화면", "DASHBOARD_URL", "이 대시보드 주소", "url", "", "알림을 눌렀을 때 열 주소. 예: https://dart.xxxx.ts.net"),
+    ("화면", "REALESTATE_URL", "부동산 대시보드 주소", "url", "", "위쪽 메뉴의 '부동산 ↗' 링크"),
+    ("화면", "NAV_LINKS", "다른 대시보드 바로가기", "links", "", "한 줄에 하나씩 '이름 | 주소'. 위쪽 메뉴에 붙습니다."),
+    ("성능", "DART_WORKERS", "동시 다운로드 수", "int:1:8", "4", "부동산 앱이 느려지면 2로 줄이세요."),
+    ("성능", "DART_PARSE_WORKERS", "동시 분석 수", "int:1:4", "1", "메모리 1GB 서버는 1을 권장합니다."),
+]
+CHOICES = {"DART_NOTIFY_MIN_AMOUNT": AMOUNT_OPTS}
+
+
+def parse_links(raw):
+    """'이름|주소;;이름|주소' 또는 여러 줄 → [(이름, 주소)]"""
+    out = []
+    for part in raw.replace(";;", "\n").splitlines():
+        if "|" in part:
+            name, url = (x.strip() for x in part.split("|", 1))
+            if name and url.startswith(("http://", "https://")):
+                out.append((name, url))
+    return out
+
+
+def clean_setting(kind, raw):
+    """화면에서 들어온 값 → (.env에 쓸 값, 오류 문구 또는 None)"""
+    raw = (raw or "").strip()
+    if kind.startswith("int"):
+        _, lo, hi = kind.split(":")
+        if not raw.isdigit() or not int(lo) <= int(raw) <= int(hi):
+            return None, f"{lo}~{hi} 사이 숫자로 넣어주세요."
+        return raw, None
+    if kind == "bool":
+        return ("1" if raw in ("1", "on", "true") else "0"), None
+    if kind == "date":
+        d = re.sub(r"\D", "", raw)
+        if not d:
+            return "", None
+        try:
+            dt.datetime.strptime(d, "%Y%m%d")
+        except ValueError:
+            return None, "20260101처럼 8자리 날짜로 넣어주세요."
+        return d, None
+    if kind == "times":
+        times = [t.strip() for t in raw.replace("，", ",").split(",") if t.strip()]
+        out = []
+        for t in times:
+            m = re.fullmatch(r"(\d{1,2}):?(\d{2})", t)
+            if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+                return None, "20:13처럼 시:분으로 넣어주세요."
+            out.append(f"{int(m.group(1)):02d}:{m.group(2)}")
+        if not out:
+            return None, "시각을 하나 이상 넣어주세요."
+        return ", ".join(sorted(set(out))), None
+    if kind == "url":
+        if raw and not raw.startswith(("http://", "https://")):
+            return None, "https:// 로 시작하는 주소를 넣어주세요."
+        return raw.rstrip("/"), None
+    if kind == "links":
+        links = parse_links(raw)
+        bad = [l for l in raw.splitlines() if l.strip() and "|" not in l]
+        if bad:
+            return None, f"'이름 | 주소' 형식이 아닌 줄이 있습니다: {bad[0][:30]}"
+        return ";;".join(f"{n}|{u}" for n, u in links), None
+    if kind == "choice":
+        return raw, None
+    if kind == "text" and not raw:
+        return None, "비워 둘 수 없습니다."
+    if any(c in raw for c in "\n\r"):
+        return None, "한 줄로 넣어주세요."
+    return raw, None
+
+
+def current_settings():
+    vals = read_env_file()
+    return {key: vals.get(key, "") or default for _, key, _, _, default, _ in SETTINGS_SPEC}
+
+
+def apply_settings(form):
+    """설정 화면 저장. (바뀐 이름 목록, {키: 오류})"""
+    cur, changed, errors = current_settings(), [], {}
+    for _, key, label, kind, default, _ in SETTINGS_SPEC:
+        if kind == "bool":
+            raw = form.get(key, "0")          # 체크 해제된 칸은 전송되지 않음
+        elif key not in form:
+            continue
+        else:
+            raw = form[key]
+        if kind == "choice" and raw not in CHOICES.get(key, {}):
+            continue
+        val, err = clean_setting(kind, raw)
+        if err:
+            errors[key] = err
+            continue
+        if val != cur.get(key, ""):
+            set_env_value(key, val)
+            changed.append(label)
+    return changed, errors
+
+
+def run_times():
+    out = []
+    for t in env("DART_RUN_TIMES", "20:13").split(","):
+        m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", t)
+        if m:
+            out.append(dt.time(int(m.group(1)), int(m.group(2))))
+    return sorted(out) or [dt.time(20, 13)]
+
+
+def next_auto_run(now=None):
+    now = now or dt.datetime.now()
+    weekdays = env("DART_WEEKDAYS_ONLY", "0") == "1"
+    for add in range(0, 8):
+        day = now.date() + dt.timedelta(days=add)
+        if weekdays and day.weekday() >= 5:
+            continue
+        for t in run_times():
+            when = dt.datetime.combine(day, t)
+            if when > now:
+                return when
+    return None
+
+
 # ---------------- 알림 (ntfy) ----------------
 def notify(title, message, click="", tags=("chart_with_upwards_trend",)):
     """ntfy 앱으로 푸시. NTFY_TOPIC이 없으면 화면에만 출력."""
@@ -129,6 +265,21 @@ def won(v):
         return f"{float(v):,.0f}원"
     except (TypeError, ValueError):
         return "-"
+
+
+def notify_filter(by_rep):
+    """설정의 알림 기준(최소 매수금액, 국민연금 제외)에 맞는 공시만"""
+    min_amt = float(env("DART_NOTIFY_MIN_AMOUNT", "0") or 0)
+    ex_nps = env("DART_NOTIFY_EX_NPS", "0") == "1"
+    out = {}
+    for rno, rows in by_rep.items():
+        if ex_nps and "국민연금" in (rows[0].get("제출인") or ""):
+            continue
+        amt = sum((r.get("증감") or 0) * (r.get("단가") or 0) for r in rows if (r.get("증감") or 0) > 0)
+        if amt < min_amt:
+            continue
+        out[rno] = rows
+    return out
 
 
 def describe_new(rows_by_report):
@@ -323,22 +474,55 @@ def cmd_run(args):
         write_status(eng, "done", {"new": len(new), "complete": res["complete"]})
         if first_run:
             print(f"첫 실행: 기준선 저장 (공시 {len({d['접수번호'] for d in detail})}건). 다음부터 새 공시를 알립니다.")
-        elif new and not args.quiet:
+        elif new and not args.quiet and env("DART_NOTIFY", "1") != "0":
             by_rep = {}
             for d in detail:
                 if d["접수번호"] in new:
                     by_rep.setdefault(d["접수번호"], []).append(d)
+            by_rep = notify_filter(by_rep)
             lines = describe_new(by_rep)
             body = "\n".join(lines[:8]) + (f"\n…외 {len(lines) - 8}건" if len(lines) > 8 else "")
             try:
-                notify(f"새 단순투자 공시 {len(new)}건", body,
-                       click=(url.rstrip("/") + "/new") if url else "")
+                if by_rep:
+                    notify(f"새 단순투자 공시 {len(by_rep)}건", body,
+                           click=(url.rstrip("/") + "/new") if url else "")
             except Exception as e:
                 print(f"알림 실패: {e}", flush=True)
         print(f"완료: 매매내역 {len(detail)}행 · 새 공시 {len(new)}건 · API 호출 {res['calls']}회", flush=True)
         if not res["complete"]:
             print("※ 다 받지 못했습니다(호출 한도 등). 다음 실행 때 이어서 받습니다.")
         return 0
+
+
+def last_run_started():
+    try:
+        conn = sqlite3.connect(results_db())
+        row = conn.execute("SELECT MAX(started) FROM runs").fetchone()
+        conn.close()
+        return row[0] or ""
+    except sqlite3.Error:
+        return ""
+
+
+def cmd_tick(args):
+    """10분마다 타이머가 부름: 설정한 자동 수집 시각이 지났고 아직 안 돌았으면 수집."""
+    now = dt.datetime.now()
+    if env("DART_WEEKDAYS_ONLY", "0") == "1" and now.weekday() >= 5:
+        return 0
+    due = [dt.datetime.combine(now.date(), t) for t in run_times() if dt.datetime.combine(now.date(), t) <= now]
+    if not due:
+        return 0
+    slot = max(due).strftime("%Y-%m-%d %H:%M")
+    state = data_dir() / "last_auto.txt"
+    done = state.read_text().strip() if state.exists() else ""
+    if not done and last_run_started() >= slot:
+        done = slot          # 처음 바꾼 날: 이미 그 시각 이후에 돌았으면 다시 돌지 않음
+        state.write_text(done)
+    if done >= slot or is_running():
+        return 0
+    state.write_text(slot)   # 실패해도 10분마다 되풀이하지 않게 먼저 기록
+    print(f"자동 수집 시각 {slot} → 수집 시작", flush=True)
+    return cmd_run(argparse.Namespace(quiet=False))
 
 
 # ---------------- 그 밖의 명령 ----------------
@@ -381,6 +565,17 @@ def cmd_notify_test(args):
     notify("DART 알림 시험", "이 알림이 보이면 설정 완료입니다.", click=env("DASHBOARD_URL"))
     print("보냈습니다. 폰의 ntfy 앱을 확인하세요.")
     return 0
+
+
+def cmd_notify_test_web():
+    """설정 화면의 '시험 알림' 버튼. (성공 여부, 문구)"""
+    if not env("NTFY_TOPIC"):
+        return False, "ntfy 주제가 비어 있습니다."
+    try:
+        notify("DART 알림 시험", "이 알림이 보이면 설정 완료입니다.", click=env("DASHBOARD_URL"))
+        return True, "시험 알림을 보냈습니다. 폰의 ntfy 앱을 확인하세요."
+    except Exception as e:
+        return False, f"보내지 못했습니다: {e}"
 
 
 def cmd_status(args):
@@ -434,9 +629,16 @@ def cmd_web(args):
             return False, why
         set_env_value("DART_API_KEY", key)
         return True, why
+    def settings_api():
+        # 대시보드가 매 요청마다 .env를 새로 읽게 (설정 화면에서 바꾼 값이 바로 반영)
+        os.environ.update({k: v for k, v in read_env_file().items() if k in DOTENV_KEYS or k not in os.environ})
+        DOTENV_KEYS.update(read_env_file())
+        return dict(spec=SETTINGS_SPEC, choices=CHOICES, values=current_settings(), apply=apply_settings,
+                    next_run=next_auto_run(), links=parse_links(env("NAV_LINKS")),
+                    realestate=env("REALESTATE_URL"), test_notify=cmd_notify_test_web)
     serve(results_db(), host=args.host, port=args.port, child_env=child_env,
           get_key=lambda: read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", ""),
-          save_key=save_key)
+          save_key=save_key, settings_api=settings_api)
     return 0
 
 
@@ -449,6 +651,7 @@ def main(argv=None):
     w = sub.add_parser("web", help="대시보드")
     w.add_argument("--host", default=env("DART_WEB_HOST", "127.0.0.1"))
     w.add_argument("--port", type=int, default=int(env("DART_WEB_PORT", "8766")))
+    sub.add_parser("tick", help="자동 수집 시각이면 수집 (타이머용)")
     sub.add_parser("net-check")
     sub.add_parser("notify-test")
     sub.add_parser("status")
@@ -460,7 +663,7 @@ def main(argv=None):
     se.add_argument("--if-empty", action="store_true", help="비어 있을 때만")
     a = p.parse_args(argv)
     return {"run": cmd_run, "web": cmd_web, "net-check": cmd_net_check, "notify-test": cmd_notify_test,
-            "status": cmd_status, "set-env": cmd_set_env, "hk-check": cmd_hk_check}[a.cmd](a)
+            "status": cmd_status, "set-env": cmd_set_env, "hk-check": cmd_hk_check, "tick": cmd_tick}[a.cmd](a)
 
 
 if __name__ == "__main__":

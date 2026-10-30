@@ -1,0 +1,15 @@
+[Unit]
+Description=DART 단순투자 자동 수집 확인 (설정의 자동 수집 시각이면 수집)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__USER__
+WorkingDirectory=__ROOT__
+ExecStart=__PY__ __ROOT__/dart_server.py tick
+Environment=PYTHONUNBUFFERED=1
+# 작은 서버에서 다른 프로그램(부동산 대시보드 등)이 느려지지 않게 낮은 우선순위로
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=6h

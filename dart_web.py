@@ -49,6 +49,9 @@ padding:5px 6px;text-align:left;white-space:nowrap}th{color:var(--muted);font-we
 border-radius:8px;background:var(--card)}.pager b.cur{background:var(--accent);color:var(--bg);border-color:var(--accent)}
 .num{display:inline-block;min-width:22px;margin-right:6px;color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums}
 details summary{cursor:pointer;color:var(--accent);margin-bottom:4px}
+label.set{display:block;margin:12px 0 4px;font-weight:500}label.set input[type=checkbox]{width:18px;height:18px;
+vertical-align:-3px;margin-right:6px}textarea{font:inherit;padding:7px 9px;border:1px solid var(--line);
+border-radius:8px;background:var(--card);color:var(--fg)}
 h2{font-size:16px;margin:18px 0 8px}
 """
 
@@ -84,9 +87,13 @@ def icon_png(size):
 _ICONS = {}
 
 
+_NAV = {"realestate": "", "links": []}   # 요청마다 설정에서 새로 채움
+
+
 def page(title, body, refresh=False, charts=False):
-    other = os.environ.get("REALESTATE_URL", "").strip()
+    other = _NAV["realestate"] or os.environ.get("REALESTATE_URL", "").strip()
     extra = f'<a href="{escape(other)}">부동산 ↗</a>' if other else ""
+    extra += "".join(f'<a href="{escape(u)}">{escape(n)} ↗</a>' for n, u in _NAV["links"] if u != other)
     meta = '<meta http-equiv="refresh" content="15">' if refresh else ""
     return f"""<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">{meta}
@@ -95,7 +102,7 @@ def page(title, body, refresh=False, charts=False):
 <link rel="icon" href="/icon-192.png"><link rel="apple-touch-icon" href="/icon-192.png">
 </head><body>
 <header><b>DART 단순투자</b><nav><a href="/">요약</a><a href="/ideas">아이디어</a><a href="/new">새 공시</a>
-<a href="/excel">엑셀</a>{extra}</nav>
+<a href="/excel">엑셀</a><a href="/settings">설정</a>{extra}</nav>
 </header><main>{body}</main>{"<script>" + CHART_JS + "</script>" if charts else ""}</body></html>""".encode()
 
 
@@ -214,7 +221,27 @@ def key_form(msg="", bad=False, current=""):
             'placeholder="API 키" style="flex:1 1 220px"><button>저장</button></form>' + note + '</div>')
 
 
-def view_settings(get_key, q):
+def setting_field(key, label, kind, help_, val, choices, err):
+    e = f'<div class="warn" style="font-size:13px">{escape(err)}</div>' if err else ""
+    h = f'<div class="muted">{escape(help_)}</div>' if help_ else ""
+    if kind == "bool":
+        return (f'<label class="set"><input type="checkbox" name="{key}" value="1"{" checked" if val == "1" else ""}> '
+                f'{escape(label)}</label>{h}{e}')
+    if kind == "choice":
+        ctl = select(key, choices.get(key, {}), val)
+    elif kind == "links":
+        lines = "\n".join(f"{n} | {u}" for n, u in (
+            tuple(x.strip() for x in part.split("|", 1)) for part in val.split(";;") if "|" in part))
+        ctl = (f'<textarea name="{key}" rows="3" style="width:100%" placeholder="코인 | https://coin.xxxx.ts.net">'
+               f'{escape(lines)}</textarea>')
+    else:
+        typ = "number" if kind.startswith("int") else "text"
+        ctl = (f'<input type="{typ}" name="{key}" value="{escape(val)}" autocomplete="off" autocapitalize="off" '
+               f'spellcheck="false" style="width:100%">')
+    return f'<label class="set">{escape(label)}</label>{ctl}{h}{e}'
+
+
+def view_settings(get_key, q, S=None):
     cur = get_key() if get_key else ""
     msg, bad = "", False
     if q.get("saved"):
@@ -224,6 +251,30 @@ def view_settings(get_key, q):
     body = key_form(msg, bad, cur)
     if q.get("saved"):
         body += run_button()
+    if S:
+        errs = json.loads(q["errs"]) if q.get("errs") else {}
+        note = ""
+        if q.get("ok") is not None:
+            note = (f'<div class="card">✔ 저장했습니다: {escape(q["ok"])}<div class="muted">다음 수집부터 적용됩니다.</div></div>'
+                    if q["ok"] else '<div class="card muted">바뀐 설정이 없습니다.</div>')
+        if errs:
+            note += '<div class="card warn">고쳐야 할 칸이 있어 그 칸은 저장하지 않았습니다.</div>'
+        if q.get("nt"):
+            note += f'<div class="card">{escape(q["nt"])}</div>'
+        nxt = S["next_run"]
+        groups, form = {}, ""
+        for g, key, label, kind, default, help_ in S["spec"]:
+            groups.setdefault(g, []).append(setting_field(key, label, kind, help_, S["values"].get(key, ""),
+                                                          S["choices"], errs.get(key)))
+        for g, fields in groups.items():
+            extra = ""
+            if g == "수집" and nxt:
+                extra = f'<div class="muted">다음 자동 수집: {nxt:%m-%d %H:%M}</div>'
+            form += f'<div class="card"><b>{g}</b>{extra}{"".join(fields)}</div>'
+        body = (note + body + '<form method="post" action="/settings/save">' + form
+                + '<button style="width:100%;padding:11px">설정 저장</button></form>'
+                + '<form method="post" action="/settings/notify-test" style="margin-top:10px">'
+                  '<button class="ghost" style="width:100%">시험 알림 보내기</button></form>')
     body += '<p><a href="/">← 요약으로</a></p>'
     return page("설정", body)
 
@@ -539,7 +590,14 @@ def latest_excel(conn):
 
 
 # ---------------- 서버 ----------------
-def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, save_key=None):
+def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, save_key=None, settings_api=None):
+    def settings():
+        if not settings_api:
+            return None
+        S = settings_api()
+        _NAV["realestate"], _NAV["links"] = S["realestate"], S["links"]
+        return S
+
     class Handler(BaseHTTPRequestHandler):
         def _send(self, status, ctype, data, headers=()):
             self.send_response(status)
@@ -561,6 +619,7 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 return self._send(200, "image/png", _ICONS[size], [("Cache-Control", "max-age=86400")])
             if url.path == "/favicon.ico":
                 return self._send(204, "text/plain", b"")
+            S = settings()
             st = load_status(status_path)
             if url.path == "/health":
                 return self._send(200, "application/json", json.dumps(st, ensure_ascii=False).encode())
@@ -579,7 +638,7 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 elif url.path == "/":
                     body = view_home(conn, q, st, need_key=bool(get_key) and not get_key())
                 elif url.path == "/settings":
-                    body = view_settings(get_key, q)
+                    body = view_settings(get_key, q, S)
                 elif url.path == "/ideas":
                     body = view_ideas(conn, q)
                 elif url.path == "/new":
@@ -602,6 +661,20 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
 
         def do_POST(self):  # noqa: N802
             path = urlparse(self.path).path
+            if path == "/settings/save" and settings_api:
+                n = min(int(self.headers.get("Content-Length") or 0), 65536)
+                form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore"),
+                                                     keep_blank_values=True).items()}
+                S = settings()
+                changed, errors = S["apply"](form)
+                settings()
+                qs = {"ok": ", ".join(changed)}
+                if errors:
+                    qs["errs"] = json.dumps(errors, ensure_ascii=False)
+                return self._redirect("/settings?" + urlencode(qs))
+            if path == "/settings/notify-test" and settings_api:
+                ok, why = settings()["test_notify"]()
+                return self._redirect("/settings?" + urlencode({"nt": ("✔ " if ok else "✖ ") + why}))
             if path == "/settings/key" and save_key:
                 n = min(int(self.headers.get("Content-Length") or 0), 4096)
                 form = parse_qs(self.rfile.read(n).decode("utf-8", "ignore"))
@@ -630,11 +703,12 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
     return Handler
 
 
-def serve(db_path, host="127.0.0.1", port=8766, status_path=None, child_env=None, get_key=None, save_key=None):
+def serve(db_path, host="127.0.0.1", port=8766, status_path=None, child_env=None, get_key=None, save_key=None,
+          settings_api=None):
     db_path = Path(db_path)
     status_path = status_path or db_path.parent / "status.json"
     run_cmd = [sys.executable, str(Path(__file__).resolve().parent / "dart_server.py"), "run"]
-    server = ThreadingHTTPServer((host, port), make_handler(db_path, status_path, run_cmd, child_env, get_key, save_key))
+    server = ThreadingHTTPServer((host, port), make_handler(db_path, status_path, run_cmd, child_env, get_key, save_key, settings_api))
     print(f"대시보드: http://{host}:{port}  (끄려면 Ctrl+C)", flush=True)
     try:
         server.serve_forever()

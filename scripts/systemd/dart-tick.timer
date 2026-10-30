@@ -1,0 +1,9 @@
+[Unit]
+Description=DART 단순투자 10분마다 자동 수집 시각 확인 (시각은 대시보드 설정에서 바꿈)
+
+[Timer]
+OnCalendar=*:0/10
+Persistent=false
+
+[Install]
+WantedBy=timers.target

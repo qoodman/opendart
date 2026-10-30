@@ -49,12 +49,16 @@ if [ ! -f .env ]; then
 fi
 
 echo "▶ 자동 실행 등록 (systemd)"
-for f in dart-web.service dart-daily.service dart-daily.timer; do
+for f in dart-web.service dart-daily.service dart-tick.service dart-tick.timer; do
   sed -e "s|__ROOT__|$ROOT|g" -e "s|__PY__|$PY|g" -e "s|__USER__|$USER_NAME|g" \
     "scripts/systemd/$f" | sudo tee "/etc/systemd/system/$f" >/dev/null
 done
 sudo systemctl daemon-reload
-sudo systemctl enable --now dart-web.service dart-daily.timer
+# 예전 방식(고정 20:13 타이머)은 끄고, 설정 화면의 시각을 따르는 10분 확인 타이머로
+sudo systemctl disable --now dart-daily.timer >/dev/null 2>&1 || true
+sudo rm -f /etc/systemd/system/dart-daily.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now dart-web.service dart-tick.timer
 sudo systemctl restart dart-web.service
 
 # ---- 대시보드 주소: DART 전용 Tailscale 연결로 https://dart.xxxx.ts.net ----
@@ -103,4 +107,4 @@ echo "✔ 설치 완료"
 [ -n "$URL" ] && echo "  폰 대시보드:     $URL"
 echo "  접속 확인:       $PY $ROOT/dart_server.py net-check"
 echo "  지금 한 번 수집: sudo systemctl start --no-block dart-daily && journalctl -u dart-daily -f"
-echo "  다음 자동 수집:  systemctl list-timers dart-daily.timer"
+echo "  자동 수집 시각:  대시보드 → 설정 (기본 20:13)"
