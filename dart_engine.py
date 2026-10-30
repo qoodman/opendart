@@ -239,7 +239,9 @@ def summarize(detail):
                   .agg(매수수량=("증감", "sum"), 매수금액=("금액", "sum"))
                   .reset_index())
     summary["평균매수단가"] = (summary["매수금액"] / summary["매수수량"]).round(0)
-    summary = summary.sort_values(["종목명", "변동일", "제출일"])
+    # 엑셀은 보고서 제출일 오름차순(오래된 것부터)이 기본
+    summary = summary.sort_values(["제출일", "종목명", "변동일"], kind="stable")
+    df = df.sort_values([c for c in ("제출일", "접수번호", "변동일") if c in df.columns], kind="stable")
     return summary, df
 
 

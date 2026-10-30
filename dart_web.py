@@ -132,7 +132,7 @@ def page(title, body, refresh=False, charts=False):
 <link rel="icon" href="/icon-192.png"><link rel="apple-touch-icon" href="/icon-192.png">
 </head><body>
 <header><div class="hrow"><b>DART 단순투자</b>{run_widget()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/reports">리포트</a><a href="/market">시장</a><a href="/policy">정책</a><a href="/new">새 공시</a>
-<a href="/excel">엑셀</a><a href="/settings">설정</a>{extra}</nav>
+<a href="/settings">설정</a>{extra}</nav>
 </header><main>{body}</main>{"<script>" + CHART_JS + "</script>" if charts else ""}</body></html>""".encode()
 
 
@@ -392,19 +392,12 @@ def collect_box(S, q):
             f'{msg}</form></details>')
 
 
-def view_home(conn, q, st, need_key=False, S=None):
-    from urllib.parse import urlencode
-    box, running = status_box(conn, st)
-    if need_key and not running:
-        box = key_form("API 키가 없어서 수집할 수 없습니다. 여기에 넣으면 바로 저장됩니다.", True) + box
-    box += collect_box(S, q)
-    if not has_table(conn, "summary"):
-        return page("DART 단순투자", box, refresh=running)
+def summary_filter(conn, q):
+    """보고서 화면의 검색·필터 → (칸 목록, 검색어, 제출인, 필터, 정렬, WHERE, 값들)"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(summary)")}
     text, who = q.get("q", "").strip(), q.get("who", "").strip()
     f = {k: (q.get(k, "") if q.get(k, "") in opts else "") for k, opts in FILTERS.items()}
     sort = q.get("sort", "submit") if q.get("sort") in SORTS else "submit"
-    pg = int(q["p"]) if str(q.get("p", "")).isdigit() and int(q["p"]) > 0 else 1
 
     conds, args = [], []
     if text:
@@ -435,6 +428,46 @@ def view_home(conn, q, st, need_key=False, S=None):
     elif f["pv"] == "above":
         conds.append("제출일종가 > 평균매수단가")
     where = ("WHERE " + " AND ".join(conds)) if conds else ""
+    return cols, text, who, f, sort, where, args
+
+
+def filtered_excel(conn, q):
+    """지금 목록(검색·필터 적용)을 엑셀로. 보고서 제출일 오름차순."""
+    import io
+    from openpyxl import Workbook
+    cols, text, who, f, sort, where, args = summary_filter(conn, q)
+    cur = conn.execute(f"SELECT * FROM summary {where} ORDER BY 제출일 ASC, 종목명, 변동일", args)
+    names = [d[0] for d in cur.description]
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "날짜별_평균매수단가"
+    ws.append(names)
+    for row in cur:
+        ws.append(list(row))
+    ws.freeze_panes = "A2"
+    for i, n in enumerate(names, 1):
+        ws.column_dimensions[ws.cell(1, i).column_letter].width = 14 if n not in ("종목명", "제출인") else 20
+    info = wb.create_sheet("조건")
+    info.append(["검색어", text]); info.append(["제출인", who])
+    for k, v in f.items():
+        if v:
+            info.append([k, FILTERS[k][v]])
+    info.append(["만든 때", dt.datetime.now().strftime("%Y-%m-%d %H:%M")])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def view_home(conn, q, st, need_key=False, S=None):
+    from urllib.parse import urlencode
+    box, running = status_box(conn, st)
+    if need_key and not running:
+        box = key_form("API 키가 없어서 수집할 수 없습니다. 여기에 넣으면 바로 저장됩니다.", True) + box
+    box += collect_box(S, q)
+    if not has_table(conn, "summary"):
+        return page("DART 단순투자", box, refresh=running)
+    cols, text, who, f, sort, where, args = summary_filter(conn, q)
+    pg = int(q["p"]) if str(q.get("p", "")).isdigit() and int(q["p"]) > 0 else 1
     total = conn.execute(f"SELECT COUNT(*) FROM summary {where}", args).fetchone()[0]
     pages = max((total + PAGE_SIZE - 1) // PAGE_SIZE, 1)
     pg = min(pg, pages)
@@ -460,8 +493,13 @@ def view_home(conn, q, st, need_key=False, S=None):
         or '<p class="muted">조건에 맞는 매수 내역이 없습니다.</p>'
     keep = {k: v for k, v in {"q": text, "who": who, "sort": sort if sort != "submit" else "", **f}.items() if v}
     link = lambda n: "/?" + urlencode({**keep, "p": n})   # noqa: E731
+    excel = ('<div class="filters" style="margin:0 0 10px">'
+             f'<a class="chip" href="/excel?{urlencode({**keep, "list": 1})}">⬇ 지금 목록 엑셀 ({total:,}건)</a>'
+             '<a class="chip" href="/excel">⬇ 전체 엑셀</a>'
+             '<span class="muted">제출일 오름차순</span></div>')
     info = f'<div class="muted" style="margin-top:6px">{total:,}건 중 {start + 1 if total else 0:,}–{min(start + PAGE_SIZE, total):,}</div>'
-    return page("보고서 — DART 단순투자", box + form + chips + cards + pager(total, pg, link) + info, refresh=running)
+    return page("보고서 — DART 단순투자", box + form + chips + excel + cards + pager(total, pg, link) + info,
+                refresh=running)
 
 
 def view_new(conn, q):
@@ -986,6 +1024,11 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
             conn = sqlite3.connect(f"file:{quote(str(db_path))}?mode=ro", uri=True) if Path(db_path).exists() else sqlite3.connect(":memory:")
             conn.row_factory = sqlite3.Row
             try:
+                if url.path == "/excel" and q.get("list") and has_table(conn, "summary"):
+                    data = filtered_excel(conn, q)
+                    fname = quote(f"단순투자_목록_{dt.date.today():%Y%m%d}.xlsx")
+                    return self._send(200, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                      data, [("Content-Disposition", f"attachment; filename*=UTF-8''{fname}")])
                 if url.path == "/excel":
                     p = latest_excel(conn)
                     if not p:
