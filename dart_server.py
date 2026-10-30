@@ -159,7 +159,7 @@ DETAIL_COLS = ["종목명", "종목코드", "회사", "보고서", "제출일", 
                "보고자", "변동일", "방법", "종류", "증감", "단가", "시장"]
 
 
-def save_results(detail, summary, run_info):
+def save_results(detail, summary, run_info, prices=None):
     """대시보드가 읽을 results.sqlite 갱신. 새로 본 공시(접수번호) 목록을 돌려줌."""
     import pandas as pd
     path = results_db()
@@ -192,6 +192,12 @@ def save_results(detail, summary, run_info):
             conn.execute("ALTER TABLE detail_new RENAME TO detail")
             conn.execute("ALTER TABLE summary_new RENAME TO summary")
             conn.execute("CREATE INDEX IF NOT EXISTS ix_detail_code ON detail(종목코드)")
+            if prices is not None:
+                # 그래프용 일별 종가 (종목코드, 날짜 YYYY-MM-DD, 종가)
+                conn.execute("DROP TABLE IF EXISTS prices")
+                conn.execute("CREATE TABLE prices (code TEXT, date TEXT, close REAL, PRIMARY KEY (code, date))")
+                conn.executemany("INSERT OR REPLACE INTO prices VALUES (?, ?, ?)",
+                                 [(c, f"{d[:4]}-{d[4:6]}-{d[6:]}", v) for c, ps in prices.items() for d, v in ps.items()])
             conn.execute("CREATE INDEX IF NOT EXISTS ix_detail_rno ON detail(접수번호)")
             conn.execute("INSERT INTO runs VALUES (?, ?, 1, ?)",
                          (run_info["started"], now, json.dumps(run_info, ensure_ascii=False)))
@@ -304,7 +310,16 @@ def cmd_run(args):
         summary, _ = summarize(detail)
         info = dict(started=started, start=cfg.start, end=cfg.end, calls=res["calls"],
                     complete=res["complete"], rows=len(detail), excel=res["path"] or "")
-        new, first_run = save_results(detail, summary, info)
+        if env("HK_CONSENSUS", "1") != "0":
+            # 증권사 목표주가 (한경컨센서스). 실패해도 DART 결과는 그대로 저장
+            write_status(eng, "running", {"stage": "목표주가 (한경컨센서스)"})
+            try:
+                import hk_consensus
+                info["hk_added"] = hk_consensus.sync(results_db(), debug_dir=data_dir(), log=print)
+            except Exception as e:
+                info["hk_error"] = str(e)[:300]
+                print(f"목표주가 수집 실패: {e}", flush=True)
+        new, first_run = save_results(detail, summary, info, getattr(eng, "prices", None))
         write_status(eng, "done", {"new": len(new), "complete": res["complete"]})
         if first_run:
             print(f"첫 실행: 기준선 저장 (공시 {len({d['접수번호'] for d in detail})}건). 다음부터 새 공시를 알립니다.")
@@ -386,6 +401,28 @@ def cmd_set_env(args):
     return 0
 
 
+def cmd_hk_check(args):
+    """한경컨센서스를 한 번 받아 보고 결과를 보여 줌 (설치 후 확인용)"""
+    import hk_consensus
+    try:
+        n = hk_consensus.sync(results_db(), debug_dir=data_dir(), log=print, first_days=args.days)
+    except Exception as e:
+        print(f"✖ {e}")
+        return 1
+    conn = sqlite3.connect(results_db())
+    total = conn.execute("SELECT COUNT(*), COUNT(target), COUNT(DISTINCT code) FROM hk_reports").fetchone()
+    print(f"✔ 저장된 리포트 {total[0]}건 (목표가 있는 것 {total[1]}건, 종목 {total[2]}개), 이번에 새로 {n}건")
+    q = "SELECT date, name, code, broker, target, opinion FROM hk_reports"
+    rows = conn.execute(q + (" WHERE code=?" if args.code else "") + " ORDER BY date DESC LIMIT 8",
+                        (args.code,) if args.code else ()).fetchall()
+    for r in rows:
+        print("  ", " | ".join(str(x) for x in r))
+    if args.code:
+        avg, n_b = hk_consensus.consensus(conn, args.code)
+        print(f"  → 증권사 {n_b}곳 목표가 평균 {avg:,.0f}원" if avg else "  → 최근 180일 목표가 없음")
+    return 0
+
+
 def cmd_web(args):
     from dart_web import serve
     # 수집을 시작할 때 .env를 새로 읽도록, .env에서 온 값은 빼고 넘김
@@ -415,12 +452,15 @@ def main(argv=None):
     sub.add_parser("net-check")
     sub.add_parser("notify-test")
     sub.add_parser("status")
+    hk = sub.add_parser("hk-check", help="한경컨센서스 목표주가 받아 보기")
+    hk.add_argument("code", nargs="?", default="", help="종목코드 (예: 005930)")
+    hk.add_argument("--days", type=int, default=180, help="처음 받을 기간(일)")
     se = sub.add_parser("set-env", help=".env 값 바꾸기 (값은 입력으로)")
     se.add_argument("key")
     se.add_argument("--if-empty", action="store_true", help="비어 있을 때만")
     a = p.parse_args(argv)
     return {"run": cmd_run, "web": cmd_web, "net-check": cmd_net_check, "notify-test": cmd_notify_test,
-            "status": cmd_status, "set-env": cmd_set_env}[a.cmd](a)
+            "status": cmd_status, "set-env": cmd_set_env, "hk-check": cmd_hk_check}[a.cmd](a)
 
 
 if __name__ == "__main__":

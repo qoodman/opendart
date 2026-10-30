@@ -571,6 +571,7 @@ class Engine:
             self.log("  ! 주가를 받지 못했습니다(네이버 증권 접속 불가). 제출일종가 칸은 비워 둡니다.")
         elif fails:
             self.log(f"  ! {fails}개 종목은 주가를 받지 못해 비워 둡니다.")
+        self.prices = got   # 서버 대시보드 그래프용 (종목코드 → {YYYYMMDD: 종가})
         for row in detail:
             p = got.get((row.get("종목코드") or "").strip())
             row["제출일종가"] = price_on(p, row["제출일"]) if p else None
