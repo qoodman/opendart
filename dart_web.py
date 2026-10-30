@@ -432,11 +432,11 @@ def summary_filter(conn, q):
 
 
 def filtered_excel(conn, q):
-    """지금 목록(검색·필터 적용)을 엑셀로. 보고서 제출일 오름차순."""
+    """지금 목록(검색·필터 적용)을 엑셀로. 보고서 제출일 내림차순(최신부터)."""
     import io
     from openpyxl import Workbook
     cols, text, who, f, sort, where, args = summary_filter(conn, q)
-    cur = conn.execute(f"SELECT * FROM summary {where} ORDER BY 제출일 ASC, 종목명, 변동일", args)
+    cur = conn.execute(f"SELECT * FROM summary {where} ORDER BY 제출일 DESC, 종목명, 변동일 DESC", args)
     names = [d[0] for d in cur.description]
     wb = Workbook()
     ws = wb.active
@@ -496,7 +496,7 @@ def view_home(conn, q, st, need_key=False, S=None):
     excel = ('<div class="filters" style="margin:0 0 10px">'
              f'<a class="chip" href="/excel?{urlencode({**keep, "list": 1})}">⬇ 지금 목록 엑셀 ({total:,}건)</a>'
              '<a class="chip" href="/excel">⬇ 전체 엑셀</a>'
-             '<span class="muted">제출일 오름차순</span></div>')
+             '<span class="muted">제출일 최신순</span></div>')
     info = f'<div class="muted" style="margin-top:6px">{total:,}건 중 {start + 1 if total else 0:,}–{min(start + PAGE_SIZE, total):,}</div>'
     return page("보고서 — DART 단순투자", box + form + chips + excel + cards + pager(total, pg, link) + info,
                 refresh=running)
