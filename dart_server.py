@@ -463,6 +463,55 @@ def run_market_policy(log=print):
     return out
 
 
+def cmd_run_reanalyze(args):
+    """다시 분석만: 받아 둔 목록·원문으로 분석과 결과만 새로 만듦 (DART 호출 없음, 하루 한도와 무관)"""
+    import glob
+    from dart_engine import Engine, summarize, Stopped
+    cfg = make_config()
+    with RunLock():
+        eng = Engine(cfg)
+        started = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        stop = threading.Event()
+
+        def beat():
+            while not stop.wait(5):
+                write_status(eng, "running")
+        threading.Thread(target=beat, daemon=True).start()
+        try:
+            lists = sorted(glob.glob(os.path.join(cfg.cache, "reports_*.json")), key=os.path.getmtime)
+            if not lists:
+                raise RuntimeError("받아 둔 공시 목록이 없습니다. 먼저 보고서 수집을 한 번 끝까지 돌려 주세요.")
+            with open(lists[-1], encoding="utf-8") as f:
+                reports = json.load(f)
+            eng._set_stage("1단계 목록 (저장된 것)")
+            try:
+                eng.add_stock_names(reports)
+            except Exception:
+                pass
+            eng._set_stage("3단계 분석")
+            detail = eng.analyze(reports)
+            if cfg.add_prices:
+                eng._set_stage("4단계 주가")
+                eng.add_prices(detail)
+            eng._set_stage("엑셀 저장")
+            eng.detail = detail
+            path = eng.save_excel(detail, True)
+            summary, _ = summarize(detail)
+            info = dict(started=started, start=cfg.start, end=cfg.end, calls=0, complete=True,
+                        rows=len(detail), excel=path or "", mode="다시 분석")
+            save_results(detail, summary, info, getattr(eng, "prices", None), getattr(eng, "opens", None))
+        except (Exception, Stopped) as e:
+            stop.set()
+            traceback.print_exc()
+            write_status(eng, "failed", {"error": f"다시 분석 실패: {e}"})
+            record_failure(started, f"다시 분석 실패: {e}")
+            return 1
+        stop.set()
+        write_status(eng, "done", {"stage": "다시 분석 완료"})
+        print(f"다시 분석 완료: 매매내역 {len(detail)}행 (DART 호출 0회)", flush=True)
+        return 0
+
+
 def cmd_run_market(args):
     """시장·정책만 받기"""
     from dart_engine import Engine
@@ -582,6 +631,8 @@ def cmd_run(args):
         return cmd_run_reports(args)
     if only == "market":
         return cmd_run_market(args)
+    if only == "reanalyze":
+        return cmd_run_reanalyze(args)
     from dart_engine import Engine, DartError, Stopped, summarize, HEARTBEAT
     cfg = make_config()
     started = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -971,7 +1022,7 @@ def main(argv=None):
     sub = p.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="수집·분석 한 번 실행")
     r.add_argument("--quiet", action="store_true", help="알림 보내지 않기")
-    r.add_argument("--only", choices=["all", "dart", "reports", "market"], default="all",
+    r.add_argument("--only", choices=["all", "dart", "reports", "market", "reanalyze"], default="all",
                    help="all: 전체, dart: DART 보고서만, reports: 증권사 리포트만, market: 시장·정책만")
     sub.add_parser("market-check", help="시장 지표·정책 소식을 받아 보고 결과 보기")
     pc = sub.add_parser("parse-check", help="한 공시의 표를 어떻게 읽었는지 보기")

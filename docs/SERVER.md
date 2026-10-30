@@ -110,11 +110,13 @@ LAW_OC, ASSEMBLY_API_KEY)를 그대로 씁니다. 이 앱 `.env`에 따로 넣�
 |---|---|
 | 결과 보기 | 폰 홈 화면의 파란 아이콘 (Tailscale 켜진 상태) |
 | 코드 업데이트 반영 | 대시보드 **설정 → 업데이트 → 지금 업데이트** (폰에서 가능). '매일 새벽 5시에 자동 업데이트'를 켜 두면 알아서 합니다. 서버에서 직접: `~/opendart/scripts/update_server.sh` |
-| 지금 바로 수집 | 대시보드 위쪽 **지금 수집 ▾** → 전체 / 보고서만(DART) / 리포트만. 서버에서: `.venv/bin/python dart_server.py run --only reports` |
+| 지금 바로 수집 | 대시보드 위쪽 **지금 수집 ▾** → 전체 / 보고서만(DART) / 리포트만 / 시장·정책만 / 다시 분석만(DART 호출 없이 받아 둔 원문을 다시 분석). 서버에서: `.venv/bin/python dart_server.py run --only reports` |
 | 수집 기록 보기 | 서버에서 `journalctl -u dart-tick -u dart-daily -n 50` |
 | 설정 바꾸기 | 대시보드 위쪽 **설정**: 조회 기간·검색어·자동 수집 시각·평일만·주가/목표주가·알림 기준·ntfy 주제·바로가기 링크·API 키 |
 
 ## 문제가 생기면
+
+- **평균단가가 이상함**: 설정 맨 아래 **분석 점검** → 예전 방식이 남았으면 **지금 수집 → 다시 분석만**, 그래도 이상한 공시는 눌러서 표를 캡처해 보내 주세요.
 
 - **대시보드가 안 열림**: 폰의 Tailscale이 켜져 있는지 확인합니다. 서버에서 `systemctl status dart-web tailscaled-dart`로 둘 다 active인지 봅니다.
 - **수집 실패 알림이 옴**: 서버에서 `journalctl -u dart-tick -u dart-daily -n 50`으로 이유를 봅니다. "호출 한도"면 다음 날 자동으로 이어서 받습니다.

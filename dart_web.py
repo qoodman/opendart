@@ -117,6 +117,7 @@ def run_widget():
             '<button name="what" value="dart">보고서만 <span class="muted">DART 공시</span></button>'
             '<button name="what" value="reports">리포트만 <span class="muted">몇 분이면 끝</span></button>'
             '<button name="what" value="market">시장·정책만 <span class="muted">1~2분</span></button>'
+            '<button name="what" value="reanalyze">다시 분석만 <span class="muted">DART 호출 없음</span></button>'
             '</form></details>')
 
 
@@ -333,7 +334,7 @@ def view_settings(get_key, q, S=None):
                 + '<button style="width:100%;padding:11px">설정 저장</button></form>'
                 + '<form method="post" action="/settings/notify-test" style="margin-top:10px">'
                   '<button class="ghost" style="width:100%">시험 알림 보내기</button></form>')
-    body += '<p><a href="/">← 보고서로</a></p>'
+    body += '<p><a href="/check">분석 점검 (평균단가가 이상할 때)</a> · <a href="/">← 보고서로</a></p>'
     return page("설정", body)
 
 
@@ -799,7 +800,7 @@ def view_parse(conn, rno):
         pc.close()
         if vers and max(vers) < de.PARSE_VERSION:
             note = ('<div class="card warn">이 공시는 아직 예전 방식으로 분석된 값이 화면에 쓰이고 있습니다. '
-                    '위쪽 <b>지금 수집 → 보고서만</b>을 한 번 돌리면 새 방식으로 다시 분석합니다.</div>')
+                    '위쪽 <b>지금 수집 → 다시 분석만</b>을 누르면 DART 호출 없이 새 방식으로 다시 분석합니다.</div>')
     except sqlite3.Error:
         pass
     stored = conn.execute("SELECT 변동일, 증감, 단가, 방법 FROM detail WHERE 접수번호=?", (rno,)).fetchall() \
@@ -828,6 +829,44 @@ def view_parse(conn, rno):
             + (f'<h2>화면에 쓰이는 값 (마지막 수집 기준)</h2><div class="scroll"><table><tr><th>변동일</th><th>방법</th>'
                f'<th>증감</th><th>단가</th></tr>{saved}</table></div>' if saved else ""))
     return page("표 확인", body)
+
+
+def view_check(conn, st):
+    """분석 점검: 마지막 수집, 분석 형식 버전별 공시 수, 수량=단가인 줄이 있는 공시"""
+    import dart_engine as de
+    out = []
+    if has_table(conn, "runs"):
+        r = conn.execute("SELECT started, finished, ok, info FROM runs ORDER BY rowid DESC LIMIT 1").fetchone()
+        if r:
+            info = json.loads(r["info"] or "{}")
+            out.append(f'<div class="card"><b>마지막 보고서 수집</b><div>{escape(r["started"])} 시작 → {escape(r["finished"])} '
+                       f'{"끝남" if r["ok"] else "실패"}</div><div class="muted">{escape(info.get("error", ""))}</div></div>')
+    if st.get("state") == "running":
+        out.append(f'<div class="card warn">지금 수집 중: {escape(st.get("stage", ""))} {st.get("done", 0)}/{st.get("total", 0)}</div>')
+    cache = os.path.join(_DATA_DIR["path"] or ".", "dart_cache")
+    try:
+        pc = sqlite3.connect(os.path.join(cache, "parsed.sqlite"))
+        vers = pc.execute("SELECT ver, COUNT(*) FROM parsed GROUP BY ver ORDER BY ver").fetchall()
+        pc.close()
+        rows = "".join(f'<tr><td>{v}{" (지금 방식)" if v == de.PARSE_VERSION else " (예전)"}</td><td>{n:,}</td></tr>' for v, n in vers)
+        old = sum(n for v, n in vers if v < de.PARSE_VERSION)
+        out.append(f'<div class="card"><b>분석 형식별 공시 수</b><table>{rows}</table>'
+                   + (f'<div class="warn">예전 방식 {old:,}건이 남아 있습니다. 위쪽 <b>지금 수집 → 다시 분석만</b>을 '
+                      '누르면 DART 호출 없이 다시 분석해서 화면 값이 바뀝니다.</div>' if old else
+                      '<div class="muted">모두 지금 방식으로 분석됐습니다.</div>') + '</div>')
+    except sqlite3.Error as e:
+        out.append(f'<div class="card muted">분석 기록을 읽지 못했습니다: {escape(str(e))}</div>')
+    if has_table(conn, "detail"):
+        bad = conn.execute("SELECT 접수번호, MAX(종목명) n, MAX(제출인) w, COUNT(*) c FROM detail "
+                           "WHERE 단가 IS NOT NULL AND 증감 IS NOT NULL AND ABS(단가)=ABS(증감) AND 증감!=0 "
+                           "GROUP BY 접수번호 ORDER BY c DESC LIMIT 15").fetchall()
+        total = conn.execute("SELECT COUNT(*) FROM detail WHERE 단가 IS NOT NULL AND ABS(단가)=ABS(증감) AND 증감!=0").fetchone()[0]
+        items = "".join(f'<li><a href="/parse?r={quote(str(b["접수번호"]))}">{escape(str(b["n"]))} · {escape(str(b["w"]))}</a> '
+                        f'<span class="muted">{b["c"]}줄</span></li>' for b in bad)
+        out.append(f'<div class="card"><b>수량과 단가가 같은 줄 (화면에 쓰이는 값)</b><div>{total:,}줄</div>'
+                   + (f'<ul style="padding-left:18px;margin:6px 0">{items}</ul><div class="muted">누르면 그 공시의 표를 볼 수 있습니다. '
+                      '하나를 캡처해서 보내 주세요.</div>' if bad else '<div class="muted">없습니다.</div>') + '</div>')
+    return page("분석 점검", "".join(out))
 
 
 # ---------------- 시장 ----------------
@@ -1092,6 +1131,8 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     body = view_home(conn, q, st, need_key=bool(get_key) and not get_key(), S=S)
                 elif url.path == "/settings":
                     body = view_settings(get_key, q, S)
+                elif url.path == "/check":
+                    body = view_check(conn, st)
                 elif url.path == "/parse":
                     body = view_parse(conn, q.get("r", ""))
                 elif url.path == "/market":
@@ -1121,7 +1162,7 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
             running = st.get("state") == "running" and time.time() - st.get("updated", 0) < 120
             if running or not run_cmd:
                 return False
-            what = what if what in ("all", "dart", "reports", "market") else "all"
+            what = what if what in ("all", "dart", "reports", "market", "reanalyze") else "all"
             subprocess.Popen(run_cmd + ["--only", what], start_new_session=True, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, close_fds=True, env=child_env)
             time.sleep(1.5)   # 상태 파일이 생길 시간
