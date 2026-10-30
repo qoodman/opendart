@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 from dart_charts import CHART_CSS, CHART_JS, bar_list, price_chart, sparkline
-from hk_consensus import consensus
+from research import consensus
 
 PAGE_SIZE = 60
 
@@ -101,7 +101,7 @@ def page(title, body, refresh=False, charts=False):
 <link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#2b5a9e">
 <link rel="icon" href="/icon-192.png"><link rel="apple-touch-icon" href="/icon-192.png">
 </head><body>
-<header><b>DART 단순투자</b><nav><a href="/">요약</a><a href="/ideas">아이디어</a><a href="/new">새 공시</a>
+<header><b>DART 단순투자</b><nav><a href="/">요약</a><a href="/ideas">아이디어</a><a href="/reports">리포트</a><a href="/new">새 공시</a>
 <a href="/excel">엑셀</a><a href="/settings">설정</a>{extra}</nav>
 </header><main>{body}</main>{"<script>" + CHART_JS + "</script>" if charts else ""}</body></html>""".encode()
 
@@ -469,27 +469,120 @@ def upside(target, close):
     return f'<span class="{"up" if u > 0 else "down"}">상승여력 {u:+.1%}</span>'
 
 
-def title_link(r):
-    t = escape((r["title"] or "")[:40])
-    return f'<a href="{escape(r["pdf"])}">{t}</a>' if r["pdf"] else t
+def title_link(r, n=40):
+    t = escape((r["title"] or "")[:n])
+    href = r["pdf"] or (r["url"] if "url" in r.keys() else "")
+    return f'<a href="{escape(href)}">{t}</a>' if href else t
+
+
+SRC_CHIP = {"hk": "한경", "nv": "네이버"}
 
 
 def view_reports(conn, code, tgt, n_br, close):
     """종목 화면의 '증권사 목표주가' 부분"""
-    if not has_table(conn, "hk_reports"):
+    if not has_table(conn, "reports"):
         return ""
-    rows = conn.execute("SELECT * FROM hk_reports WHERE code=? ORDER BY date DESC LIMIT 20", (code,)).fetchall()
+    rows = conn.execute("SELECT * FROM reports WHERE code=? ORDER BY date DESC LIMIT 20", (code,)).fetchall()
     if not rows:
-        return '<h2>증권사 목표주가</h2><p class="muted">최근 한경컨센서스 리포트가 없습니다.</p>'
+        return '<h2>증권사 목표주가</h2><p class="muted">최근 증권사 리포트가 없습니다.</p>'
     head = (f'<p>최근 6개월 증권사별 마지막 목표가의 평균 <b>{won(tgt)}원</b> ({n_br}곳) {upside(tgt, close)}</p>'
             if tgt else "")
     trs = "".join(
         f'<tr><td>{escape(r["date"])}</td><td>{escape(r["broker"] or "")}</td>'
         f'<td>{won(r["target"]) if r["target"] else "-"}</td><td>{escape(r["opinion"] or "")}</td>'
-        f'<td>{title_link(r)}</td></tr>' for r in rows)
-    return (f'<h2>증권사 목표주가 <span class="muted">한경컨센서스</span></h2>{head}'
+        f'<td>{title_link(r)} <span class="muted">{SRC_CHIP.get(r["source"], "")}</span></td></tr>' for r in rows)
+    return (f'<h2>증권사 목표주가</h2>{head}'
             f'<div class="scroll"><table><tr><th>날짜</th><th>증권사</th><th>목표가</th><th>의견</th><th>제목</th></tr>'
-            f'{trs}</table></div>')
+            f'{trs}</table></div><p><a href="/reports?q={quote(code)}&d=180">이 종목 리포트 모두 보기 →</a></p>')
+
+
+REPORT_PERIODS = {"7": "최근 1주", "30": "최근 1달", "90": "최근 3달", "180": "최근 6달"}
+REPORT_SRC = {"": "출처 전체", "hk": "한경컨센서스", "nv": "네이버 증권"}
+REPORT_ONLY = {"": "모든 종목", "dart": "기관 단순투자 종목만"}
+REPORT_SORTS = {"date": ("최신순", "date DESC, rowid DESC"), "upside": ("상승여력 큰 순", None),
+                "target": ("목표가 있는 것만 · 최신순", "date DESC, rowid DESC")}
+
+
+def view_report_list(conn, q):
+    if not has_table(conn, "reports"):
+        return page("리포트", '<p class="muted">다음 수집이 끝나면 증권사 리포트가 여기에 모입니다.</p>')
+    text, broker = q.get("q", "").strip(), q.get("b", "").strip()
+    d = q.get("d") if q.get("d") in REPORT_PERIODS else "30"
+    src = q.get("src") if q.get("src") in REPORT_SRC else ""
+    only = q.get("only") if q.get("only") in REPORT_ONLY else ""
+    sort = q.get("sort") if q.get("sort") in REPORT_SORTS else "date"
+    pg = int(q["p"]) if str(q.get("p", "")).isdigit() and int(q["p"]) > 0 else 1
+    conds = ["date >= ?"]
+    args = [(dt.date.today() - dt.timedelta(days=int(d))).isoformat()]
+    if text:
+        conds.append("(name LIKE ? OR code LIKE ? OR title LIKE ?)")
+        args += [f"%{text}%"] * 3
+    if broker:
+        conds.append("broker LIKE ?")
+        args.append(f"%{broker}%")
+    if src:
+        conds.append("source = ?")
+        args.append(src)
+    dart_codes = set()
+    if has_table(conn, "summary"):
+        dart_codes = {r[0] for r in conn.execute("SELECT DISTINCT 종목코드 FROM summary")}
+    if only == "dart":
+        conds.append("code IN (SELECT DISTINCT 종목코드 FROM summary)" if dart_codes else "0")
+    if sort in ("target", "upside"):
+        conds.append("target IS NOT NULL")
+    where = " AND ".join(conds)
+    closes = latest_closes(conn) if has_table(conn, "prices") else {}
+    if sort == "upside":
+        rows = conn.execute(f"SELECT * FROM reports WHERE {where}", args).fetchall()
+        rows = [r for r in rows if r["code"] in closes]
+        rows.sort(key=lambda r: -(r["target"] / closes[r["code"]][1]))
+        total = len(rows)
+        pages = max((total + PAGE_SIZE - 1) // PAGE_SIZE, 1)
+        pg = min(pg, pages)
+        rows = rows[(pg - 1) * PAGE_SIZE: pg * PAGE_SIZE]
+    else:
+        total = conn.execute(f"SELECT COUNT(*) FROM reports WHERE {where}", args).fetchone()[0]
+        pages = max((total + PAGE_SIZE - 1) // PAGE_SIZE, 1)
+        pg = min(pg, pages)
+        rows = conn.execute(f"SELECT * FROM reports WHERE {where} ORDER BY {REPORT_SORTS[sort][1]} LIMIT ? OFFSET ?",
+                            args + [PAGE_SIZE, (pg - 1) * PAGE_SIZE]).fetchall()
+
+    active = [x for x in (REPORT_SRC[src] if src else "", REPORT_ONLY[only] if only else "",
+                          f"증권사: {broker}" if broker else "") if x]
+    form = (f'<form method="get"><div class="filters"><input type="search" name="q" value="{escape(text)}" '
+            f'placeholder="종목명·종목코드·제목"><button>보기</button></div>'
+            f'<details{" open" if active or sort != "date" else ""}><summary>필터·정렬</summary>'
+            f'<div class="filters" style="margin-top:8px">{select("d", REPORT_PERIODS, d)}{select("src", REPORT_SRC, src)}'
+            f'{select("only", REPORT_ONLY, only)}'
+            f'<input type="search" name="b" value="{escape(broker)}" placeholder="증권사 (예: 키움)">'
+            f'{select("sort", {k: v[0] for k, v in REPORT_SORTS.items()}, sort)}<button>적용</button></div></details></form>')
+    chips = ('<div style="margin:4px 0 10px">' + "".join(f'<span class="chip">{escape(a)}</span>' for a in active)
+             + f'<span class="muted">{REPORT_PERIODS[d]} · {total:,}건</span>'
+             + (' · <a href="/reports">초기화</a>' if active or text else "") + "</div>")
+    start = (pg - 1) * PAGE_SIZE
+    cards = []
+    for i, r in enumerate(rows, start + 1):
+        in_dart = r["code"] in dart_codes
+        stock_href = f'/stock?code={quote(r["code"])}' if in_dart else naver_link(r["code"])
+        close = closes.get(r["code"], (None, None))[1]
+        tgt = (f'목표가 <b>{won(r["target"])}원</b> {upside(r["target"], close)}' if r["target"]
+               else '<span class="muted">목표가 없음</span>')
+        cards.append(
+            f'<div class="card"><div class="row"><div><span class="num">{i}</span>'
+            f'<a class="big" href="{stock_href}">{escape(r["name"] or r["code"])}</a> '
+            f'<span class="muted">{escape(r["code"])}</span>'
+            + (' <span class="chip">기관 단순투자</span>' if in_dart else "")
+            + f'</div><div class="muted">{escape(r["date"])}</div></div>'
+            f'<div>{title_link(r, 60)}</div>'
+            f'<div class="muted">{escape(r["broker"] or "")}{" · " + escape(r["author"]) if r["author"] else ""}'
+            f' · <span class="chip">{SRC_CHIP.get(r["source"], "")}</span></div>'
+            f'<div>{tgt}{" · " + escape(r["opinion"]) if r["opinion"] else ""}</div></div>')
+    keep = {k: v for k, v in {"q": text, "b": broker, "d": d if d != "30" else "", "src": src, "only": only,
+                              "sort": sort if sort != "date" else ""}.items() if v}
+    link = lambda n: "/reports?" + urlencode({**keep, "p": n})   # noqa: E731
+    body = (form + chips + ("".join(cards) or '<p class="muted">조건에 맞는 리포트가 없습니다.</p>')
+            + pager(total, pg, link))
+    return page("리포트", body)
 
 
 # ---------------- 아이디어 ----------------
@@ -639,6 +732,8 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     body = view_home(conn, q, st, need_key=bool(get_key) and not get_key())
                 elif url.path == "/settings":
                     body = view_settings(get_key, q, S)
+                elif url.path == "/reports":
+                    body = view_report_list(conn, q)
                 elif url.path == "/ideas":
                     body = view_ideas(conn, q)
                 elif url.path == "/new":

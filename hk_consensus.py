@@ -109,24 +109,18 @@ def fetch_page(session, sdate, edate, page):
     return decode(r.content)
 
 
-def ensure_table(conn):
-    conn.execute("""CREATE TABLE IF NOT EXISTS hk_reports (
-        date TEXT, code TEXT, name TEXT, title TEXT, target INTEGER, opinion TEXT,
-        author TEXT, broker TEXT, pdf TEXT, PRIMARY KEY (date, code, broker, title))""")
-    conn.execute("CREATE INDEX IF NOT EXISTS ix_hk_code ON hk_reports(code, date)")
-
-
 def sync(db_path, debug_dir=None, first_days=180, log=print, stop=None, session=None):
-    """새 리포트를 받아 hk_reports 표에 저장. 새로 저장한 건수를 돌려줌."""
+    """새 리포트를 받아 reports 표(출처 hk)에 저장. 새로 저장한 건수를 돌려줌."""
+    import research
     session = session or requests.Session()
     conn = sqlite3.connect(db_path)
     try:
-        ensure_table(conn)
-        last = conn.execute("SELECT MAX(date) FROM hk_reports").fetchone()[0]
+        research.ensure_table(conn)
+        last = research.last_date(conn, "hk")
         today = dt.date.today()
         since = (dt.date.fromisoformat(last) - dt.timedelta(days=3)) if last else today - dt.timedelta(days=first_days)
         sdate, edate = since.isoformat(), today.isoformat()
-        log(f"[목표주가] 한경컨센서스 {sdate}~{edate} 기업 리포트 받는 중")
+        log(f"[리포트] 한경컨센서스 {sdate}~{edate} 기업 리포트 받는 중")
         added, page, prev_first = 0, 1, None
         while page <= 400:
             if stop is not None and stop.is_set():
@@ -144,34 +138,17 @@ def sync(db_path, debug_dir=None, first_days=180, log=print, stop=None, session=
             if key == prev_first:    # 마지막 쪽을 넘어서 같은 쪽이 반복됨
                 break
             prev_first = key
-            before = conn.total_changes
-            conn.executemany("INSERT OR IGNORE INTO hk_reports VALUES (?,?,?,?,?,?,?,?,?)",
-                             [(r["date"], r["code"], r["name"], r["title"], r["target"], r["opinion"],
-                               r["author"], r["broker"], r["pdf"]) for r in rows])
-            conn.commit()
-            added += conn.total_changes - before
+            added += research.store(conn, "hk", rows)
             if min(r["date"] for r in rows) < sdate:
                 break
             page += 1
             time.sleep(1.0)
-        log(f"[목표주가] 새 리포트 {added}건 ({page}쪽)")
+        log(f"[리포트] 한경컨센서스 새 리포트 {added}건 ({page}쪽)")
         return added
     finally:
         conn.close()
 
 
 def consensus(conn, code, days=180):
-    """증권사별 가장 최근 목표가(최근 days일)의 평균. (평균, 증권사 수) 또는 (None, 0)"""
-    try:
-        since = (dt.date.today() - dt.timedelta(days=days)).isoformat()
-        rows = conn.execute(
-            "SELECT broker, target FROM hk_reports WHERE code=? AND date>=? AND target IS NOT NULL "
-            "ORDER BY date DESC", (code, since)).fetchall()
-    except sqlite3.OperationalError:
-        return None, 0
-    latest = {}
-    for broker, target in rows:
-        latest.setdefault(broker or "?", target)
-    if not latest:
-        return None, 0
-    return sum(latest.values()) / len(latest), len(latest)
+    import research
+    return research.consensus(conn, code, days)

@@ -118,7 +118,9 @@ SETTINGS_SPEC = [
     ("수집", "DART_RUN_TIMES", "자동 수집 시각", "times", "20:13", "24시간 형식. 여러 번이면 쉼표로: 08:30, 20:13"),
     ("수집", "DART_WEEKDAYS_ONLY", "평일에만 자동 수집", "bool", "0", ""),
     ("수집", "DART_PRICES", "주가 받기 (네이버 증권)", "bool", "1", "제출일 종가·최근 종가·그래프에 필요합니다."),
-    ("수집", "HK_CONSENSUS", "증권사 목표주가 받기 (한경컨센서스)", "bool", "1", ""),
+    ("수집", "HK_CONSENSUS", "증권사 리포트 받기: 한경컨센서스", "bool", "1", "목록에 목표가가 바로 나옵니다."),
+    ("수집", "NAVER_RESEARCH", "증권사 리포트 받기: 네이버 증권", "bool", "1",
+     "목표가·투자의견은 리포트마다 상세 화면에서 읽습니다(하루 최대 400건)."),
     ("알림", "DART_NOTIFY", "새 공시 알림 보내기", "bool", "1", ""),
     ("알림", "NTFY_TOPIC", "ntfy 주제", "text?", "", "폰 ntfy 앱에서 구독한 주제 이름. 부동산 앱과 같게 두면 한 곳에서 받습니다."),
     ("알림", "DART_NOTIFY_MIN_AMOUNT", "알림 기준", "choice", "0", "이보다 작은 매수만 있는 공시는 알리지 않습니다."),
@@ -461,15 +463,17 @@ def cmd_run(args):
         summary, _ = summarize(detail)
         info = dict(started=started, start=cfg.start, end=cfg.end, calls=res["calls"],
                     complete=res["complete"], rows=len(detail), excel=res["path"] or "")
-        if env("HK_CONSENSUS", "1") != "0":
-            # 증권사 목표주가 (한경컨센서스). 실패해도 DART 결과는 그대로 저장
-            write_status(eng, "running", {"stage": "목표주가 (한경컨센서스)"})
+        use_hk, use_nv = env("HK_CONSENSUS", "1") != "0", env("NAVER_RESEARCH", "1") != "0"
+        if use_hk or use_nv:
+            # 증권사 리포트·목표주가. 실패해도 DART 결과는 그대로 저장
+            write_status(eng, "running", {"stage": "증권사 리포트"})
             try:
-                import hk_consensus
-                info["hk_added"] = hk_consensus.sync(results_db(), debug_dir=data_dir(), log=print)
+                import research
+                info["reports"] = research.sync_all(results_db(), debug_dir=data_dir(), log=print,
+                                                    use_hk=use_hk, use_nv=use_nv)
             except Exception as e:
-                info["hk_error"] = str(e)[:300]
-                print(f"목표주가 수집 실패: {e}", flush=True)
+                info["reports"] = {"error": str(e)[:300]}
+                print(f"리포트 수집 실패: {e}", flush=True)
         new, first_run = save_results(detail, summary, info, getattr(eng, "prices", None))
         write_status(eng, "done", {"new": len(new), "complete": res["complete"]})
         if first_run:
@@ -597,25 +601,31 @@ def cmd_set_env(args):
 
 
 def cmd_hk_check(args):
-    """한경컨센서스를 한 번 받아 보고 결과를 보여 줌 (설치 후 확인용)"""
-    import hk_consensus
-    try:
-        n = hk_consensus.sync(results_db(), debug_dir=data_dir(), log=print, first_days=args.days)
-    except Exception as e:
-        print(f"✖ {e}")
-        return 1
+    """리포트(한경컨센서스·네이버 증권)를 한 번 받아 보고 결과를 보여 줌 (설치 후 확인용)"""
+    import research
+    res = research.sync_all(results_db(), debug_dir=data_dir(), log=print, first_days=args.days or None,
+                            use_hk=args.source in ("all", "hk"), use_nv=args.source in ("all", "nv"))
     conn = sqlite3.connect(results_db())
-    total = conn.execute("SELECT COUNT(*), COUNT(target), COUNT(DISTINCT code) FROM hk_reports").fetchone()
-    print(f"✔ 저장된 리포트 {total[0]}건 (목표가 있는 것 {total[1]}건, 종목 {total[2]}개), 이번에 새로 {n}건")
-    q = "SELECT date, name, code, broker, target, opinion FROM hk_reports"
-    rows = conn.execute(q + (" WHERE code=?" if args.code else "") + " ORDER BY date DESC LIMIT 8",
+    bad = 0
+    for src, label in research.SOURCES.items():
+        if src not in res:
+            continue
+        cnt = conn.execute("SELECT COUNT(*), COUNT(target), COUNT(DISTINCT code) FROM reports WHERE source=?",
+                           (src,)).fetchone()
+        if isinstance(res[src], str):
+            bad += 1
+            print(f"✖ {label}: {res[src]}")
+        else:
+            print(f"✔ {label}: 저장된 리포트 {cnt[0]}건 (목표가 있는 것 {cnt[1]}건, 종목 {cnt[2]}개), 이번에 새로 {res[src]}건")
+    q = "SELECT source, date, name, code, broker, target, opinion FROM reports"
+    rows = conn.execute(q + (" WHERE code=?" if args.code else "") + " ORDER BY date DESC LIMIT 10",
                         (args.code,) if args.code else ()).fetchall()
     for r in rows:
         print("  ", " | ".join(str(x) for x in r))
     if args.code:
-        avg, n_b = hk_consensus.consensus(conn, args.code)
+        avg, n_b = research.consensus(conn, args.code)
         print(f"  → 증권사 {n_b}곳 목표가 평균 {avg:,.0f}원" if avg else "  → 최근 180일 목표가 없음")
-    return 0
+    return 1 if bad else 0
 
 
 def cmd_web(args):
@@ -655,15 +665,18 @@ def main(argv=None):
     sub.add_parser("net-check")
     sub.add_parser("notify-test")
     sub.add_parser("status")
-    hk = sub.add_parser("hk-check", help="한경컨센서스 목표주가 받아 보기")
-    hk.add_argument("code", nargs="?", default="", help="종목코드 (예: 005930)")
-    hk.add_argument("--days", type=int, default=180, help="처음 받을 기간(일)")
+    for name in ("reports-check", "hk-check"):
+        hk = sub.add_parser(name, help="증권사 리포트(한경컨센서스·네이버 증권) 받아 보기")
+        hk.add_argument("code", nargs="?", default="", help="종목코드 (예: 005930)")
+        hk.add_argument("--days", type=int, default=0, help="처음 받을 기간(일). 기본: 한경 180, 네이버 30")
+        hk.add_argument("--source", choices=["all", "hk", "nv"], default="all")
     se = sub.add_parser("set-env", help=".env 값 바꾸기 (값은 입력으로)")
     se.add_argument("key")
     se.add_argument("--if-empty", action="store_true", help="비어 있을 때만")
     a = p.parse_args(argv)
     return {"run": cmd_run, "web": cmd_web, "net-check": cmd_net_check, "notify-test": cmd_notify_test,
-            "status": cmd_status, "set-env": cmd_set_env, "hk-check": cmd_hk_check, "tick": cmd_tick}[a.cmd](a)
+            "status": cmd_status, "set-env": cmd_set_env, "hk-check": cmd_hk_check, "reports-check": cmd_hk_check,
+            "tick": cmd_tick}[a.cmd](a)
 
 
 if __name__ == "__main__":
