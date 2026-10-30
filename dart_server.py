@@ -75,6 +75,14 @@ def check_dart_key(key):
             }.get(st, (None, f"DART 응답 상태 {st}"))
 
 
+def env_shared(key):
+    """이 앱 .env에 없으면 같은 서버 부동산 앱(~/realestate/.env)의 값 (ECOS·공공데이터 등 공용 키)"""
+    v = env(key)
+    if v:
+        return v
+    return read_env_file(Path.home() / "realestate" / ".env").get(key, "")
+
+
 def env(key, default=""):
     v = os.environ.get(key, "").strip()
     return v if v else default
@@ -125,6 +133,11 @@ SETTINGS_SPEC = [
     ("알림", "NTFY_TOPIC", "ntfy 주제", "text?", "", "폰 ntfy 앱에서 구독한 주제 이름. 부동산 앱과 같게 두면 한 곳에서 받습니다."),
     ("알림", "DART_NOTIFY_MIN_AMOUNT", "알림 기준", "choice", "0", "이보다 작은 매수만 있는 공시는 알리지 않습니다."),
     ("알림", "DART_NOTIFY_EX_NPS", "국민연금 공시는 알리지 않기", "bool", "0", ""),
+    ("시장·정책", "DART_MARKET", "시장 지표 받기 (지수·금리·환율·통화량)", "bool", "1",
+     "금리·환율·통화량은 한국은행 ECOS 키가 필요합니다. 이 앱 .env에 없으면 부동산 앱 키를 씁니다."),
+    ("시장·정책", "DART_POLICY", "주식 정책 소식 받기 (보도자료·법령·국회 법안)", "bool", "1",
+     "공공데이터포털·법제처·열린국회정보 키를 부동산 앱과 같이 씁니다."),
+    ("시장·정책", "DART_POLICY_NOTIFY", "새 정책 소식 알림 보내기", "bool", "1", "첫 수집은 기준선이라 알림이 없습니다."),
     ("업데이트", "DART_AUTO_UPDATE", "매일 새벽 5시에 자동 업데이트", "bool", "0",
      "GitHub에 새 버전이 있으면 받아서 설치합니다. 수집 중이면 다음 날로 미룹니다."),
     ("화면", "DASHBOARD_URL", "이 대시보드 주소", "url", "", "알림을 눌렀을 때 열 주소. 예: https://dart.xxxx.ts.net"),
@@ -414,6 +427,61 @@ def record_reports(result):
         pass
 
 
+def run_market_policy(log=print):
+    """시장 지표와 정책 소식 받기 (켜진 것만). 새 정책 소식이 있으면 알림."""
+    out = {}
+    if env("DART_MARKET", "1") != "0":
+        try:
+            import stock_market
+            out["market"] = stock_market.sync(results_db(), ecos_key=env_shared("ECOS_API_KEY"), log=log)
+        except Exception as e:
+            out["market"] = f"실패: {e}"
+            log(f"시장 지표 실패: {e}")
+    if env("DART_POLICY", "1") != "0":
+        try:
+            import stock_policy
+            started = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+            st = stock_policy.sync(results_db(), press_key=env_shared("DATA_GO_KR_KEY"),
+                                   law_oc=env_shared("LAW_OC"), assembly_key=env_shared("ASSEMBLY_API_KEY"), log=log)
+            out["policy"] = {k: v for k, v in st.items() if k != "오류"} | {"오류": len(st["오류"])}
+            if not st.get("첫 수집") and env("DART_POLICY_NOTIFY", "1") != "0":
+                conn = sqlite3.connect(results_db())
+                conn.row_factory = sqlite3.Row
+                items = stock_policy.new_items(conn, started)
+                conn.close()
+                if items:
+                    lines = [f"[{', '.join(json.loads(i['topics'] or '[]')[:2])}] {i['title'][:60]}" for i in items[:8]]
+                    url = env("DASHBOARD_URL")
+                    try:
+                        notify(f"주식 정책 소식 {len(items)}건", "\n".join(lines) + (f"\n…외 {len(items) - 8}건" if len(items) > 8 else ""),
+                               click=(url.rstrip("/") + "/policy") if url else "", tags=("scroll",))
+                    except Exception as e:
+                        log(f"정책 알림 실패: {e}")
+        except Exception as e:
+            out["policy"] = f"실패: {e}"
+            log(f"정책 소식 실패: {e}")
+    return out
+
+
+def cmd_run_market(args):
+    """시장·정책만 받기"""
+    from dart_engine import Engine
+    cfg = make_config()
+    with RunLock():
+        os.makedirs(cfg.cache, exist_ok=True)
+        eng = Engine(cfg)
+        eng._set_stage("시장·정책")
+        write_status(eng, "running")
+        try:
+            res = run_market_policy()
+        except Exception as e:
+            write_status(eng, "failed", {"error": f"시장·정책 수집 실패: {e}"})
+            return 1
+        write_status(eng, "done", {"stage": "시장·정책 완료"})
+        print(f"시장·정책 완료: {res}", flush=True)
+        return 0
+
+
 def cmd_run_reports(args):
     """리포트만 수집: 한경컨센서스·네이버 리포트 + 리포트 종목 주가 (DART 공시는 건드리지 않음)"""
     from dart_engine import Engine
@@ -512,6 +580,8 @@ def cmd_run(args):
     only = getattr(args, "only", None) or "all"
     if only == "reports":
         return cmd_run_reports(args)
+    if only == "market":
+        return cmd_run_market(args)
     from dart_engine import Engine, DartError, Stopped, summarize, HEARTBEAT
     cfg = make_config()
     started = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -572,6 +642,9 @@ def cmd_run(args):
             except Exception as e:
                 info["reports"] = {"error": str(e)[:300]}
                 print(f"리포트 수집 실패: {e}", flush=True)
+        if only == "all":
+            write_status(eng, "running", {"stage": "시장·정책"})
+            info["market_policy"] = run_market_policy()
         prices = getattr(eng, "prices", None)
         if prices is not None and (use_hk or use_nv):
             write_status(eng, "running", {"stage": "리포트 종목 주가"})
@@ -822,6 +895,28 @@ def cmd_hk_check(args):
     return 1 if bad else 0
 
 
+def cmd_market_check(args):
+    import stock_market
+    keys = {k: bool(env_shared(k)) for k in ("ECOS_API_KEY", "DATA_GO_KR_KEY", "LAW_OC", "ASSEMBLY_API_KEY")}
+    print("키:", ", ".join(f"{k} {'있음' if v else '없음'}" for k, v in keys.items()))
+    res = run_market_policy()
+    conn = sqlite3.connect(results_db())
+    inds = stock_market.indicators(conn)
+    for i in inds:
+        sig = {1: "+1", 0: " 0", -1: "-1"}[i.signal]
+        print(f"  [{sig}] {i.label}: {i.value_text} {i.change_text} — {i.reason or i.note}")
+    name, score, n = stock_market.regime(inds)
+    print(f"→ 시장 국면: {name} (점수 {score:+d}, 지표 {n}개)")
+    try:
+        rows = conn.execute("SELECT kind, date, title FROM policy_items WHERE key!='_meta' ORDER BY date DESC LIMIT 8").fetchall()
+        for r in rows:
+            print("  ", " | ".join(str(x) for x in r))
+    except sqlite3.OperationalError:
+        pass
+    print(res.get("policy"))
+    return 0
+
+
 def cmd_web(args):
     from dart_web import serve
     # 수집을 시작할 때 .env를 새로 읽도록, .env에서 온 값은 빼고 넘김
@@ -853,8 +948,9 @@ def main(argv=None):
     sub = p.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="수집·분석 한 번 실행")
     r.add_argument("--quiet", action="store_true", help="알림 보내지 않기")
-    r.add_argument("--only", choices=["all", "dart", "reports"], default="all",
-                   help="all: 보고서+리포트, dart: DART 보고서만, reports: 증권사 리포트만")
+    r.add_argument("--only", choices=["all", "dart", "reports", "market"], default="all",
+                   help="all: 전체, dart: DART 보고서만, reports: 증권사 리포트만, market: 시장·정책만")
+    sub.add_parser("market-check", help="시장 지표·정책 소식을 받아 보고 결과 보기")
     w = sub.add_parser("web", help="대시보드")
     w.add_argument("--host", default=env("DART_WEB_HOST", "127.0.0.1"))
     w.add_argument("--port", type=int, default=int(env("DART_WEB_PORT", "8766")))
@@ -873,7 +969,7 @@ def main(argv=None):
     se.add_argument("--if-empty", action="store_true", help="비어 있을 때만")
     a = p.parse_args(argv)
     return {"run": cmd_run, "web": cmd_web, "net-check": cmd_net_check, "notify-test": cmd_notify_test,
-            "status": cmd_status, "set-env": cmd_set_env, "hk-check": cmd_hk_check, "reports-check": cmd_hk_check,
+            "status": cmd_status, "set-env": cmd_set_env, "hk-check": cmd_hk_check, "reports-check": cmd_hk_check, "market-check": cmd_market_check,
             "tick": cmd_tick, "update": cmd_update}[a.cmd](a)
 
 

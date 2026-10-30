@@ -25,7 +25,7 @@ CSS = """
 font:15px/1.5 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR",sans-serif}
 a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 header{padding:12px 16px;border-bottom:1px solid var(--line);display:flex;gap:14px;
-align-items:center;flex-wrap:wrap}header b{font-size:17px}header nav a{margin-right:12px}
+align-items:center;flex-wrap:wrap}header b{font-size:17px}header nav a{margin-right:12px;white-space:nowrap;display:inline-block}
 .hrow{display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%}
 .runmenu{position:relative}.runmenu summary{list-style:none}.runmenu summary::-webkit-details-marker{display:none}
 .runmenu .menu{position:absolute;right:0;top:calc(100% + 6px);z-index:5;background:var(--card);border:1px solid var(--line);
@@ -116,6 +116,7 @@ def run_widget():
             '<button name="what" value="all">전체 <span class="muted">보고서 + 리포트</span></button>'
             '<button name="what" value="dart">보고서만 <span class="muted">DART 공시</span></button>'
             '<button name="what" value="reports">리포트만 <span class="muted">몇 분이면 끝</span></button>'
+            '<button name="what" value="market">시장·정책만 <span class="muted">1~2분</span></button>'
             '</form></details>')
 
 
@@ -130,7 +131,7 @@ def page(title, body, refresh=False, charts=False):
 <link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#2b5a9e">
 <link rel="icon" href="/icon-192.png"><link rel="apple-touch-icon" href="/icon-192.png">
 </head><body>
-<header><div class="hrow"><b>DART 단순투자</b>{run_widget()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/reports">리포트</a><a href="/new">새 공시</a>
+<header><div class="hrow"><b>DART 단순투자</b>{run_widget()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/reports">리포트</a><a href="/market">시장</a><a href="/policy">정책</a><a href="/new">새 공시</a>
 <a href="/excel">엑셀</a><a href="/settings">설정</a>{extra}</nav>
 </header><main>{body}</main>{"<script>" + CHART_JS + "</script>" if charts else ""}</body></html>""".encode()
 
@@ -741,6 +742,103 @@ def view_report_list(conn, q):
     return page("리포트", body)
 
 
+# ---------------- 시장 ----------------
+SIGNAL_TXT = {1: ("+1 우호", "up"), 0: ("0 중립", ""), -1: ("−1 부담", "down")}
+
+
+def view_market(conn):
+    import stock_market
+    inds = stock_market.indicators(conn)
+    name, score, n = stock_market.regime(inds)
+    synced = stock_market.meta_get(conn, "synced", "")
+    if not n:
+        return page("시장", '<div class="card">아직 시장 지표가 없습니다. 위쪽 <b>지금 수집 → 시장·정책만</b>을 '
+                          '눌러 주세요 (1~2분).</div>')
+    cls = {"강세": "up", "약세": "down"}.get(name, "")
+    hero = (f'<div class="card"><div class="muted">시장 국면 (지표 {n}개 점수 합)</div>'
+            f'<div style="font-size:30px;font-weight:700" class="{cls}">{name} <span style="font-size:18px">{score:+d}</span></div>'
+            '<div class="muted">합이 +3 이상이면 강세, −3 이하면 약세. 투자 판단을 대신하지 않는 참고용이고, '
+            '지표마다 근거를 아래에 적었습니다.' + (f' · 마지막 수집 {escape(synced)}' if synced else "") + '</div></div>')
+    cards = []
+    for i in inds:
+        txt, c = SIGNAL_TXT[i.signal]
+        if not i.available:
+            cards.append(f'<div class="card"><b>{escape(i.label)}</b><div class="muted">{escape(i.note or "자료 없음")}</div></div>')
+            continue
+        cards.append(
+            f'<div class="card"><div class="row"><b>{escape(i.label)}</b>'
+            f'<span class="chip {c}">{txt}</span></div>'
+            f'<div><span class="big">{escape(i.value_text)}</span> <span class="muted">{escape(i.period)}</span></div>'
+            + (f'<div>{escape(i.change_text)}</div>' if i.change_text else "")
+            + f'<div class="muted">{escape(i.reason)}</div>'
+            + sparkline(i.points)
+            + (f'<div class="muted" style="font-size:12px">{escape(i.note)}</div>' if i.note else "") + "</div>")
+    return page("시장", hero + "".join(cards))
+
+
+# ---------------- 정책 ----------------
+POLICY_KINDS = {"": "종류 전체", "보도자료": "보도자료", "정책뉴스": "정책뉴스", "법령": "법령 개정", "법안": "국회 법안"}
+POLICY_DAYS = {"30": "최근 1달", "90": "최근 3달", "365": "최근 1년"}
+
+
+def view_policy(conn, q):
+    import stock_policy
+    if not has_table(conn, "policy_items"):
+        return page("정책", '<div class="card">아직 정책 소식이 없습니다. 위쪽 <b>지금 수집 → 시장·정책만</b>을 눌러 주세요.</div>')
+    topic = q.get("t") if q.get("t") in stock_policy.TOPICS else ""
+    kind = q.get("k") if q.get("k") in POLICY_KINDS else ""
+    days = q.get("d") if q.get("d") in POLICY_DAYS else "90"
+    text = q.get("q", "").strip()
+    pg = int(q["p"]) if str(q.get("p", "")).isdigit() and int(q["p"]) > 0 else 1
+    conds, args = ["key != '_meta'", "date >= ?"], [(dt.date.today() - dt.timedelta(days=int(days))).isoformat()]
+    if topic:
+        conds.append("topics LIKE ?")
+        args.append(f'%"{topic}"%')
+    if kind:
+        conds.append("kind = ?")
+        args.append(kind)
+    if text:
+        conds.append("(title LIKE ? OR summary LIKE ?)")
+        args += [f"%{text}%"] * 2
+    where = " AND ".join(conds)
+    total = conn.execute(f"SELECT COUNT(*) FROM policy_items WHERE {where}", args).fetchone()[0]
+    pages = max((total + PAGE_SIZE - 1) // PAGE_SIZE, 1)
+    pg = min(pg, pages)
+    rows = conn.execute(f"SELECT * FROM policy_items WHERE {where} ORDER BY date DESC, first_seen DESC LIMIT ? OFFSET ?",
+                        args + [PAGE_SIZE, (pg - 1) * PAGE_SIZE]).fetchall()
+    meta = conn.execute("SELECT first_seen FROM policy_items WHERE key='_meta'").fetchone()
+    base = {k: v for k, v in {"k": kind, "d": days if days != "90" else "", "q": text}.items() if v}
+    chips = "".join(
+        (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{escape(t)}</b>' if t == topic else
+         f'<a class="chip" href="/policy?{urlencode({**base, "t": t})}">{escape(t)}</a>')
+        for t in stock_policy.TOPICS) + (f' <a href="/policy?{urlencode(base)}">전체</a>' if topic else "")
+    form = (f'<form method="get" class="filters" style="margin-top:10px"><input type="hidden" name="t" value="{escape(topic)}">'
+            f'<input type="search" name="q" value="{escape(text)}" placeholder="제목·내용 검색">'
+            f'{select("k", POLICY_KINDS, kind)}{select("d", POLICY_DAYS, days)}<button>보기</button></form>')
+    recent = (dt.datetime.now() - dt.timedelta(days=3)).strftime("%Y-%m-%d")
+    cards = []
+    for i, r in enumerate(rows, (pg - 1) * PAGE_SIZE + 1):
+        tps = json.loads(r["topics"] or "[]")
+        new = (not r["baseline"]) and (r["first_seen"] or "") >= recent
+        title = escape(r["title"] or "")
+        link = f'<a href="{escape(r["url"])}">{title}</a>' if r["url"] else title
+        fold = (f'<details style="margin-top:6px"><summary>내용 보기</summary>'
+                f'<div style="font-size:14px;margin-top:4px">{escape(r["summary"])}</div></details>') if r["summary"] else ""
+        cards.append(
+            f'<div class="card"><div class="row"><div><span class="num">{i}</span>'
+            f'<span class="chip">{escape(r["kind"] or "")}</span>'
+            + (' <span class="chip up">새</span>' if new else "")
+            + f' <span class="muted">{escape(r["source"] or "")}</span></div>'
+            f'<div class="muted">{escape(r["date"] or "")}</div></div>'
+            f'<div style="margin-top:4px">{link}</div>'
+            f'<div style="margin-top:4px">' + "".join(f'<span class="chip">{escape(t)}</span>' for t in tps) + f'</div>{fold}</div>')
+    link_fn = lambda n: "/policy?" + urlencode({**base, **({"t": topic} if topic else {}), "p": n})   # noqa: E731
+    head = (f'<div class="muted" style="margin-bottom:8px">주식시장에 영향을 주는 정부 보도자료·법령 개정·국회 법안'
+            + (f' · 마지막 수집 {escape(meta[0])}' if meta and meta[0] else "") + "</div>")
+    return page("정책", head + f'<div>{chips}</div>' + form + f'<div class="muted" style="margin:6px 0">{total:,}건</div>'
+                + ("".join(cards) or '<p class="muted">조건에 맞는 소식이 없습니다.</p>') + pager(total, pg, link_fn))
+
+
 # ---------------- 아이디어 ----------------
 IDEA_TABS = {"cheap": "기관 평단보다 싼 종목", "cluster": "여러 기관이 함께 산 종목"}
 WINDOWS = {"30": "최근 1달 매수", "90": "최근 3달 매수", "180": "최근 6달 매수", "365": "최근 1년 매수"}
@@ -901,6 +999,10 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     body = view_home(conn, q, st, need_key=bool(get_key) and not get_key(), S=S)
                 elif url.path == "/settings":
                     body = view_settings(get_key, q, S)
+                elif url.path == "/market":
+                    body = view_market(conn)
+                elif url.path == "/policy":
+                    body = view_policy(conn, q)
                 elif url.path == "/reports":
                     body = view_report_list(conn, q)
                 elif url.path == "/ideas":
@@ -924,7 +1026,7 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
             running = st.get("state") == "running" and time.time() - st.get("updated", 0) < 120
             if running or not run_cmd:
                 return False
-            what = what if what in ("all", "dart", "reports") else "all"
+            what = what if what in ("all", "dart", "reports", "market") else "all"
             subprocess.Popen(run_cmd + ["--only", what], start_new_session=True, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, close_fds=True, env=child_env)
             time.sleep(1.5)   # 상태 파일이 생길 시간
