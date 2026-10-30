@@ -5,7 +5,7 @@ DART 단순투자 대시보드 (폰용, 파이썬 기본 기능만 사용)
     python dart_server.py web     → http://127.0.0.1:8766
 서버에서는 Tailscale(serve)로만 공개해서 내 기기에서만 열립니다.
 """
-import os, sys, json, time, sqlite3, subprocess, datetime as dt
+import os, re, sys, json, time, sqlite3, subprocess, datetime as dt
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -517,6 +517,30 @@ def view_stock(conn, code):
     return page(f"{name} — DART 단순투자", body, charts=bool(chart))
 
 
+OPINION_KO = {"buy": "매수", "strongbuy": "적극 매수", "hold": "중립", "neutral": "중립", "marketperform": "중립",
+              "sell": "매도", "outperform": "비중 확대", "underperform": "비중 축소", "trading buy": "단기 매수",
+              "tradingbuy": "단기 매수", "notrated": "의견 없음", "nr": "의견 없음"}
+
+
+def op_ko(op):
+    """투자의견 표기를 맞춤 (buy·Buy → 매수 등). 모르는 건 그대로."""
+    if not op:
+        return ""
+    return OPINION_KO.get(re.sub(r"[\s_-]", "", str(op)).lower(), str(op))
+
+
+def close_on(conn, code, date):
+    """그 날(휴장이면 직전 거래일) 종가"""
+    if not code or not date:
+        return None
+    try:
+        r = conn.execute("SELECT close FROM prices WHERE code=? AND date<=? ORDER BY date DESC LIMIT 1",
+                         (code, date)).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return r[0] if r else None
+
+
 def upside(target, close):
     """목표가가 종가보다 몇 % 위인지 (상승여력)"""
     try:
@@ -546,10 +570,11 @@ def view_reports(conn, code, tgt, n_br, close):
             if tgt else "")
     trs = "".join(
         f'<tr><td>{escape(r["date"])}</td><td>{escape(r["broker"] or "")}</td>'
-        f'<td>{won(r["target"]) if r["target"] else "-"}</td><td>{escape(r["opinion"] or "")}</td>'
+        f'<td>{won(r["target"]) if r["target"] else "-"}</td>'
+        f'<td>{won(close_on(conn, code, r["date"]))}</td><td>{escape(op_ko(r["opinion"]))}</td>'
         f'<td>{title_link(r)} <span class="muted">{SRC_CHIP.get(r["source"], "")}</span></td></tr>' for r in rows)
     return (f'<h2>증권사 목표주가</h2>{head}'
-            f'<div class="scroll"><table><tr><th>날짜</th><th>증권사</th><th>목표가</th><th>의견</th><th>제목</th></tr>'
+            f'<div class="scroll"><table><tr><th>날짜</th><th>증권사</th><th>목표가</th><th>당일 종가</th><th>의견</th><th>제목</th></tr>'
             f'{trs}</table></div><p><a href="/reports?q={quote(code)}&d=180">이 종목 리포트 모두 보기 →</a></p>')
 
 
@@ -622,8 +647,16 @@ def view_report_list(conn, q):
         in_dart = r["code"] in dart_codes
         stock_href = f'/stock?code={quote(r["code"])}' if in_dart else naver_link(r["code"])
         close = closes.get(r["code"], (None, None))[1]
-        tgt = (f'목표가 <b>{won(r["target"])}원</b> {upside(r["target"], close)}' if r["target"]
-               else '<span class="muted">목표가 없음</span>')
+        day_close = close_on(conn, r["code"], r["date"])
+        op = op_ko(r["opinion"])
+        tgt = (f'목표가 <b>{won(r["target"])}원</b>' if r["target"] else '<span class="muted">목표가 없음</span>') \
+            + (f" · {escape(op)}" if op else "")
+        prices = []
+        if day_close:
+            prices.append(f'리포트 날 종가 {won(day_close)}원 {upside(r["target"], day_close) if r["target"] else ""}')
+        if close and close != day_close:
+            prices.append(f'최근 종가 {won(close)}원 {upside(r["target"], close) if r["target"] else ""}')
+        price_line = f'<div class="muted" style="color:var(--fg)">{" · ".join(prices)}</div>' if prices else ""
         cards.append(
             f'<div class="card"><div class="row"><div><span class="num">{i}</span>'
             f'<a class="big" href="{stock_href}">{escape(r["name"] or r["code"])}</a> '
@@ -633,7 +666,7 @@ def view_report_list(conn, q):
             f'<div>{title_link(r, 60)}</div>'
             f'<div class="muted">{escape(r["broker"] or "")}{" · " + escape(r["author"]) if r["author"] else ""}'
             f' · <span class="chip">{SRC_CHIP.get(r["source"], "")}</span></div>'
-            f'<div>{tgt}{" · " + escape(r["opinion"]) if r["opinion"] else ""}</div></div>')
+            f'<div>{tgt}</div>{price_line}</div>')
     keep = {k: v for k, v in {"q": text, "b": broker, "d": d if d != "30" else "", "src": src, "only": only,
                               "sort": sort if sort != "date" else ""}.items() if v}
     link = lambda n: "/reports?" + urlencode({**keep, "p": n})   # noqa: E731

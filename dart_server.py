@@ -363,6 +363,36 @@ def save_results(detail, summary, run_info, prices=None):
     return ([] if first_run else new), first_run
 
 
+def add_report_prices(eng, prices):
+    """리포트가 나온 종목도 주가를 받아 둠 (리포트 날 종가·상승여력·그래프용). 하루 한 번 받은 건 재사용."""
+    from concurrent.futures import ThreadPoolExecutor
+    try:
+        conn = sqlite3.connect(results_db())
+        since = (dt.date.today() - dt.timedelta(days=200)).isoformat()
+        rows = conn.execute("SELECT code, MIN(date) FROM reports WHERE date >= ? GROUP BY code", (since,)).fetchall()
+        conn.close()
+    except sqlite3.Error:
+        return prices
+    need = {c: d.replace("-", "") for c, d in rows if c and c not in prices}
+    if not need:
+        return prices
+    print(f"[리포트] 리포트 종목 주가 {len(need)}개 받는 중", flush=True)
+    out = dict(prices)
+
+    def one(item):
+        code, since_d = item
+        try:
+            return code, eng.fetch_prices(code, since_d)
+        except Exception:
+            return code, {}
+    with ThreadPoolExecutor(max(1, min(4, eng.cfg.workers))) as ex:
+        for code, p in ex.map(one, need.items()):
+            if p:
+                out[code] = p
+    print(f"[리포트] 리포트 종목 주가 {sum(1 for c in need if c in out)}/{len(need)}개", flush=True)
+    return out
+
+
 def record_failure(started, message):
     try:
         conn = sqlite3.connect(results_db())
@@ -478,7 +508,14 @@ def cmd_run(args):
             except Exception as e:
                 info["reports"] = {"error": str(e)[:300]}
                 print(f"리포트 수집 실패: {e}", flush=True)
-        new, first_run = save_results(detail, summary, info, getattr(eng, "prices", None))
+        prices = getattr(eng, "prices", None)
+        if prices is not None and (use_hk or use_nv):
+            write_status(eng, "running", {"stage": "리포트 종목 주가"})
+            try:
+                prices = add_report_prices(eng, prices)
+            except Exception as e:
+                print(f"리포트 종목 주가 실패: {e}", flush=True)
+        new, first_run = save_results(detail, summary, info, prices)
         write_status(eng, "done", {"new": len(new), "complete": res["complete"]})
         if first_run:
             print(f"첫 실행: 기준선 저장 (공시 {len({d['접수번호'] for d in detail})}건). 다음부터 새 공시를 알립니다.")
