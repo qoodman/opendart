@@ -101,7 +101,7 @@ def page(title, body, refresh=False, charts=False):
 <link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#2b5a9e">
 <link rel="icon" href="/icon-192.png"><link rel="apple-touch-icon" href="/icon-192.png">
 </head><body>
-<header><b>DART 단순투자</b><nav><a href="/">요약</a><a href="/ideas">아이디어</a><a href="/reports">리포트</a><a href="/new">새 공시</a>
+<header><b>DART 단순투자</b><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/reports">리포트</a><a href="/new">새 공시</a>
 <a href="/excel">엑셀</a><a href="/settings">설정</a>{extra}</nav>
 </header><main>{body}</main>{"<script>" + CHART_JS + "</script>" if charts else ""}</body></html>""".encode()
 
@@ -302,7 +302,7 @@ def view_settings(get_key, q, S=None):
                 + '<button style="width:100%;padding:11px">설정 저장</button></form>'
                 + '<form method="post" action="/settings/notify-test" style="margin-top:10px">'
                   '<button class="ghost" style="width:100%">시험 알림 보내기</button></form>')
-    body += '<p><a href="/">← 요약으로</a></p>'
+    body += '<p><a href="/">← 보고서로</a></p>'
     return page("설정", body)
 
 
@@ -354,8 +354,14 @@ def view_home(conn, q, st, need_key=False):
 
     conds, args = [], []
     if text:
-        conds.append("(종목명 LIKE ? OR 종목코드 LIKE ?)")
-        args += [f"%{text}%"] * 2
+        # 검색어 하나로 종목명·코드·제출인, 그리고 보고서 안의 보고자·보고서명·보유목적까지
+        like = f"%{text}%"
+        detail_q = ""
+        if has_table(conn, "detail"):
+            detail_q = (" OR 종목코드 IN (SELECT 종목코드 FROM detail WHERE 보고자 LIKE ? OR 보고서 LIKE ? "
+                        "OR 보유목적 LIKE ? OR 회사 LIKE ?)")
+        conds.append(f"(종목명 LIKE ? OR 종목코드 LIKE ? OR 제출인 LIKE ?{detail_q})")
+        args += [like] * (7 if detail_q else 3)
     if who:
         conds.append("제출인 LIKE ?")
         args.append(f"%{who}%")
@@ -381,9 +387,10 @@ def view_home(conn, q, st, need_key=False):
     rows = conn.execute(f"SELECT * FROM summary {where} ORDER BY {SORTS[sort][1]} LIMIT ? OFFSET ?",
                         args + [PAGE_SIZE, (pg - 1) * PAGE_SIZE]).fetchall()
 
-    active = [FILTERS[k][v] for k, v in f.items() if v] + ([f"제출인: {who}"] if who else [])
+    active = ([f"검색: {text}"] if text else []) + [FILTERS[k][v] for k, v in f.items() if v] \
+        + ([f"제출인: {who}"] if who else [])
     form = (f'<form method="get"><div class="filters"><input type="search" name="q" value="{escape(text)}" '
-            f'placeholder="종목명·종목코드"><button>보기</button></div>'
+            f'placeholder="종목명·코드·제출인·보고자·보고서명"><button>검색</button></div>'
             f'<details{" open" if active else ""}><summary>필터·정렬{f" ({len(active)})" if active else ""}</summary>'
             f'<div class="filters" style="margin-top:8px">{select("d", PERIODS, f["d"])}'
             + (select("m", MARKET_OPTS, f["m"]) if "시장" in cols else "")
@@ -400,7 +407,7 @@ def view_home(conn, q, st, need_key=False):
     keep = {k: v for k, v in {"q": text, "who": who, "sort": sort if sort != "submit" else "", **f}.items() if v}
     link = lambda n: "/?" + urlencode({**keep, "p": n})   # noqa: E731
     info = f'<div class="muted" style="margin-top:6px">{total:,}건 중 {start + 1 if total else 0:,}–{min(start + PAGE_SIZE, total):,}</div>'
-    return page("DART 단순투자", box + form + chips + cards + pager(total, pg, link) + info, refresh=running)
+    return page("보고서 — DART 단순투자", box + form + chips + cards + pager(total, pg, link) + info, refresh=running)
 
 
 def view_new(conn, q):
@@ -773,7 +780,7 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 conn.close()
             if body is None:
                 return self._send(404, "text/html; charset=utf-8",
-                                  page("없는 페이지", '<p>찾는 페이지나 종목이 없습니다.</p><p><a href="/">요약으로</a></p>'))
+                                  page("없는 페이지", '<p>찾는 페이지나 종목이 없습니다.</p><p><a href="/">보고서로</a></p>'))
             self._send(200, "text/html; charset=utf-8", body)
 
         def _redirect(self, where):
