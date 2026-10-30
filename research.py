@@ -12,15 +12,18 @@ SOURCES = {"hk": "한경컨센서스", "nv": "네이버 증권"}
 def ensure_table(conn):
     conn.execute("""CREATE TABLE IF NOT EXISTS reports (
         source TEXT, date TEXT, code TEXT, name TEXT, title TEXT, target INTEGER, opinion TEXT,
-        author TEXT, broker TEXT, pdf TEXT, url TEXT, detail INTEGER DEFAULT 1,
+        author TEXT, broker TEXT, pdf TEXT, url TEXT, detail INTEGER DEFAULT 1, summary TEXT,
         PRIMARY KEY (source, date, code, broker, title))""")
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(reports)")}
+    if "summary" not in cols:      # 예전 표에 요약 칸 추가
+        conn.execute("ALTER TABLE reports ADD COLUMN summary TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS ix_reports_code ON reports(code, date)")
     conn.execute("CREATE INDEX IF NOT EXISTS ix_reports_date ON reports(date)")
     # 예전 표(hk_reports)에 받아 둔 것을 옮김 (한 번만)
     old = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='hk_reports'").fetchone()
     if old:
         conn.execute("INSERT OR IGNORE INTO reports SELECT 'hk', date, code, name, title, target, opinion, "
-                     "author, broker, pdf, '', 1 FROM hk_reports")
+                     "author, broker, pdf, '', 1, NULL FROM hk_reports")
         conn.execute("DROP TABLE hk_reports")
     conn.commit()
 
@@ -30,14 +33,20 @@ def last_date(conn, source):
 
 
 def store(conn, source, rows):
-    """rows: dict(date, code, name, title, target, opinion, author, broker, pdf, url, detail). 새로 넣은 건수."""
-    before = conn.total_changes
-    conn.executemany("INSERT OR IGNORE INTO reports VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", [
+    """rows: dict(date, code, name, title, target, opinion, author, broker, pdf, url, detail, summary).
+    이미 있는 리포트는 비어 있던 목표가·의견·요약만 채움. 새로 넣은 건수를 돌려줌."""
+    before = conn.execute("SELECT COUNT(*) FROM reports WHERE source=?", (source,)).fetchone()[0]
+    conn.executemany("""INSERT INTO reports VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(source, date, code, broker, title) DO UPDATE SET
+          target=COALESCE(reports.target, excluded.target),
+          opinion=CASE WHEN COALESCE(reports.opinion,'')='' THEN excluded.opinion ELSE reports.opinion END,
+          summary=COALESCE(reports.summary, excluded.summary),
+          detail=MAX(reports.detail, excluded.detail)""", [
         (source, r["date"], r["code"], r.get("name", ""), r.get("title", ""), r.get("target"),
          r.get("opinion", ""), r.get("author", ""), r.get("broker", ""), r.get("pdf", ""),
-         r.get("url", ""), r.get("detail", 1)) for r in rows])
+         r.get("url", ""), r.get("detail", 1), r.get("summary")) for r in rows])
     conn.commit()
-    return conn.total_changes - before
+    return conn.execute("SELECT COUNT(*) FROM reports WHERE source=?", (source,)).fetchone()[0] - before
 
 
 def norm_broker(name):

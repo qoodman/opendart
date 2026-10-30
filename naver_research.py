@@ -19,9 +19,10 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleW
                          "(KHTML, like Gecko) Chrome/126.0 Safari/537.36",
            "Referer": "https://stock.naver.com/research/company",
            "Accept": "application/json, text/plain, */*"}
-LIST_URLS = [
-    "https://stock.naver.com/api/stockSecurity/researches/v2/company?page={page}&size={size}",
-    "https://m.stock.naver.com/api/research/company?page={page}&pageSize={size}",
+# (주소, 한 번에 받을 개수 이름, 다음 쪽을 넘기는 이름 후보들)
+LIST_SOURCES = [
+    ("https://stock.naver.com/api/stockSecurity/researches/v2/company", "size", ["index", "offset", "start", "page"]),
+    ("https://m.stock.naver.com/api/research/company", "pageSize", ["page"]),
 ]
 DETAIL_URLS = [
     "https://stock.naver.com/api/stockSecurity/researches/v2/{id}",
@@ -119,10 +120,21 @@ def target_of(d):
 
 
 def opinion_of(d):
-    v = pick(d, "opinion", "investOpinion", "opinionName", "investmentOpinion", "opinionType")
+    v = pick(d, "opinionText", "opinion", "investOpinion", "opinionName", "investmentOpinion", "opinionType")
     if isinstance(v, dict):
         v = pick(v, "name", "text", "label", "code")
     return str(v).strip() if v else ""
+
+
+def _plain(html):
+    """요약 HTML → 줄바꿈 살린 글자 (최대 1,500자)"""
+    if not html:
+        return None
+    t = re.sub(r"(?i)<br\s*/?>|</p>", "\n", str(html))
+    t = re.sub(r"<[^>]+>", "", t)
+    t = re.sub(r"&nbsp;", " ", t).replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+    t = re.sub(r"\n\s*\n+", "\n", t).strip()
+    return t[:1500] or None
 
 
 def parse_item(x):
@@ -138,7 +150,7 @@ def parse_item(x):
     return dict(date=date, code=code, name=str(pick(x, "itemName", "stockName", "name") or ""),
                 title=str(title), broker=str(pick(x, "brokerName", "broker", "firmName") or ""),
                 author=str(pick(x, "analyst", "analystName", "writer") or ""),
-                target=target_of(x), opinion=opinion_of(x), pdf=_pdf(x),
+                target=target_of(x), opinion=opinion_of(x), pdf=_pdf(x), summary=_plain(pick(x, "content", "summary", "leadText")),
                 rid=str(rid) if rid is not None else "",
                 url=str(pick(x, "endUrl", "url", "link") or (f"https://m.stock.naver.com/research/company/{rid}" if rid else "")))
 
@@ -171,25 +183,53 @@ _LIST_OK = None     # 이번 실행에서 통한 목록 주소
 _DETAIL_OK = None   # 이번 실행에서 통한 상세 주소
 
 
-def fetch_list(session, page):
-    global _LIST_OK
-    urls = [_LIST_OK] if _LIST_OK else LIST_URLS
+def _get_items(session, url, params):
+    r = session.get(url, params=params, headers=HEADERS, timeout=30)
+    if r.status_code != 200:
+        raise NVError(f"HTTP {r.status_code}")
+    data = r.json()
+    items = find_list(data)
+    if items is None:
+        raise NVError("목록 없음")
+    more = data.get("hasNext") if isinstance(data, dict) else None
+    if isinstance(more, str):
+        more = more.lower() == "true"
+    return items, more, r.text
+
+
+def _ids(items):
+    return [str(pick(i, "nid", "researchId", "id") or pick(i, "title")) for i in items]
+
+
+def open_list(session):
+    """목록 주소와 쪽 넘기는 방법을 찾아 돌려줌: (주소, 개수 이름, 쪽 이름, 방식, 첫 쪽 항목, 다음 있음, 원문)
+    방식: 'page'(0·1·2…쪽 번호) 또는 'offset'(0·50·100…건 번호)."""
     last_err = ""
-    for u in urls:
+    for url, size_key, page_keys in LIST_SOURCES:
         try:
-            r = session.get(u.format(page=page, size=PAGE_SIZE), headers=HEADERS, timeout=30)
-            if r.status_code != 200:
-                last_err = f"HTTP {r.status_code}"
-                continue
-            items = find_list(r.json())
-        except (requests.exceptions.RequestException, ValueError) as e:
-            last_err = type(e).__name__
+            first, more, raw = _get_items(session, url, {size_key: PAGE_SIZE})
+        except (requests.exceptions.RequestException, ValueError, NVError) as e:
+            last_err = f"{url.split('/')[2]}: {e}"
             continue
-        if items is None:
-            last_err = "목록 없음"
-            continue
-        _LIST_OK = u
-        return [x for x in (parse_item(i) for i in items) if x], r.text
+        ids0 = _ids(first)
+        for key in page_keys:
+            # 쪽 번호가 0부터면 1이 둘째 쪽, 1부터면 2가 둘째 쪽
+            for second in ([1, 2] if key == "page" else [1]):
+                try:
+                    nxt, _, _ = _get_items(session, url, {size_key: PAGE_SIZE, key: second})
+                except (requests.exceptions.RequestException, ValueError, NVError):
+                    break
+                idn = _ids(nxt)
+                if not idn or len(ids0) < 2:
+                    return url, size_key, key, ("page", second), first, more, raw
+                if idn[0] == ids0[0]:
+                    continue                   # 이 값은 첫 쪽과 같음 → 다음 값/이름
+                if idn[0] == ids0[1]:
+                    return url, size_key, key, ("offset", 0), first, more, raw
+                if idn[0] not in ids0:
+                    return url, size_key, key, ("page", second), first, more, raw
+        # 넘기는 방법을 못 찾음: 첫 쪽만이라도
+        return url, size_key, None, (None, 0), first, more, raw
     raise NVError(f"네이버 증권 리포트 목록을 받지 못했습니다 ({last_err})")
 
 
@@ -232,23 +272,32 @@ def sync(db_path, debug_dir=None, log=print, first_days=30, session=None):
         today = dt.date.today()
         since = ((dt.date.fromisoformat(last) - dt.timedelta(days=2)) if last
                  else today - dt.timedelta(days=first_days)).isoformat()
+        earliest = conn.execute("SELECT MIN(date) FROM reports WHERE source='nv'").fetchone()[0]
+        if earliest and earliest > (today - dt.timedelta(days=first_days - 3)).isoformat():
+            # 예전에 첫 쪽만 받았던 경우: 처음 기간만큼 다시 채움 (이미 있는 건 건너뜀)
+            since = (today - dt.timedelta(days=first_days)).isoformat()
         log(f"[리포트] 네이버 증권 {since} 이후 종목분석 리포트 받는 중")
-        added, page, prev, sample = 0, 1, None, ""
-        while page <= 400:
-            rows, raw = fetch_list(session, page)
-            sample = sample or raw[:6000]
-            if not rows:
+        url, size_key, page_key, mode, items, more, raw = open_list(session)
+        _LIST_OK = url
+        sample = raw[:6000]
+        if not page_key:
+            log("  ! 네이버 증권 목록의 다음 쪽 넘기는 방법을 찾지 못해 첫 쪽만 받습니다.")
+        kind, second = mode
+        added, n, seen = 0, 0, set()
+        while True:
+            rows = [x for x in (parse_item(i) for i in items) if x]
+            new_rows = [x for x in rows if (x["rid"] or x["title"]) not in seen]
+            if not new_rows:
                 break
-            key = (rows[0]["date"], rows[0]["title"])
-            if key == prev:
-                break
-            prev = key
-            fresh = [dict(x, detail=0 if x["target"] is None and x["rid"] else 1) for x in rows if x["date"] >= since]
+            seen.update(x["rid"] or x["title"] for x in new_rows)
+            fresh = [dict(x, detail=0 if x["target"] is None and x["rid"] else 1) for x in new_rows if x["date"] >= since]
             added += research.store(conn, "nv", fresh)
-            if min(x["date"] for x in rows) < since:
+            if min(x["date"] for x in rows) < since or more is False or not page_key or n >= 400:
                 break
-            page += 1
+            n += 1
+            value = (second - 1 + n) if kind == "page" else n * PAGE_SIZE
             time.sleep(PAUSE)
+            items, more, _ = _get_items(session, url, {size_key: PAGE_SIZE, page_key: value})
         # 목표가가 목록에 없던 것은 상세에서
         todo = conn.execute("SELECT rowid, url FROM reports WHERE source='nv' AND detail=0 "
                             "ORDER BY date DESC LIMIT ?", (DETAIL_LIMIT,)).fetchall()

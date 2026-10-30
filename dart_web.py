@@ -585,6 +585,14 @@ REPORT_SORTS = {"date": ("최신순", "date DESC, rowid DESC"), "upside": ("상�
                 "target": ("목표가 있는 것만 · 최신순", "date DESC, rowid DESC")}
 
 
+def summary_fold(r):
+    text = r["summary"] if "summary" in r.keys() else None
+    if not text:
+        return ""
+    return ('<details style="margin-top:6px"><summary>요약 보기</summary>'
+            f'<div style="white-space:pre-wrap;font-size:14px;margin-top:4px">{escape(text)}</div></details>')
+
+
 def view_report_list(conn, q):
     if not has_table(conn, "reports"):
         return page("리포트", '<p class="muted">다음 수집이 끝나면 증권사 리포트가 여기에 모입니다.</p>')
@@ -666,7 +674,7 @@ def view_report_list(conn, q):
             f'<div>{title_link(r, 60)}</div>'
             f'<div class="muted">{escape(r["broker"] or "")}{" · " + escape(r["author"]) if r["author"] else ""}'
             f' · <span class="chip">{SRC_CHIP.get(r["source"], "")}</span></div>'
-            f'<div>{tgt}</div>{price_line}</div>')
+            f'<div>{tgt}</div>{price_line}{summary_fold(r)}</div>')
     keep = {k: v for k, v in {"q": text, "b": broker, "d": d if d != "30" else "", "src": src, "only": only,
                               "sort": sort if sort != "date" else ""}.items() if v}
     link = lambda n: "/reports?" + urlencode({**keep, "p": n})   # noqa: E731
