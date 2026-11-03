@@ -14,7 +14,8 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 from dart_charts import CHART_CSS, CHART_JS, bar_list, price_chart, sparkline
 from research import consensus, suspicious
 
-PAGE_SIZE = 60
+PAGE_SIZE = 50
+ROW_CHOICES = (10, 20, 50, 100)
 
 CSS = """
 :root{--bg:#f7f8fa;--card:#fff;--fg:#1b1d21;--muted:#666b73;--line:#e3e6ea;--accent:#2b5a9e;
@@ -352,6 +353,21 @@ def select(name, opts, cur):
         for k, v in opts.items()) + "</select>")
 
 
+def rows_per(q, default):
+    """한 번에 보여 줄 줄 수: 주소의 n(또는 폰에 기억해 둔 값), 없으면 화면별 기본값"""
+    return int(q["n"]) if str(q.get("n", "")) in {str(c) for c in ROW_CHOICES} else default
+
+
+def rows_bar(q, size):
+    """'줄 수: 10 20 50 100' 선택 줄 (고른 값은 폰에 기억)"""
+    base = {k: v for k, v in q.items() if k not in ("n", "p", "sp", "dp") and not k.startswith("_") and v != ""}
+    path = q.get("_path", "/")
+    chips = " ".join(
+        (f'<b class="cur" style="padding:2px 8px;border-radius:8px;background:var(--accent);color:var(--bg)">{c}</b>' if c == size else
+         f'<a href="{path}?{urlencode({**base, "n": c})}" style="padding:2px 8px">{c}</a>') for c in ROW_CHOICES)
+    return f'<div class="muted" style="margin-top:6px">한 번에 보기: {chips} 줄 <span style="font-size:12px">(고르면 다음에도 기억)</span></div>'
+
+
 def pager(total, pg, link, size=None):
     """1 2 3 … 처럼 번호로 된 페이지 이동"""
     size = size or PAGE_SIZE
@@ -461,6 +477,7 @@ def filtered_excel(conn, q):
 
 
 def view_home(conn, q, st, need_key=False, S=None):
+    size = rows_per(q, PAGE_SIZE)
     from urllib.parse import urlencode
     box, running = status_box(conn, st)
     if need_key and not running:
@@ -471,10 +488,10 @@ def view_home(conn, q, st, need_key=False, S=None):
     cols, text, who, f, sort, where, args = summary_filter(conn, q)
     pg = int(q["p"]) if str(q.get("p", "")).isdigit() and int(q["p"]) > 0 else 1
     total = conn.execute(f"SELECT COUNT(*) FROM summary {where}", args).fetchone()[0]
-    pages = max((total + PAGE_SIZE - 1) // PAGE_SIZE, 1)
+    pages = max((total + size - 1) // size, 1)
     pg = min(pg, pages)
     rows = conn.execute(f"SELECT * FROM summary {where} ORDER BY {SORTS[sort][1]} LIMIT ? OFFSET ?",
-                        args + [PAGE_SIZE, (pg - 1) * PAGE_SIZE]).fetchall()
+                        args + [size, (pg - 1) * size]).fetchall()
 
     active = ([f"검색: {text}"] if text else []) + [FILTERS[k][v] for k, v in f.items() if v] \
         + ([f"제출인: {who}"] if who else [])
@@ -490,17 +507,17 @@ def view_home(conn, q, st, need_key=False, S=None):
     if active or text:
         chips = ('<div style="margin:4px 0 10px">' + "".join(f'<span class="chip">{escape(a)}</span>' for a in active)
                  + f'<span class="muted">{total:,}건</span> · <a href="/">초기화</a></div>')
-    start = (pg - 1) * PAGE_SIZE
+    start = (pg - 1) * size
     cards = "".join(summary_card(r, start + i + 1) for i, r in enumerate(rows)) \
         or '<p class="muted">조건에 맞는 매수 내역이 없습니다.</p>'
     keep = {k: v for k, v in {"q": text, "who": who, "sort": sort if sort != "submit" else "", **f}.items() if v}
-    link = lambda n: "/?" + urlencode({**keep, "p": n})   # noqa: E731
+    link = lambda n: "/?" + urlencode({**keep, **({"n": q["n"]} if q.get("n") else {}), "p": n})   # noqa: E731
     excel = ('<div class="filters" style="margin:0 0 10px">'
              f'<a class="chip" href="/excel?{urlencode({**keep, "list": 1})}">⬇ 지금 목록 엑셀 ({total:,}건)</a>'
              '<a class="chip" href="/excel">⬇ 전체 엑셀</a>'
              '<span class="muted">제출일 최신순</span></div>')
-    info = f'<div class="muted" style="margin-top:6px">{total:,}건 중 {start + 1 if total else 0:,}–{min(start + PAGE_SIZE, total):,}</div>'
-    return page("보고서 — DART 단순투자", box + form + chips + excel + cards + pager(total, pg, link) + info,
+    info = f'<div class="muted" style="margin-top:6px">{total:,}건 중 {start + 1 if total else 0:,}–{min(start + size, total):,}</div>'
+    return page("보고서 — DART 단순투자", box + form + chips + excel + cards + pager(total, pg, link, size) + info + rows_bar(q, size),
                 refresh=running)
 
 
@@ -559,28 +576,29 @@ def _group_key(r, g, who_key):
     return str(r["변동일"] if g == "date" else r["제출일"] if g == "submit" else (r[who_key] or "(이름 없음)"))
 
 
-def paged_table(rows, g, who_key, pg, link, header, row_html, group_note, anchor):
+def paged_table(rows, g, who_key, pg, link, header, row_html, group_note, anchor, size=None):
     """10줄씩 번호 페이지로 나눈 표. 같은 묶음(변동일·제출일·보고자)은 머리글 줄로 구분."""
+    size = size or STOCK_ROWS
     rows = _group_sort(rows, g, who_key)
     total = len(rows)
-    pages = max((total + STOCK_ROWS - 1) // STOCK_ROWS, 1)
+    pages = max((total + size - 1) // size, 1)
     pg = min(max(pg, 1), pages)
     stats = {}
     for r in rows:
         stats.setdefault(_group_key(r, g, who_key), []).append(r)
     out, prev = [], None
-    for r in rows[(pg - 1) * STOCK_ROWS: pg * STOCK_ROWS]:
+    for r in rows[(pg - 1) * size: pg * size]:
         k = _group_key(r, g, who_key)
         if k != prev:
             out.append(f'<tr><td colspan="6" style="background:var(--chip);font-weight:600">{escape(k)}'
                        f' <span class="muted">{group_note(stats[k])}</span></td></tr>')
             prev = k
         out.append(row_html(r))
-    start = (pg - 1) * STOCK_ROWS
+    start = (pg - 1) * size
     info = (f'<div class="muted" style="margin-top:6px">{total:,}줄 중 {start + 1 if total else 0:,}–'
-            f'{min(start + STOCK_ROWS, total):,}</div>')
+            f'{min(start + size, total):,}</div>')
     return (f'<div class="scroll"><table>{header}{"".join(out)}</table></div>'
-            + pager(total, pg, link, STOCK_ROWS) + info)
+            + pager(total, pg, link, size) + info)
 
 
 def view_stock(conn, code, q=None):
@@ -590,6 +608,7 @@ def view_stock(conn, code, q=None):
     g = q.get("g") if q.get("g") in GROUPS else "date"
     sp = int(q["sp"]) if str(q.get("sp", "")).isdigit() else 1
     dp = int(q["dp"]) if str(q.get("dp", "")).isdigit() else 1
+    size = rows_per(q, STOCK_ROWS)
     rows = conn.execute("SELECT * FROM detail WHERE 종목코드=? ORDER BY 변동일 DESC, 제출일 DESC", (code,)).fetchall()
     if not rows:
         return None
@@ -598,12 +617,14 @@ def view_stock(conn, code, q=None):
     head = (f'<div class="row"><div><span class="big">{escape(str(name))}</span> '
             f'<span class="muted">{escape(code)}</span></div>'
             f'<div><a href="{naver_link(code)}">네이버 증권 ↗</a></div></div>')
+    keep_n = {"n": q["n"]} if q.get("n") else {}
+
     def link_s(n):
-        return "/stock?" + urlencode({"code": code, **({"g": g} if g != "date" else {}), "sp": n,
+        return "/stock?" + urlencode({"code": code, **keep_n, **({"g": g} if g != "date" else {}), "sp": n,
                                       **({"dp": dp} if dp > 1 else {})}) + "#sum"
 
     def link_d(n):
-        return "/stock?" + urlencode({"code": code, **({"g": g} if g != "date" else {}),
+        return "/stock?" + urlencode({"code": code, **keep_n, **({"g": g} if g != "date" else {}),
                                       **({"sp": sp} if sp > 1 else {}), "dp": n}) + "#det"
 
     def row_sum(r):
@@ -629,14 +650,14 @@ def view_stock(conn, code, q=None):
 
     group_bar = ('<div style="margin:8px 0">묶어 보기: ' + " ".join(
         (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == g else
-         f'<a class="chip" href="/stock?{urlencode({"code": code, **({"g": k} if k != "date" else {})})}#sum">{v}</a>')
-        for k, v in GROUPS.items()) + '</div>')
+         f'<a class="chip" href="/stock?{urlencode({"code": code, **({"g": k} if k != "date" else {}), **({"n": q["n"]} if q.get("n") else {})})}#sum">{v}</a>')
+        for k, v in GROUPS.items()) + '</div>' + rows_bar(q, size))
     t1 = paged_table(summ, g, "제출인", sp, link_s,
                      '<tr><th>변동일</th><th>제출인</th><th>매수수량</th><th>평균단가</th><th>제출일 종가</th><th>제출일</th></tr>',
-                     row_sum, note_sum, "sum") if summ else ""
+                     row_sum, note_sum, "sum", size) if summ else ""
     t2 = paged_table(rows, g, "보고자", dp, link_d,
                      '<tr><th>변동일</th><th>보고자</th><th>방법</th><th>증감</th><th>단가</th><th>제출일(원문)</th></tr>',
-                     row_det, note_det, "det")
+                     row_det, note_det, "det", size)
     chart = ""
     tgt, n_br = consensus(conn, code)
     last_close = None
@@ -775,6 +796,7 @@ def reports_last_line():
 
 
 def view_report_list(conn, q):
+    size = rows_per(q, PAGE_SIZE)
     if not has_table(conn, "reports"):
         return page("리포트", '<p class="muted">다음 수집이 끝나면 증권사 리포트가 여기에 모입니다.</p>')
     text, broker = q.get("q", "").strip(), q.get("b", "").strip()
@@ -826,15 +848,15 @@ def view_report_list(conn, q):
         if sort == "upside":
             rows.sort(key=lambda r: -(r["target"] / closes[r["code"]][1]))
         total = len(rows)
-        pages = max((total + PAGE_SIZE - 1) // PAGE_SIZE, 1)
+        pages = max((total + size - 1) // size, 1)
         pg = min(pg, pages)
-        rows = rows[(pg - 1) * PAGE_SIZE: pg * PAGE_SIZE]
+        rows = rows[(pg - 1) * size: pg * size]
     else:
         total = conn.execute(f"SELECT COUNT(*) FROM reports WHERE {where}", args).fetchone()[0]
-        pages = max((total + PAGE_SIZE - 1) // PAGE_SIZE, 1)
+        pages = max((total + size - 1) // size, 1)
         pg = min(pg, pages)
         rows = conn.execute(f"SELECT * FROM reports WHERE {where} ORDER BY {REPORT_SORTS[sort][1]} LIMIT ? OFFSET ?",
-                            args + [PAGE_SIZE, (pg - 1) * PAGE_SIZE]).fetchall()
+                            args + [size, (pg - 1) * size]).fetchall()
 
     active = [x for x in (REPORT_SRC[src] if src else "", REPORT_ONLY[only] if only else "",
                           ("상승여력 " + " · ".join(x for x in (REPORT_UPSIDE[up] if up else "",
@@ -851,7 +873,7 @@ def view_report_list(conn, q):
     chips = ('<div style="margin:4px 0 10px">' + "".join(f'<span class="chip">{escape(a)}</span>' for a in active)
              + f'<span class="muted">{REPORT_PERIODS[d]} · {total:,}건</span>'
              + (' · <a href="/reports">초기화</a>' if active or text else "") + "</div>")
-    start = (pg - 1) * PAGE_SIZE
+    start = (pg - 1) * size
     cards = []
     for i, r in enumerate(rows, start + 1):
         in_dart = r["code"] in dart_codes
@@ -885,9 +907,9 @@ def view_report_list(conn, q):
             f'<div>{tgt}</div>{price_line}{summary_fold(r)}</div>')
     keep = {k: v for k, v in {"q": text, "b": broker, "d": d if d != "30" else "", "src": src, "only": only, "up": up, "upmax": upmax,
                               "sort": sort if sort != "date" else ""}.items() if v}
-    link = lambda n: "/reports?" + urlencode({**keep, "p": n})   # noqa: E731
+    link = lambda n: "/reports?" + urlencode({**keep, **({"n": q["n"]} if q.get("n") else {}), "p": n})   # noqa: E731
     body = (reports_last_line() + form + chips + ("".join(cards) or '<p class="muted">조건에 맞는 리포트가 없습니다.</p>')
-            + pager(total, pg, link))
+            + pager(total, pg, link, size) + rows_bar(q, size))
     return page("리포트", body)
 
 
@@ -1120,6 +1142,7 @@ POLICY_DAYS = {"30": "최근 1달", "90": "최근 3달", "365": "최근 1년"}
 
 
 def view_policy(conn, q):
+    size = rows_per(q, PAGE_SIZE)
     import stock_policy
     if not has_table(conn, "policy_items"):
         return page("정책", '<div class="card">아직 정책 소식이 없습니다. 위쪽 <b>지금 수집 → 시장·정책만</b>을 눌러 주세요.</div>')
@@ -1140,10 +1163,10 @@ def view_policy(conn, q):
         args += [f"%{text}%"] * 2
     where = " AND ".join(conds)
     total = conn.execute(f"SELECT COUNT(*) FROM policy_items WHERE {where}", args).fetchone()[0]
-    pages = max((total + PAGE_SIZE - 1) // PAGE_SIZE, 1)
+    pages = max((total + size - 1) // size, 1)
     pg = min(pg, pages)
     rows = conn.execute(f"SELECT * FROM policy_items WHERE {where} ORDER BY date DESC, first_seen DESC LIMIT ? OFFSET ?",
-                        args + [PAGE_SIZE, (pg - 1) * PAGE_SIZE]).fetchall()
+                        args + [size, (pg - 1) * size]).fetchall()
     meta = conn.execute("SELECT first_seen FROM policy_items WHERE key='_meta'").fetchone()
     base = {k: v for k, v in {"k": kind, "d": days if days != "90" else "", "q": text}.items() if v}
     chips = "".join(
@@ -1155,7 +1178,7 @@ def view_policy(conn, q):
             f'{select("k", POLICY_KINDS, kind)}{select("d", POLICY_DAYS, days)}<button>보기</button></form>')
     recent = (dt.datetime.now() - dt.timedelta(days=3)).strftime("%Y-%m-%d")
     cards = []
-    for i, r in enumerate(rows, (pg - 1) * PAGE_SIZE + 1):
+    for i, r in enumerate(rows, (pg - 1) * size + 1):
         tps = json.loads(r["topics"] or "[]")
         new = (not r["baseline"]) and (r["first_seen"] or "") >= recent
         title = escape(r["title"] or "")
@@ -1170,11 +1193,11 @@ def view_policy(conn, q):
             f'<div class="muted">{escape(r["date"] or "")}</div></div>'
             f'<div style="margin-top:4px">{link}</div>'
             f'<div style="margin-top:4px">' + "".join(f'<span class="chip">{escape(t)}</span>' for t in tps) + f'</div>{fold}</div>')
-    link_fn = lambda n: "/policy?" + urlencode({**base, **({"t": topic} if topic else {}), "p": n})   # noqa: E731
+    link_fn = lambda n: "/policy?" + urlencode({**base, **({"n": q["n"]} if q.get("n") else {}), **({"t": topic} if topic else {}), "p": n})   # noqa: E731
     head = (f'<div class="muted" style="margin-bottom:8px">주식시장에 영향을 주는 정부 보도자료·법령 개정·국회 법안'
             + (f' · 마지막 수집 {escape(meta[0])}' if meta and meta[0] else "") + "</div>")
     return page("정책", head + f'<div>{chips}</div>' + form + f'<div class="muted" style="margin:6px 0">{total:,}건</div>'
-                + ("".join(cards) or '<p class="muted">조건에 맞는 소식이 없습니다.</p>') + pager(total, pg, link_fn))
+                + ("".join(cards) or '<p class="muted">조건에 맞는 소식이 없습니다.</p>') + pager(total, pg, link_fn, size) + rows_bar(q, size))
 
 
 # ---------------- 아이디어 ----------------
@@ -1299,7 +1322,7 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
         def _send(self, status, ctype, data, headers=()):
             self.send_response(status)
             self.send_header("Content-Type", ctype)
-            for k, v in headers:
+            for k, v in (*headers, *getattr(self, "_extra", ())):
                 self.send_header(k, v)
             self.end_headers()
             self.wfile.write(data)
@@ -1319,6 +1342,15 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
             S = settings()
             st = load_status(status_path)
             _NAV["status"] = st
+            # 한 번에 보는 줄 수: 주소의 n을 폰에 기억해 두고, 주소에 없으면 기억한 값을 씀
+            self._extra = []
+            q["_path"] = url.path
+            saved = (re.search(r"(?:^|;\s*)rows=(\d+)", self.headers.get("Cookie") or "") or [None, ""])[1]
+            if q.get("n") in {str(c) for c in ROW_CHOICES}:
+                if q["n"] != saved:
+                    self._extra.append(("Set-Cookie", f"rows={q['n']}; Path=/; Max-Age=31536000; SameSite=Lax"))
+            elif saved in {str(c) for c in ROW_CHOICES}:
+                q["n"] = saved
             if url.path == "/health":
                 return self._send(200, "application/json", json.dumps(st, ensure_ascii=False).encode())
             conn = sqlite3.connect(f"file:{quote(str(db_path))}?mode=ro", uri=True) if Path(db_path).exists() else sqlite3.connect(":memory:")
