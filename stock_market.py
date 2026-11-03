@@ -438,8 +438,14 @@ def _target_revisions(conn):
         return ind
     import research
     since = (dt.date.today() - dt.timedelta(days=30)).isoformat()
+    try:
+        closes = {c: v for c, v, _ in conn.execute("SELECT code, close, MAX(date) FROM prices GROUP BY code")}
+    except sqlite3.OperationalError:
+        closes = {}
     last, up, down, monthly = {}, 0, 0, {}
     for code, broker, date, target in rows:
+        if research.suspicious(target, closes.get(code)):
+            continue                     # 종목이 잘못 붙은 리포트는 셈에서 뺌
         k = (code, research.norm_broker(broker))
         if k in last and last[k] != target:
             mon = date[:7]

@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 from dart_charts import CHART_CSS, CHART_JS, bar_list, price_chart, sparkline
-from research import consensus
+from research import consensus, suspicious
 
 PAGE_SIZE = 60
 
@@ -649,7 +649,8 @@ def view_reports(conn, code, tgt, n_br, close):
             if tgt else "")
     trs = "".join(
         f'<tr><td>{escape(r["date"])}</td><td>{escape(r["broker"] or "")}</td>'
-        f'<td>{won(r["target"]) if r["target"] else "-"}</td>'
+        f'<td>{won(r["target"]) if r["target"] else "-"}'
+        f'{" ⚠" if suspicious(r["target"], close_on(conn, code, r["date"]) or close) else ""}</td>'
         f'<td>{won(day_prices(conn, code, r["date"])[0])}</td>'
         f'<td>{won(close_on(conn, code, r["date"]))}</td><td>{escape(op_ko(r["opinion"]))}</td>'
         f'<td>{title_link(r)} <span class="muted">{SRC_CHIP.get(r["source"], "")}</span></td></tr>' for r in rows)
@@ -733,7 +734,7 @@ def view_report_list(conn, q):
         if not up and not upmax:
             return True
         c = closes.get(r["code"], (None, None))[1]
-        if not c or not r["target"]:
+        if not c or not r["target"] or suspicious(r["target"], c):
             return False
         u = r["target"] / c - 1
         if up == "down":
@@ -743,7 +744,8 @@ def view_report_list(conn, q):
         return not upmax or u <= int(upmax) / 100
     if sort == "upside" or up or upmax:
         rows = conn.execute(f"SELECT * FROM reports WHERE {where} ORDER BY date DESC, rowid DESC", args).fetchall()
-        rows = [r for r in rows if r["code"] in closes and up_ok(r)]
+        rows = [r for r in rows if r["code"] in closes and up_ok(r)
+                and not suspicious(r["target"], closes[r["code"]][1])]
         if sort == "upside":
             rows.sort(key=lambda r: -(r["target"] / closes[r["code"]][1]))
         total = len(rows)
@@ -780,14 +782,19 @@ def view_report_list(conn, q):
         close = closes.get(r["code"], (None, None))[1]
         day_open, day_close = day_prices(conn, r["code"], r["date"])
         op = op_ko(r["opinion"])
+        bad = suspicious(r["target"], day_close or close)
         tgt = (f'목표가 <b>{won(r["target"])}원</b>' if r["target"] else '<span class="muted">목표가 없음</span>') \
             + (f" · {escape(op)}" if op else "")
+        if bad:
+            tgt += ('<div class="warn" style="font-size:13px">⚠ 목표가가 이 종목 주가와 맞지 않습니다. 출처에서 종목이 '
+                    '잘못 적힌 리포트일 수 있어 목표가 평균·상승여력 계산에서 뺐습니다.</div>')
         prices = []
+        show_up = r["target"] and not bad
         if day_close:
             prices.append((f'리포트 날 시가 {won(day_open)}원 · ' if day_open else "리포트 날 ")
-                          + f'종가 {won(day_close)}원 {upside(r["target"], day_close) if r["target"] else ""}')
+                          + f'종가 {won(day_close)}원 {upside(r["target"], day_close) if show_up else ""}')
         if close and close != day_close:
-            prices.append(f'최근 종가 {won(close)}원 {upside(r["target"], close) if r["target"] else ""}')
+            prices.append(f'최근 종가 {won(close)}원 {upside(r["target"], close) if show_up else ""}')
         price_line = f'<div class="muted" style="color:var(--fg)">{" · ".join(prices)}</div>' if prices else ""
         cards.append(
             f'<div class="card"><div class="row"><div><span class="num">{i}</span>'

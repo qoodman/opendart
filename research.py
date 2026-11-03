@@ -56,16 +56,87 @@ def norm_broker(name):
     return n or "?"
 
 
+# 목표가가 주가의 이 범위를 벗어나면 출처의 종목 표기 오류로 봄 (예: 현대차 리포트가 삼영전자로 올라온 경우)
+PLAUSIBLE = (0.2, 4.0)
+
+
+def latest_close(conn, code, on=None):
+    """종목의 최근 종가 (on을 주면 그 날 이전 마지막 종가)"""
+    try:
+        if on:
+            r = conn.execute("SELECT close FROM prices WHERE code=? AND date<=? ORDER BY date DESC LIMIT 1",
+                             (code, on)).fetchone()
+        else:
+            r = conn.execute("SELECT close FROM prices WHERE code=? ORDER BY date DESC LIMIT 1", (code,)).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return r[0] if r else None
+
+
+def suspicious(target, close):
+    """목표가가 주가와 맞지 않으면 True (종목이 잘못 붙었을 가능성)"""
+    if not target or not close:
+        return False
+    ratio = target / close
+    return not (PLAUSIBLE[0] <= ratio <= PLAUSIBLE[1])
+
+
+def core_title(title):
+    """'삼영전자(005680) 4분기 물량…' → '4분기물량…' (앞의 종목 표기를 빼고 비교용으로)"""
+    t = re.sub(r"^[^()]{1,30}\(\d{6}\)\s*", "", title or "")
+    return re.sub(r"[\s\W_]+", "", t)
+
+
+def reconcile(conn, log=print):
+    """한경 리포트의 종목이 네이버의 같은 리포트(같은 날·증권사·제목)와 다르면 네이버 종목으로 바로잡음.
+    (한경 목록 제목에 종목이 잘못 적힌 경우가 있음)"""
+    try:
+        nv = conn.execute("SELECT date, broker, title, code, name FROM reports WHERE source='nv'").fetchall()
+    except sqlite3.OperationalError:
+        return 0
+    index = {}
+    for date, broker, title, code, name in nv:
+        index.setdefault((date, norm_broker(broker), core_title(title)), (code, name))
+    fixed = 0
+    for rowid, date, broker, title, code in conn.execute(
+            "SELECT rowid, date, broker, title, code FROM reports WHERE source='hk'").fetchall():
+        key = core_title(title)
+        if len(key) < 4:
+            continue
+        hit = None
+        for d in (date, (dt.date.fromisoformat(date) - dt.timedelta(days=1)).isoformat(),
+                  (dt.date.fromisoformat(date) + dt.timedelta(days=1)).isoformat()):
+            hit = index.get((d, norm_broker(broker), key))
+            if hit:
+                break
+        if hit and hit[0] and hit[0] != code:
+            new_title = re.sub(r"^[^()]{1,30}\(\d{6}\)", f"{hit[1]}({hit[0]})", title, count=1)
+            dup = conn.execute("SELECT 1 FROM reports WHERE source='hk' AND date=? AND code=? AND broker=? AND title=?",
+                               (date, hit[0], broker, new_title)).fetchone()
+            if dup:      # 이미 바로잡은 것이 있으면 다시 들어온 잘못된 줄은 지움
+                conn.execute("DELETE FROM reports WHERE rowid=?", (rowid,))
+            else:
+                conn.execute("UPDATE reports SET code=?, name=?, title=? WHERE rowid=?", (hit[0], hit[1], new_title, rowid))
+            fixed += 1
+            log(f"  · 종목 바로잡음: {title[:30]} → {hit[1]}({hit[0]})")
+    conn.commit()
+    return fixed
+
+
 def consensus(conn, code, days=180):
-    """증권사별 가장 최근 목표가(최근 days일)의 평균 → (평균, 증권사 수) 또는 (None, 0)"""
+    """증권사별 가장 최근 목표가(최근 days일)의 평균 → (평균, 증권사 수) 또는 (None, 0).
+    주가와 맞지 않는 목표가(종목 표기 오류 의심)는 뺌."""
     since = (dt.date.today() - dt.timedelta(days=days)).isoformat()
     try:
         rows = conn.execute("SELECT broker, target FROM reports WHERE code=? AND date>=? AND target IS NOT NULL "
                             "ORDER BY date DESC", (code, since)).fetchall()
     except sqlite3.OperationalError:
         return None, 0
+    close = latest_close(conn, code)
     latest = {}
     for broker, target in rows:
+        if suspicious(target, close):
+            continue
         latest.setdefault(norm_broker(broker), target)
     if not latest:
         return None, 0
@@ -92,4 +163,13 @@ def sync_all(db_path, debug_dir=None, log=print, use_hk=True, use_nv=True, first
         except Exception as e:
             out["nv"] = f"실패: {str(e)[:200]}"
             log(f"[리포트] 네이버 증권 실패: {e}")
+    try:
+        conn = sqlite3.connect(db_path)
+        n = reconcile(conn, log)
+        conn.close()
+        if n:
+            out["fixed"] = n
+            log(f"[리포트] 한경 리포트 종목 {n}건을 네이버 기준으로 바로잡았습니다")
+    except sqlite3.Error as e:
+        log(f"  ! 리포트 종목 대조 실패: {e}")
     return out
