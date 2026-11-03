@@ -661,8 +661,11 @@ def view_reports(conn, code, tgt, n_br, close):
 REPORT_PERIODS = {"7": "최근 1주", "30": "최근 1달", "90": "최근 3달", "180": "최근 6달"}
 REPORT_SRC = {"": "출처 전체", "hk": "한경컨센서스", "nv": "네이버 증권"}
 REPORT_ONLY = {"": "모든 종목", "dart": "기관 단순투자 종목만"}
-REPORT_UPSIDE = {"": "상승여력 전체", "10": "상승여력 10% 이상", "20": "상승여력 20% 이상", "30": "상승여력 30% 이상",
-                 "50": "상승여력 50% 이상", "0": "상승여력 0~10%", "down": "목표가가 지금 가격보다 낮음"}
+# 상승여력(목표가 ÷ 최근 종가 − 1) 구간: 최소와 최대를 따로 골라 '50% 이상 · 80% 이하'처럼
+REPORT_UPSIDE = {"": "상승여력 최소: 전체", "0": "0% 이상 (목표가 ≥ 지금 가격)",
+                 **{str(p): f"{p}% 이상" for p in (10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 150, 200)},
+                 "down": "목표가가 지금 가격보다 낮음"}
+REPORT_UPMAX = {"": "최대: 제한 없음", **{str(p): f"{p}% 이하" for p in (10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 150, 200)}}
 REPORT_SORTS = {"date": ("최신순", "date DESC, rowid DESC"), "upside": ("상승여력 큰 순", None),
                 "target": ("목표가 있는 것만 · 최신순", "date DESC, rowid DESC")}
 
@@ -701,6 +704,7 @@ def view_report_list(conn, q):
     src = q.get("src") if q.get("src") in REPORT_SRC else ""
     only = q.get("only") if q.get("only") in REPORT_ONLY else ""
     up = q.get("up") if q.get("up") in REPORT_UPSIDE else ""
+    upmax = q.get("upmax") if q.get("upmax") in REPORT_UPMAX else ""
     sort = q.get("sort") if q.get("sort") in REPORT_SORTS else "date"
     pg = int(q["p"]) if str(q.get("p", "")).isdigit() and int(q["p"]) > 0 else 1
     conds = ["date >= ?"]
@@ -719,21 +723,25 @@ def view_report_list(conn, q):
         dart_codes = {r[0] for r in conn.execute("SELECT DISTINCT 종목코드 FROM summary")}
     if only == "dart":
         conds.append("code IN (SELECT DISTINCT 종목코드 FROM summary)" if dart_codes else "0")
-    if sort in ("target", "upside") or up:
+    if sort in ("target", "upside") or up or upmax:
         conds.append("target IS NOT NULL")
     where = " AND ".join(conds)
     closes = latest_closes(conn) if has_table(conn, "prices") else {}
 
     def up_ok(r):
         """상승여력(목표가 ÷ 최근 종가 − 1) 필터"""
-        if not up:
+        if not up and not upmax:
             return True
         c = closes.get(r["code"], (None, None))[1]
         if not c or not r["target"]:
             return False
         u = r["target"] / c - 1
-        return (u < 0 if up == "down" else 0 <= u < 0.1 if up == "0" else u >= int(up) / 100)
-    if sort == "upside" or up:
+        if up == "down":
+            return u < 0
+        if up and u < int(up) / 100:
+            return False
+        return not upmax or u <= int(upmax) / 100
+    if sort == "upside" or up or upmax:
         rows = conn.execute(f"SELECT * FROM reports WHERE {where} ORDER BY date DESC, rowid DESC", args).fetchall()
         rows = [r for r in rows if r["code"] in closes and up_ok(r)]
         if sort == "upside":
@@ -750,13 +758,15 @@ def view_report_list(conn, q):
                             args + [PAGE_SIZE, (pg - 1) * PAGE_SIZE]).fetchall()
 
     active = [x for x in (REPORT_SRC[src] if src else "", REPORT_ONLY[only] if only else "",
-                          REPORT_UPSIDE[up] if up else "",
+                          ("상승여력 " + " · ".join(x for x in (REPORT_UPSIDE[up] if up else "",
+                                                                REPORT_UPMAX[upmax] if upmax else "") if x))
+                          if (up or upmax) else "",
                           f"증권사: {broker}" if broker else "") if x]
     form = (f'<form method="get"><div class="filters"><input type="search" name="q" value="{escape(text)}" '
             f'placeholder="종목명·종목코드·제목"><button>보기</button></div>'
             f'<details{" open" if active or sort != "date" else ""}><summary>필터·정렬</summary>'
             f'<div class="filters" style="margin-top:8px">{select("d", REPORT_PERIODS, d)}{select("src", REPORT_SRC, src)}'
-            f'{select("only", REPORT_ONLY, only)}{select("up", REPORT_UPSIDE, up)}'
+            f'{select("only", REPORT_ONLY, only)}{select("up", REPORT_UPSIDE, up)}{select("upmax", REPORT_UPMAX, upmax)}'
             f'<input type="search" name="b" value="{escape(broker)}" placeholder="증권사 (예: 키움)">'
             f'{select("sort", {k: v[0] for k, v in REPORT_SORTS.items()}, sort)}<button>적용</button></div></details></form>')
     chips = ('<div style="margin:4px 0 10px">' + "".join(f'<span class="chip">{escape(a)}</span>' for a in active)
@@ -789,7 +799,7 @@ def view_report_list(conn, q):
             f'<div class="muted">{escape(r["broker"] or "")}{" · " + escape(r["author"]) if r["author"] else ""}'
             f' · <span class="chip">{SRC_CHIP.get(r["source"], "")}</span></div>'
             f'<div>{tgt}</div>{price_line}{summary_fold(r)}</div>')
-    keep = {k: v for k, v in {"q": text, "b": broker, "d": d if d != "30" else "", "src": src, "only": only, "up": up,
+    keep = {k: v for k, v in {"q": text, "b": broker, "d": d if d != "30" else "", "src": src, "only": only, "up": up, "upmax": upmax,
                               "sort": sort if sort != "date" else ""}.items() if v}
     link = lambda n: "/reports?" + urlencode({**keep, "p": n})   # noqa: E731
     body = (reports_last_line() + form + chips + ("".join(cards) or '<p class="muted">조건에 맞는 리포트가 없습니다.</p>')
