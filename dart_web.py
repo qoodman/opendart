@@ -936,30 +936,13 @@ def view_market(conn):
 
 
 # ---------------- 유대인 달력 ----------------
-def view_calendar(conn):
-    try:
-        import jewish_calendar as jc
-    except ImportError:
-        return page("달력", '<div class="card">달력 계산 라이브러리가 아직 없습니다. 설정 → 업데이트를 한 번 해 주세요.</div>')
-    import stock_market
-    today = dt.date.today()
-    hs = jc.holidays_between(today - dt.timedelta(days=30), today + dt.timedelta(days=400))
-    up = []
-    for h in hs:
-        if h["end"] < today:
-            continue
-        dd = (h["start"] - today).days
-        when = ("진행 중" if h["start"] <= today else "오늘" if dd == 0 else f"D-{dd}")
-        period = (f'{h["start"]:%Y-%m-%d}' + (f' ~ {h["end"]:%m-%d}' if h["days"] > 1 else "")
-                  + f' ({"월화수목금토일"[h["start"].weekday()]})')
-        up.append(f'<div style="border-top:1px solid var(--line);padding:9px 0"><div class="row">'
-                  f'<b>{escape(h["name"])}</b><b class="{"up" if dd <= 7 else ""}">{when}</b></div>'
-                  f'<div>{period}</div><div class="muted">{escape(h["desc"])} · {escape(h["hebrew"])}</div>'
-                  + (f'<div class="up" style="font-size:13px">{escape(h["note"])}</div>' if h["note"] else "") + "</div>")
-    cal = (f'<div class="card"><b>다가오는 유대 명절</b><div class="muted">오늘 {escape(jc.today_hebrew(today))} · '
-           '명절은 전날 해 질 때 시작합니다 (해외 기준 기간)</div>'
-           f'<div style="margin-top:6px">{"".join(up[:12])}</div></div>')
+CAL_DAYS = {"30": "앞으로 1달", "90": "앞으로 3달", "180": "앞으로 6달", "365": "앞으로 1년"}
 
+
+def jewish_test(conn):
+    """'로쉬 하샤나에 팔고 욤 키푸르에 사라' 격언 검증 카드"""
+    import jewish_calendar as jc
+    import stock_market
     series = {"코스피": list(stock_market.series(conn, "idx:KOSPI")), "코스닥": list(stock_market.series(conn, "idx:KOSDAQ"))}
     series = {k: v for k, v in series.items() if v}
     if not series:
@@ -988,7 +971,64 @@ def view_calendar(conn):
                 + "".join(summ)
                 + f'<div class="scroll"><table><tr><th>해</th><th>기간</th>{"".join(f"<th>{n}</th>" for n in names)}</tr>'
                   f'{trs}</table></div></div>')
-    return page("달력", cal + test)
+    return test
+
+
+def view_calendar(conn, q):
+    try:
+        import market_calendar as mc
+    except ImportError:
+        return page("달력", '<div class="card">달력 계산 라이브러리가 아직 없습니다. 설정 → 업데이트를 한 번 해 주세요.</div>')
+    today = dt.date.today()
+    days = q.get("d") if q.get("d") in CAL_DAYS else "90"
+    cat = q.get("c") if q.get("c") in mc.CATS + ["중요"] else ""
+    evs = mc.events_between(today - dt.timedelta(days=1), today + dt.timedelta(days=int(days)), conn)
+    if cat == "중요":
+        evs = [e for e in evs if e["important"]]
+    elif cat:
+        evs = [e for e in evs if e["cat"] == cat]
+    base = {"d": days} if days != "90" else {}
+    chips = "".join(
+        (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{c or "전체"}</b>' if c == cat else
+         f'<a class="chip" href="/calendar?{urlencode({**base, **({"c": c} if c else {})})}">{c or "전체"}</a>')
+        for c in ["", "중요"] + mc.CATS)
+    period = "".join(
+        (f'<b>{v}</b>' if k == days else f'<a href="/calendar?{urlencode({"d": k, **({"c": cat} if cat else {})})}">{v}</a>')
+        + " " for k, v in CAL_DAYS.items())
+    rows, month = [], None
+    for e in evs:
+        d = e["date"]
+        if d.strftime("%Y-%m") != month:
+            month = d.strftime("%Y-%m")
+            rows.append(f'<h2>{d.year}년 {d.month}월</h2>')
+        dd = (d - today).days
+        when = "오늘" if dd == 0 else "어제" if dd < 0 else f"D-{dd}"
+        tags = f'<span class="chip">{escape(e["cat"])}</span>' + (f'<span class="chip">{escape(e["region"])}</span>' if e["region"] else "") \
+            + ('<span class="chip">예상</span>' if e["approx"] else "")
+        delete = (f'<form method="post" action="/calendar/del" style="display:inline"><input type="hidden" name="id" value="{e["uid"]}">'
+                  '<button class="ghost" style="padding:2px 8px;font-size:12px">지우기</button></form>') if e["uid"] else ""
+        rows.append(
+            f'<div class="card" style="{"border-color:var(--accent)" if e["important"] else ""}">'
+            f'<div class="row"><div><b>{d.month}/{d.day} ({"월화수목금토일"[d.weekday()]})</b> '
+            f'{"★ " if e["important"] else ""}{escape(e["title"])}</div><b class="{"up" if 0 <= dd <= 3 else "muted"}">{when}</b></div>'
+            f'<div style="margin-top:4px">{tags}{delete}</div>'
+            + (f'<div class="muted">{escape(e["note"])}</div>' if e["note"] else "") + "</div>")
+    add = ('<details class="card"><summary>일정 직접 추가 (금통위·CPI·실적 발표 등)</summary>'
+           '<form method="post" action="/calendar/add" style="margin-top:8px">'
+           f'<input type="date" name="date" value="{today.isoformat()}" style="width:100%">'
+           '<input type="text" name="title" placeholder="예: 한국은행 금통위 금리 결정" style="width:100%;margin-top:6px">'
+           '<input type="text" name="note" placeholder="메모 (선택)" style="width:100%;margin-top:6px">'
+           '<label class="set"><input type="checkbox" name="important" value="1" checked> 중요 (전날 알림)</label>'
+           '<button style="margin-top:6px">추가</button></form>'
+           '<div class="muted" style="margin-top:6px">한국은행 금통위·미국 CPI처럼 해마다 날짜가 바뀌는 일정은 '
+           '발표된 날짜를 여기에 넣어 주세요.</div></details>')
+    head = ('<div class="muted" style="margin-bottom:6px">주식시장에 영향을 주는 일정. ★는 중요, \'예상\'은 해마다 '
+            '조금씩 달라지는 대략적인 날입니다.</div>'
+            f'<div>{chips}</div><div style="margin:8px 0">{period}</div>')
+    body = head + add + ("".join(rows) or '<p class="muted">이 기간에 일정이 없습니다.</p>')
+    if cat in ("", "유대"):
+        body += "<h2>유대 명절과 증시</h2>" + jewish_test(conn)
+    return page("달력", body)
 
 
 def gap_pct(v):
@@ -1230,7 +1270,7 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 elif url.path == "/parse":
                     body = view_parse(conn, q.get("r", ""))
                 elif url.path == "/calendar":
-                    body = view_calendar(conn)
+                    body = view_calendar(conn, q)
                 elif url.path == "/market":
                     body = view_market(conn)
                 elif url.path == "/policy":
@@ -1282,6 +1322,24 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 if errors:
                     qs["errs"] = json.dumps(errors, ensure_ascii=False)
                 return self._redirect("/settings?" + urlencode(qs))
+            if path in ("/calendar/add", "/calendar/del"):
+                n = min(int(self.headers.get("Content-Length") or 0), 8192)
+                form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore")).items()}
+                import market_calendar as mc
+                conn = sqlite3.connect(db_path)
+                try:
+                    mc.ensure(conn)
+                    if path.endswith("add") and re.fullmatch(r"\d{4}-\d{2}-\d{2}", form.get("date", "")) \
+                            and form.get("title", "").strip():
+                        conn.execute("INSERT INTO cal_events (date, title, note, important) VALUES (?,?,?,?)",
+                                     (form["date"], form["title"].strip()[:100], form.get("note", "").strip()[:200],
+                                      1 if form.get("important") else 0))
+                    elif path.endswith("del") and str(form.get("id", "")).isdigit():
+                        conn.execute("DELETE FROM cal_events WHERE id=?", (int(form["id"]),))
+                    conn.commit()
+                finally:
+                    conn.close()
+                return self._redirect("/calendar")
             if path == "/settings/collect" and settings_api:
                 n = min(int(self.headers.get("Content-Length") or 0), 65536)
                 form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore"),

@@ -138,6 +138,8 @@ SETTINGS_SPEC = [
     ("시장·정책", "DART_POLICY", "주식 정책 소식 받기 (보도자료·법령·국회 법안)", "bool", "1",
      "공공데이터포털·법제처·열린국회정보 키를 부동산 앱과 같이 씁니다."),
     ("시장·정책", "DART_POLICY_NOTIFY", "새 정책 소식 알림 보내기", "bool", "1", "첫 수집은 기준선이라 알림이 없습니다."),
+    ("시장·정책", "DART_CAL_NOTIFY", "내일 주요 증시 일정 알림 (저녁 6시)", "bool", "1",
+     "달력의 ★ 일정(동시만기·휴장·FOMC·MSCI 반영·직접 추가한 중요 일정 등)이 내일이면 전날 저녁에 알립니다."),
     ("업데이트", "DART_AUTO_UPDATE", "매일 새벽 5시에 자동 업데이트", "bool", "0",
      "GitHub에 새 버전이 있으면 받아서 설치합니다. 수집 중이면 다음 날로 미룹니다."),
     ("화면", "DASHBOARD_URL", "이 대시보드 주소", "url", "", "알림을 눌렀을 때 열 주소. 예: https://dart.xxxx.ts.net"),
@@ -737,9 +739,36 @@ def last_run_started():
         return ""
 
 
+def calendar_tick(now):
+    """저녁 6시 이후 하루 한 번: 내일 ★ 일정이 있으면 알림"""
+    if env("DART_CAL_NOTIFY", "1") == "0" or now.hour < 18:
+        return
+    state = data_dir() / "last_cal_notify.txt"
+    today = now.date().isoformat()
+    if (state.read_text().strip() if state.exists() else "") == today:
+        return
+    state.write_text(today)
+    import market_calendar as mc
+    tomorrow = now.date() + dt.timedelta(days=1)
+    conn = sqlite3.connect(results_db())
+    try:
+        evs = [e for e in mc.events_between(tomorrow, tomorrow, conn) if e["important"]]
+    finally:
+        conn.close()
+    if not evs:
+        return
+    url = env("DASHBOARD_URL")
+    notify(f"내일 증시 일정 {len(evs)}건", "\n".join(f"· {e['title']}" + (f" — {e['note']}" if e['note'] else "") for e in evs),
+           click=(url.rstrip("/") + "/calendar") if url else "", tags=("calendar",))
+
+
 def cmd_tick(args):
     """10분마다 타이머가 부름: 설정한 자동 수집 시각이 지났고 아직 안 돌았으면 수집."""
     now = dt.datetime.now()
+    try:
+        calendar_tick(now)
+    except Exception as e:
+        print(f"달력 알림 실패: {e}", flush=True)
     try:
         auto_update_tick(now)
     except Exception as e:
