@@ -23,12 +23,69 @@ US_NAMES = {"New Year's Day": "새해", "Martin Luther King Jr. Day": "마틴 �
             "Washington's Birthday": "대통령의 날", "Good Friday": "성금요일", "Memorial Day": "현충일",
             "Juneteenth National Independence Day": "준틴스", "Independence Day": "독립기념일",
             "Labor Day": "노동절", "Thanksgiving Day": "추수감사절", "Christmas Day": "성탄절"}
-CATS = ["휴장", "만기", "지수", "실적·공시", "통화정책", "미국 지표", "유대", "내 일정"]
+CATS = ["휴장", "만기", "지수", "실적·공시", "통화정책", "미국 지표", "정치", "유대", "내 일정"]
+
+
+def _first_wed_on_or_after(d):
+    return d + dt.timedelta(days=(2 - d.weekday()) % 7)
+
+
+def _kr_election(term_end, days_before, kr_days):
+    """공직선거법: 임기만료일 전 N일 이후 첫 수요일, 공휴일과 겹치면 다음 주 수요일
+    (2012~2026 총선·지방선거 8번이 모두 이 규칙과 일치함을 확인)"""
+    d = _first_wed_on_or_after(term_end - dt.timedelta(days=days_before))
+    while d in kr_days:
+        d += dt.timedelta(days=7)
+    return d
+
+
+def kr_elections(years):
+    """{날짜: 이름} 국회의원 총선거(2028+4n년, 임기 5/29 만료)·전국동시지방선거(2026+4n년, 6/30 만료)"""
+    base = holidays.country_holidays("KR", years=list(years) + [min(years) - 1, max(years) + 1], language="ko")
+    plain = {d for d, n in base.items() if "선거" not in n}
+    out = {}
+    for y in years:
+        if (y - 2024) % 4 == 0:
+            out[_kr_election(dt.date(y, 5, 29), 50, plain)] = f"제{22 + (y - 2024) // 4}대 국회의원 총선거"
+        if (y - 2026) % 4 == 0:
+            out[_kr_election(dt.date(y, 6, 30), 30, plain)] = f"제{9 + (y - 2026) // 4}회 전국동시지방선거"
+    return out
+
+
+def us_election_day(y):
+    """11월 첫째 월요일 다음 날(화요일)"""
+    d = dt.date(y, 11, 1)
+    d += dt.timedelta(days=(0 - d.weekday()) % 7)
+    return d + dt.timedelta(days=1)
+
+
+def kr_assembly_session(y, closed):
+    """정기국회: 9/1 개회(공휴일이면 다음 날), 100일 이내 → 폐회"""
+    d = dt.date(y, 9, 1)
+    while d.weekday() >= 5 or d in closed:
+        d += dt.timedelta(days=1)
+    return d, d + dt.timedelta(days=99)
+
+
+def elections_ahead(today=None, years=6):
+    """앞으로 몇 년 안의 주요 선거 (달력 기간과 상관없이)"""
+    today = today or dt.date.today()
+    ys = range(today.year, today.year + years + 1)
+    out = [dict(date=d, name=n, region="국내", note="선거일은 공휴일이라 국내 증시 휴장") for d, n in kr_elections(ys).items()]
+    for y in ys:
+        if y % 2 == 0:
+            out.append(dict(date=us_election_day(y), region="미국",
+                            name="미국 대통령 선거" if y % 4 == 0 else "미국 중간선거 (상·하원)",
+                            note="한국 시간 수요일 오전부터 개표 결과"))
+    out.append(dict(date=None, region="국내", name="제22대 대통령 선거 (2030년)", note="날짜가 확정되면 달력에서 직접 추가해 주세요"))
+    return sorted([o for o in out if o["date"] is None or o["date"] >= today], key=lambda o: (o["date"] is None, o["date"] or today))
 
 
 def _closed_sets(years):
     kr = holidays.country_holidays("KR", years=years, language="ko")
     krx = {d: n for d, n in kr.items()}
+    for d, n in kr_elections(years).items():       # 앞으로의 선거일도 휴장 (라이브러리에 아직 없음)
+        krx.setdefault(d, "선거일")
     for y in years:
         krx.setdefault(dt.date(y, 5, 1), "근로자의 날")
         krx.setdefault(dt.date(y, 12, 31), "연말 휴장")
@@ -126,6 +183,25 @@ def events_between(start, end, conn=None):
                              (8, 14): "반기보고서 제출 마감", (11, 14): "3분기보고서 제출 마감"}.items():
             out.append(_ev(_biz(dt.date(y, m, d), krx, 1), name, "실적·공시", "국내",
                            "이 날까지 실적 공시가 몰림"))
+        # ---- 정치 ----
+        if y % 2 == 0:
+            ue = us_election_day(y)
+            out.append(_ev(ue, "미국 대통령 선거" if y % 4 == 0 else "미국 중간선거 (상·하원 선거)", "정치", "미국",
+                           "한국 시간 수요일 오전부터 개표 결과, 결과에 따라 정책 기대와 변동성이 달라질 수 있음", important=True))
+        if y % 4 == 1 and y > 2000:
+            out.append(_ev(dt.date(y, 1, 20), "미국 대통령 취임식", "정치", "미국", important=True))
+        if y % 2 == 1:
+            out.append(_ev(dt.date(y, 1, 3), "미국 새 의회 개원", "정치", "미국"))
+        out.append(_ev(dt.date(y, 9, 30), "미국 회계연도 말 (연방 예산 시한)", "정치", "미국",
+                       "예산·임시예산 미통과 시 연방정부 일부 업무정지(셧다운) 위험", important=True))
+        op, cl = kr_assembly_session(y, krx)
+        out.append(_ev(op, "정기국회 개회", "정치", "국내", "100일 이내, 예산안·세법 심사"))
+        out.append(_ev(_biz(dt.date(y, 9, 3), krx, -1), "정부 예산안 국회 제출 시한", "정치", "국내", "국가재정법: 회계연도 개시 120일 전"))
+        out.append(_ev(dt.date(y, 12, 2), "예산안 법정 처리 시한", "정치", "국내",
+                       "헌법상 시한이지만 넘겨 처리되는 해도 많음", important=True))
+        out.append(_ev(cl, "정기국회 폐회 (100일)", "정치", "국내", "세법 개정안 통과 여부 확인"))
+        for d, n in kr_elections([y]).items():
+            out.append(_ev(d, n, "정치", "국내", "선거일은 공휴일 → 국내 증시 휴장", important=True))
         for m, d1, d2 in FOMC.get(y, []):
             out.append(_ev(dt.date(y, m, d2), "FOMC 금리 결정", "통화정책", "미국",
                            f"{m}월 {d1}~{d2}일 회의, 한국 시간 다음 날 새벽 3~4시 발표", important=True))
