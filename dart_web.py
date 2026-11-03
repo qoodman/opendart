@@ -1177,26 +1177,7 @@ def view_calendar(conn, q):
     head = ('<div class="muted" style="margin-bottom:6px">주식시장에 영향을 주는 일정. ★는 중요, \'예상\'은 해마다 '
             '조금씩 달라지는 대략적인 날입니다.</div>'
             f'<div>{chips}</div>{region_chips}<div style="margin:8px 0">{period}</div>')
-    elect = ""
-    if cat in ("", "정치"):
-        lis = []
-        for e in mc.elections_ahead(today):
-            if rg and e["region"] != rg:
-                continue                   # 지역을 골랐으면 그 지역 선거만
-            if e["date"]:
-                dd = (e["date"] - today).days
-                when = "오늘" if dd == 0 else f"D-{dd:,}"
-                lis.append(f'<div style="border-top:1px solid var(--line);padding:8px 0"><div class="row"><b>{escape(e["name"])}</b>'
-                           f'<b class="{"up" if dd <= 7 else "muted"}">{when}</b></div>'
-                           f'<div>{e["date"]:%Y-%m-%d} ({"월화수목금토일"[e["date"].weekday()]}) · {escape(e["region"])}</div>'
-                           f'<div class="muted">{escape(e["note"])}</div></div>')
-            else:
-                lis.append(f'<div style="border-top:1px solid var(--line);padding:8px 0"><b>{escape(e["name"])}</b>'
-                           f'<div class="muted">{escape(e["note"])}</div></div>')
-        elect = "" if not lis else ('<div class="card"><b>앞으로의 주요 선거</b><div class="muted">국내 총선·지방선거는 공직선거법 규칙으로 계산한 날짜이고, '
-                 '미국은 11월 첫째 월요일 다음 날입니다. 대통령 선거·재보궐선거처럼 확정 전인 선거는 날짜가 정해지면 직접 추가해 주세요.</div>'
-                 + "".join(lis) + "</div>")
-    body = head + add + elect + ("".join(rows) or '<p class="muted">이 기간에 일정이 없습니다.</p>')
+    body = head + add + ("".join(rows) or '<p class="muted">이 기간에 일정이 없습니다.</p>')
     if cat in ("", "유대"):
         body += "<h2>유대 명절과 증시</h2>" + jewish_test(conn)
     return page("달력", body)
