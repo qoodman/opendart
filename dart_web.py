@@ -942,16 +942,18 @@ def view_parse(conn, rno):
         head = tb.get_text(" ")
         if "변동일" not in head or "단가" not in head:
             continue
+        desc, rows_ = de.explain_table(tb)
         trs = []
-        for tr in tb.find_all("tr"):
-            cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "te", "tu", "th"])]
-            if not any(cells):
-                continue
-            got = de.parse_row(cells)
-            res = (f'<span class="up">증감 {won(got[1])} · 단가 {won(got[2])}</span>' if got
-                   else '<span class="muted">-</span>')
-            trs.append("<tr>" + "".join(f"<td>{escape(c)}</td>" for c in cells) + f"<td>{res}</td></tr>")
-        blocks.append(f'<div class="scroll"><table>{"".join(trs)}</table></div>')
+        for cells, res in rows_:
+            if res:
+                _, _, qty, price, _, _, how = res
+                out = (f'<span class="up">증감 {won(qty)} · 단가 {won(price) if price is not None else "-"}</span>'
+                       f'<div class="muted" style="font-size:12px">{escape(how)}</div>')
+            else:
+                out = '<span class="muted">-</span>'
+            trs.append("<tr>" + "".join(f"<td>{escape(c)}</td>" for c in cells) + f"<td>{out}</td></tr>")
+        blocks.append(f'<div class="muted" style="margin-top:8px">인식한 칸: {escape(desc)}</div>'
+                      f'<div class="scroll"><table>{"".join(trs)}</table></div>')
     saved = "".join(f'<tr><td>{escape(str(r["변동일"]))}</td><td>{escape(str(r["방법"]))}</td>'
                     f'<td>{won(r["증감"])}</td><td>{won(r["단가"])}</td></tr>' for r in stored)
     body = (f'<div class="row"><b>공시 {escape(rno)}</b><a href="{dart_link(rno)}">DART 원문 ↗</a></div>{note}'
@@ -997,6 +999,16 @@ def view_check(conn, st):
         out.append(f'<div class="card"><b>수량과 단가가 같은 줄 (화면에 쓰이는 값)</b><div>{total:,}줄</div>'
                    + (f'<ul style="padding-left:18px;margin:6px 0">{items}</ul><div class="muted">누르면 그 공시의 표를 볼 수 있습니다. '
                       '하나를 캡처해서 보내 주세요.</div>' if bad else '<div class="muted">없습니다.</div>') + '</div>')
+    if has_table(conn, "detail"):
+        nop = conn.execute("SELECT 접수번호, MAX(종목명) n, MAX(제출인) w, COUNT(*) c FROM detail "
+                           "WHERE 증감 > 0 AND 단가 IS NULL GROUP BY 접수번호 ORDER BY c DESC LIMIT 15").fetchall()
+        total_nop = conn.execute("SELECT COUNT(*) FROM detail WHERE 증감 > 0 AND 단가 IS NULL").fetchone()[0]
+        items = "".join(f'<li><a href="/parse?r={quote(str(b["접수번호"]))}">{escape(str(b["n"]))} · {escape(str(b["w"]))}</a> '
+                        f'<span class="muted">{b["c"]}줄</span></li>' for b in nop)
+        out.append(f'<div class="card"><b>매수인데 단가를 읽지 못한 줄</b><div>{total_nop:,}줄</div>'
+                   + (f'<ul style="padding-left:18px;margin:6px 0">{items}</ul><div class="muted">공시 원문에 단가가 없거나 '
+                      '수량과 같게 적힌 경우, 틀린 평균단가 대신 비워 둡니다. 누르면 원문 표와 인식한 칸을 볼 수 있어요.</div>'
+                      if nop else '<div class="muted">없습니다.</div>') + '</div>')
     return page("분석 점검", "".join(out))
 
 

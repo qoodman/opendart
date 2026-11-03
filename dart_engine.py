@@ -33,7 +33,7 @@ except ImportError:
 
 BASE = "https://opendart.fss.or.kr/api"
 DATE_RE = re.compile(r"(\d{4})\s*[.\-년/]\s*(\d{1,2})\s*[.\-월/]\s*(\d{1,2})")
-PARSE_VERSION = 4       # 분석 결과 형식이 바뀌면 올림 (저장된 분석 결과를 다시 만듦)
+PARSE_VERSION = 5       # 분석 결과 형식이 바뀌면 올림 (저장된 분석 결과를 다시 만듦)
 HEARTBEAT = 30          # 명령줄 버전의 ♥ 줄 간격(초)
 WARN_IDLE = 90          # 응답 없음 경고(초)
 DEAD_IDLE = 180         # 다시 시작 권장(초)
@@ -177,6 +177,132 @@ def parse_row(cells):
     return None
 
 
+def _span(tag, name):
+    try:
+        return max(int(str(tag.get(name) or "1").strip() or 1), 1)
+    except ValueError:
+        return 1
+
+
+def expand_table(tb):
+    """표를 칸 병합(rowspan·colspan)을 풀어 [[글자…]…] 격자로. 병합된 칸은 합쳐진 모든 칸에 같은 글자를 채움."""
+    grid, pending = [], {}          # pending: (줄, 칸) → 글자 (위 줄에서 내려오는 병합 칸)
+    for r, tr in enumerate(tb.find_all("tr")):
+        row, col = [], 0
+        for tag in tr.find_all(["td", "te", "tu", "th"]):
+            while (r, col) in pending:
+                row.append(pending[(r, col)])
+                col += 1
+            text = tag.get_text(" ", strip=True)
+            cs, rs = _span(tag, "colspan"), _span(tag, "rowspan")
+            for dc in range(cs):
+                row.append(text)
+                for dr in range(1, rs):
+                    pending[(r + dr, col + dc)] = text
+            col += cs
+        while (r, col) in pending:
+            row.append(pending.pop((r, col)))
+            col += 1
+        grid.append(row)
+    return grid
+
+
+def table_columns(grid):
+    """격자에서 (머리글 줄 수, {열 이름: 칸 번호}). 머리글 글자(변동일·증감·취득/처분 단가…)로 칸을 찾음."""
+    first = next((i for i, row in enumerate(grid) if any(DATE_RE.search(c) and not _is_num(c) for c in row)), None)
+    if first is None or first == 0:
+        return 0, {}
+    width = max(len(r) for r in grid[:first])
+    labels = []
+    for j in range(width):
+        parts = []
+        for row in grid[:first]:
+            t = (row[j] if j < len(row) else "").replace(" ", "")
+            if t and t not in parts:
+                parts.append(t)
+        labels.append(" ".join(parts))
+    cols = {}
+    for j, lab in enumerate(labels):
+        if "변동일" in lab and "date" not in cols:
+            cols["date"] = j
+        elif "단가" in lab and "price" not in cols:
+            cols["price"] = j
+        elif "방법" in lab and "method" not in cols:
+            cols["method"] = j
+        elif "종류" in lab and "kind" not in cols:
+            cols["kind"] = j
+        elif "증감" in lab and "qty" not in cols:
+            cols["qty"] = j
+        elif "qty" not in cols and "취득" in lab and "처분" in lab and ("주식" in lab or "수량" in lab):
+            cols["qty"] = j          # 증감 칸이 없는 표: '취득/처분 주식수'
+    cols["_labels"] = labels
+    return first, cols
+
+
+def read_grid_row(row, cols):
+    """머리글로 찾은 칸에서 (변동일 글자, 증감, 단가, 방법, 종류). 못 읽으면 None."""
+    need = ("date", "qty", "price")
+    if any(k not in cols or cols[k] >= len(row) for k in need):
+        return None
+    if not DATE_RE.search(row[cols["date"]]):
+        return None
+    qty = _signed(row[cols["qty"]])
+    if qty is None:
+        return None
+    price = num(row[cols["price"]]) if _is_num(row[cols["price"]]) else None
+    g = lambda k: row[cols[k]] if k in cols and cols[k] < len(row) else ""   # noqa: E731
+    return row[cols["date"]], qty, price, g("method"), g("kind")
+
+
+def parse_grid_row(row, cols):
+    """격자 한 줄 → (보고자, 변동일 글자, 증감, 단가, 방법, 종류, 읽은 방식). 날짜가 없는 줄이면 None.
+    방식: 머리글 / 숫자 규칙 / 고정 위치"""
+    if not any(DATE_RE.search(c) and not _is_num(c) for c in row):
+        return None
+    how = "머리글"
+    got = read_grid_row(row, cols) if cols else None
+    if got:
+        dtext, qty, price, method, kind = got
+    else:
+        how = "숫자 규칙"
+        r = parse_row(row)
+        if r:
+            di, qty, price, method, kind = r
+            dtext = row[di]
+        else:
+            how = "고정 위치"
+            di = next((i for i, c in enumerate(row) if DATE_RE.search(c)), None)
+            if di is None or len(row) < di + 7:
+                return None
+            qty, price, method, kind, dtext = num(row[di + 4]), num(row[di + 6]), row[di + 1], row[di + 2], row[di]
+    if price is not None and qty and abs(price) == abs(qty):
+        price, how = None, how + " · 원문 단가가 수량과 같아 비움"      # 틀린 평균단가가 보이지 않게
+    return (row[0] if row else "", dtext, qty, price, method, kind, how)
+
+
+def parse_table(tb):
+    """표 하나 → [(보고자, 변동일 글자, 증감, 단가, 방법, 종류, 읽은 방식)…]"""
+    grid = expand_table(tb)
+    first, cols = table_columns(grid)
+    out = []
+    for row in grid[first:] if cols else grid:
+        r = parse_grid_row(row, cols)
+        if r:
+            out.append(r)
+    return out
+
+
+def explain_table(tb):
+    """점검용: (열 설명, [(격자 줄, 읽은 결과 또는 None)…])"""
+    grid = expand_table(tb)
+    first, cols = table_columns(grid)
+    names = {"date": "변동일", "qty": "증감", "price": "단가", "method": "방법", "kind": "종류"}
+    desc = (", ".join(f"{names[k]}={cols[k] + 1}번째 칸" for k in names if k in cols)
+            or "머리글에서 칸을 찾지 못해 숫자 규칙으로 읽음")
+    rows = [(row, parse_grid_row(row, cols)) for row in (grid[first:] if cols else grid) if any(row)]
+    return desc, rows
+
+
 def parse_one(rp, cache, body_word):
     xml = read_zip(zpath(cache, rp["rcept_no"]))
     if body_word and body_word not in xml:   # 본문 필터: 파싱 전에 문자열로 먼저 거름
@@ -189,28 +315,13 @@ def parse_one(rp, cache, body_word):
         head = tb.get_text(" ")
         if "변동일" not in head or "단가" not in head:
             continue
-        for tr in tb.find_all("tr"):
-            cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "te", "tu", "th"])]
-            got = parse_row(cells)
-            if got:
-                di, qty, price, method, kind = got
-                if price is not None and qty and abs(price) == abs(qty):
-                    price = None      # 단가 칸이 아니라 수량을 한 번 더 읽은 것 → 비움 (틀린 평균단가 방지)
-            else:
-                # 예전 방식 (날짜 칸 기준 고정 위치). 단가가 수량과 같으면 잘못 읽은 것이라 비움
-                di = next((i for i, c in enumerate(cells) if DATE_RE.search(c)), None)
-                if di is None or len(cells) < di + 7:
-                    continue
-                qty, price = num(cells[di + 4]), num(cells[di + 6])
-                method, kind = cells[di + 1], cells[di + 2]
-                if price is not None and qty is not None and abs(price) == abs(qty):
-                    price = None
-            y, mo, d = DATE_RE.search(cells[di]).groups()
+        for who, dtext, qty, price, method, kind, how in parse_table(tb):
+            y, mo, d = DATE_RE.search(dtext).groups()
             rows.append(dict(
                 종목명=rp.get("stock_name") or rp["corp_name"], 종목코드=rp.get("stock_code"),
                 회사=rp["corp_name"], 보고서=rp["report_nm"],
                 제출일=_ymd(rp["rcept_dt"]), 접수번호=rp["rcept_no"], 보유목적=purpose,
-                제출인=rp["flr_nm"], 보고자=cells[0],
+                제출인=rp["flr_nm"], 보고자=who,
                 변동일=f"{y}-{int(mo):02d}-{int(d):02d}",
                 방법=method, 종류=kind, 증감=qty, 단가=price))
     return rows

@@ -989,12 +989,13 @@ def cmd_parse_check(args):
         head = tb.get_text(" ")
         if "변동일" not in head or "단가" not in head:
             continue
-        for tr in tb.find_all("tr"):
-            cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "te", "tu", "th"])]
-            got = de.parse_row(cells)
+        desc, rows_ = de.explain_table(tb)
+        print(f"[표] 인식한 칸: {desc}")
+        for cells, res in rows_:
             print(" | ".join(cells)[:200])
-            if got:
-                print(f"   → 변동일 {cells[got[0]]} · 증감 {got[1]:,.0f} · 단가 {got[2] if got[2] is None else f'{got[2]:,.0f}'} · {got[3]}")
+            if res:
+                _, _, qty, price, method, _, how = res
+                print(f"   → 증감 {qty:,.0f} · 단가 {'-' if price is None else format(price, ',.0f')} · {method} [{how}]")
     return 0
 
 
