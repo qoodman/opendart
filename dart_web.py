@@ -1093,19 +1093,28 @@ def view_calendar(conn, q):
     today = dt.date.today()
     days = q.get("d") if q.get("d") in CAL_DAYS else "90"
     cat = q.get("c") if q.get("c") in mc.CATS + ["중요"] else ""
+    rg = q.get("r") if q.get("r") in mc.REGIONS else ""
     evs = mc.events_between(today - dt.timedelta(days=1), today + dt.timedelta(days=int(days)), conn)
     if cat == "중요":
         evs = [e for e in evs if e["important"]]
     elif cat:
         evs = [e for e in evs if e["cat"] == cat]
-    base = {"d": days} if days != "90" else {}
+    if rg:
+        evs = [e for e in evs if e["region"] == rg]
+    keep = {**({"d": days} if days != "90" else {}), **({"c": cat} if cat else {}), **({"r": rg} if rg else {})}
+
+    def cal_link(**ch):
+        return "/calendar?" + urlencode({k: v for k, v in {**keep, **ch}.items() if v})
+
+    on = 'style="background:var(--accent);color:var(--bg)"'
     chips = "".join(
-        (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{c or "전체"}</b>' if c == cat else
-         f'<a class="chip" href="/calendar?{urlencode({**base, **({"c": c} if c else {})})}">{c or "전체"}</a>')
+        (f'<b class="chip" {on}>{c or "전체"}</b>' if c == cat else f'<a class="chip" href="{cal_link(c=c)}">{c or "전체"}</a>')
         for c in ["", "중요"] + mc.CATS)
+    region_chips = '<div style="margin-top:6px">지역: ' + "".join(
+        (f'<b class="chip" {on}>{r or "전체"}</b>' if r == rg else f'<a class="chip" href="{cal_link(r=r)}">{r or "전체"}</a>')
+        for r in [""] + mc.REGIONS) + "</div>"
     period = "".join(
-        (f'<b>{v}</b>' if k == days else f'<a href="/calendar?{urlencode({"d": k, **({"c": cat} if cat else {})})}">{v}</a>')
-        + " " for k, v in CAL_DAYS.items())
+        (f'<b>{v}</b>' if k == days else f'<a href="{cal_link(d=k)}">{v}</a>') + " " for k, v in CAL_DAYS.items())
     rows, month = [], None
     for e in evs:
         d = e["date"]
@@ -1135,11 +1144,13 @@ def view_calendar(conn, q):
            '발표된 날짜를 여기에 넣어 주세요.</div></details>')
     head = ('<div class="muted" style="margin-bottom:6px">주식시장에 영향을 주는 일정. ★는 중요, \'예상\'은 해마다 '
             '조금씩 달라지는 대략적인 날입니다.</div>'
-            f'<div>{chips}</div><div style="margin:8px 0">{period}</div>')
+            f'<div>{chips}</div>{region_chips}<div style="margin:8px 0">{period}</div>')
     elect = ""
     if cat in ("", "정치"):
         lis = []
         for e in mc.elections_ahead(today):
+            if rg and e["region"] != rg:
+                continue                   # 지역을 골랐으면 그 지역 선거만
             if e["date"]:
                 dd = (e["date"] - today).days
                 when = "오늘" if dd == 0 else f"D-{dd:,}"
@@ -1150,7 +1161,7 @@ def view_calendar(conn, q):
             else:
                 lis.append(f'<div style="border-top:1px solid var(--line);padding:8px 0"><b>{escape(e["name"])}</b>'
                            f'<div class="muted">{escape(e["note"])}</div></div>')
-        elect = ('<div class="card"><b>앞으로의 주요 선거</b><div class="muted">국내 총선·지방선거는 공직선거법 규칙으로 계산한 날짜이고, '
+        elect = "" if not lis else ('<div class="card"><b>앞으로의 주요 선거</b><div class="muted">국내 총선·지방선거는 공직선거법 규칙으로 계산한 날짜이고, '
                  '미국은 11월 첫째 월요일 다음 날입니다. 대통령 선거·재보궐선거처럼 확정 전인 선거는 날짜가 정해지면 직접 추가해 주세요.</div>'
                  + "".join(lis) + "</div>")
     body = head + add + elect + ("".join(rows) or '<p class="muted">이 기간에 일정이 없습니다.</p>')

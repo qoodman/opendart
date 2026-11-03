@@ -23,7 +23,8 @@ US_NAMES = {"New Year's Day": "새해", "Martin Luther King Jr. Day": "마틴 �
             "Washington's Birthday": "대통령의 날", "Good Friday": "성금요일", "Memorial Day": "현충일",
             "Juneteenth National Independence Day": "준틴스", "Independence Day": "독립기념일",
             "Labor Day": "노동절", "Thanksgiving Day": "추수감사절", "Christmas Day": "성탄절"}
-CATS = ["휴장", "만기", "지수", "실적·공시", "통화정책", "미국 지표", "정치", "유대", "내 일정"]
+CATS = ["휴장", "만기", "지수", "실적·공시", "통화정책", "해외 지표", "정치", "유대", "내 일정"]
+REGIONS = ["국내", "미국", "일본", "중국", "유럽", "글로벌"]
 
 
 def _first_wed_on_or_after(d):
@@ -111,6 +112,84 @@ def _last_biz(y, m, closed):
     return _biz(d, closed, -1)
 
 
+JP_NAMES = {"Autumnal Equinox Day": "추분", "Bank Holiday": "연말연시 휴장", "Children's Day": "어린이날", "Coming of Age Day": "성인의 날",
+            "Constitution Day": "헌법기념일", "Culture Day": "문화의 날", "Emperor's Birthday": "천황 탄생일", "Foundation Day": "건국기념일",
+            "Greenery Day": "녹색의 날", "Labor Thanksgiving Day": "근로감사의 날", "Marine Day": "바다의 날", "Mountain Day": "산의 날",
+            "National Holiday": "국민의 휴일", "Respect for the Aged Day": "경로의 날", "Showa Day": "쇼와의 날", "Sports Day": "스포츠의 날",
+            "Substitute Holiday": "대체휴일", "Vernal Equinox Day": "춘분", "New Year's Day": "신정"}
+CN_NAMES = {"Chinese New Year (Spring Festival)": "춘절(설)", "Chinese New Year's Eve": "춘절 전날", "Dragon Boat Festival": "단오",
+            "Labor Day": "노동절", "Mid-Autumn Festival": "중추절", "National Day": "국경절", "New Year's Day": "신정",
+            "Tomb-Sweeping Day": "청명절"}
+EU_NAMES = {"Christmas Day": "성탄절", "Christmas Holiday": "성탄절 다음날", "Easter Monday": "부활절 월요일", "Good Friday": "성금요일",
+            "Labour Day": "노동절", "New Year's Day": "신정"}
+
+
+def _ko(name, table):
+    import re
+    base = name.split(";")[0].strip()
+    m = re.match(r"Day off \(substituted from (\d+/\d+)/\d+\)", base)
+    if m:
+        return f"조휴일 ({m.group(1)} 근무일과 맞바꿈)"
+    obs = base.endswith("(observed)")
+    base = base.replace("(observed)", "").strip()
+    return table.get(base, base) + (" 대체휴일" if obs else "")
+
+
+def _asia_europe(years, today):
+    """일본·중국·유럽 휴장일, 만기일, 통화·정치 일정. 반환: (이벤트 목록)"""
+    out = []
+    jp = {d: n for d, n in holidays.financial_holidays("JPX", years=years, language="en_US").items()}
+    cn = {d: n for d, n in holidays.financial_holidays("SSE", years=years, language="en_US").items()}
+    eu = {d: n for d, n in holidays.financial_holidays("ECB", years=years, language="en_US").items()}
+    for d, n in jp.items():
+        if d.weekday() < 5:
+            out.append(_ev(d, f"일본 증시 휴장 · {_ko(n, JP_NAMES)}", "휴장", "일본"))
+    for d, n in cn.items():
+        if d.weekday() < 5:
+            est = d.year > today.year       # 중국은 다음 해 휴일을 연말에 확정 발표
+            out.append(_ev(d, f"중국 증시 휴장 · {_ko(n, CN_NAMES)}" + (" (추정)" if est else ""), "휴장", "중국",
+                           "중국 정부의 공식 휴일 발표 전이라 달라질 수 있음" if est else "", approx=est,
+                           important=("Spring" in n or "National Day" in n) and not est))
+    for d, n in eu.items():
+        if d.weekday() < 5:
+            out.append(_ev(d, f"유럽 증시 휴장 · {_ko(n, EU_NAMES)}", "휴장", "유럽", "유로존 TARGET 휴일 (독일·프랑스 등 대부분 휴장)"))
+    for y in years:
+        for m in range(1, 13):
+            q = m in (3, 6, 9, 12)
+            sq = _biz(_nth_weekday(y, m, 4, 2), jp, -1)         # 일본 SQ: 둘째 금요일
+            out.append(_ev(sq, "일본 메이저 SQ (닛케이225 선물·옵션 동시 만기)" if q else "일본 SQ (옵션 만기)", "만기", "일본",
+                           "만기 정산가 결정, 장 마감 전후 변동성 확대 가능" if q else "", important=q))
+            eur = _biz(_nth_weekday(y, m, 4, 3), eu, -1)         # 유럽 파생 만기: 셋째 금요일
+            out.append(_ev(eur, "유럽 쿼드러플 위칭 (유로스톡스50 분기 만기)" if q else "유럽 옵션·선물 만기", "만기", "유럽",
+                           "", important=q))
+            cn_fut = _biz(_nth_weekday(y, m, 4, 3), cn, 1)       # 중국 주가지수선물: 셋째 금요일(휴일이면 다음 영업일)
+            out.append(_ev(cn_fut, "중국 주가지수선물 만기 (CSI300 등)", "만기", "중국", "", approx=y > today.year))
+            lpr = _biz(dt.date(y, m, 20), cn, 1)                  # 중국 LPR: 매월 20일
+            out.append(_ev(lpr, "중국 LPR 발표 (대출우대금리)", "통화정책", "중국", "기준 대출금리, 중국 인민은행", approx=y > today.year))
+            out.append(_ev(_last_biz_cal(y, m), "중국 공식 제조업 PMI (예상)", "해외 지표", "중국",
+                           "보통 매월 말일 발표 (통계국)", approx=True))
+        out.append(_ev(dt.date(y, 3, 5), "중국 전국인민대표대회(양회) 개막 (예상)", "정치", "중국",
+                       "성장률 목표·재정 정책 발표, 보통 3월 5일 전후", approx=True, important=True))
+        out.append(_ev(dt.date(y, 12, 11), "중국 중앙경제공작회의 (예상)", "정치", "중국",
+                       "다음 해 경제 정책 방향 결정, 보통 12월 중순 이틀간", approx=True, important=True))
+    for y, items in CENTRAL_BANKS.items():
+        for who, region, m, d, note in items:
+            out.append(_ev(dt.date(y, m, d), f"{who} 금리 결정", "통화정책", region,
+                           f"{note} · 공식 일정으로 한 번 더 확인해 주세요", approx=True, important=True))
+    return out
+
+
+def _last_biz_cal(y, m):
+    """그 달 마지막 날 (주말 포함: 중국 통계국은 말일에 발표)"""
+    return dt.date(y + (m == 12), m % 12 + 1, 1) - dt.timedelta(days=1)
+
+
+# 중앙은행 회의 (연 단위로 공표됨. 확실히 아는 해만 넣고, 새 해 일정은 발표되면 추가)
+CENTRAL_BANKS = {
+    2026: [("일본은행(BOJ)", "일본", 12, 18, "12/17~18 회의"), ("유럽중앙은행(ECB)", "유럽", 12, 17, "통화정책회의")],
+}
+
+
 def _ev(date, title, cat, region, note="", approx=False, important=False, uid=None):
     return dict(date=date, title=title, cat=cat, region=region, note=note, approx=approx,
                 important=important, uid=uid)
@@ -142,6 +221,7 @@ def events_between(start, end, conn=None):
     for d, n in nyse.items():
         out.append(_ev(d, f"미국 증시 휴장 · {US_NAMES.get(n, n)}", "휴장", "미국"))
 
+    out += _asia_europe(years, dt.date.today())
     for y in years:
         for m in range(1, 13):
             quarter_end = m in (3, 6, 9, 12)
@@ -176,7 +256,7 @@ def events_between(start, end, conn=None):
             jobs = _nth_weekday(y, m, 4, 1)
             if jobs in nyse:
                 jobs += dt.timedelta(days=7)        # 첫째 금요일이 휴장이면 보통 다음 주로
-            out.append(_ev(jobs, "미국 고용보고서", "미국 지표", "미국",
+            out.append(_ev(jobs, "미국 고용보고서", "해외 지표", "미국",
                            "보통 첫째 금요일 · 한국 시간 밤 10시 30분 (미국 서머타임 기간엔 9시 30분)", approx=True))
         # 보고서 제출 마감 (마감일이 휴일이면 다음 영업일)
         for (m, d), name in {(3, 31): "사업보고서 제출 마감", (5, 15): "1분기보고서 제출 마감",
