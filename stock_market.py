@@ -215,7 +215,7 @@ def sync_index(conn, log=print):
     for sym in ("KOSPI", "KOSDAQ"):
         try:
             r = requests.get(INDEX_URL, timeout=30, headers={"User-Agent": "Mozilla/5.0"},
-                             params=dict(symbol=sym, timeframe="day", count=1500, requestType=0))
+                             params=dict(symbol=sym, timeframe="day", count=5200, requestType=0))
             rows = re.findall(rb'data="(\d{8})\|[\d.]*\|[\d.]*\|[\d.]*\|([\d.]+)\|', r.content)
         except requests.exceptions.RequestException as e:
             log(f"  ✖ {sym}: {type(e).__name__}")

@@ -132,7 +132,7 @@ def page(title, body, refresh=False, charts=False):
 <link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#2b5a9e">
 <link rel="icon" href="/icon-192.png"><link rel="apple-touch-icon" href="/icon-192.png">
 </head><body>
-<header><div class="hrow"><b>DART 단순투자</b>{run_widget()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/reports">리포트</a><a href="/market">시장</a><a href="/policy">정책</a><a href="/new">새 공시</a>
+<header><div class="hrow"><b>DART 단순투자</b>{run_widget()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/reports">리포트</a><a href="/market">시장</a><a href="/policy">정책</a><a href="/calendar">달력</a><a href="/new">새 공시</a>
 <a href="/settings">설정</a>{extra}</nav>
 </header><main>{body}</main>{"<script>" + CHART_JS + "</script>" if charts else ""}</body></html>""".encode()
 
@@ -661,6 +661,8 @@ def view_reports(conn, code, tgt, n_br, close):
 REPORT_PERIODS = {"7": "최근 1주", "30": "최근 1달", "90": "최근 3달", "180": "최근 6달"}
 REPORT_SRC = {"": "출처 전체", "hk": "한경컨센서스", "nv": "네이버 증권"}
 REPORT_ONLY = {"": "모든 종목", "dart": "기관 단순투자 종목만"}
+REPORT_UPSIDE = {"": "상승여력 전체", "10": "상승여력 10% 이상", "20": "상승여력 20% 이상", "30": "상승여력 30% 이상",
+                 "50": "상승여력 50% 이상", "0": "상승여력 0~10%", "down": "목표가가 지금 가격보다 낮음"}
 REPORT_SORTS = {"date": ("최신순", "date DESC, rowid DESC"), "upside": ("상승여력 큰 순", None),
                 "target": ("목표가 있는 것만 · 최신순", "date DESC, rowid DESC")}
 
@@ -698,6 +700,7 @@ def view_report_list(conn, q):
     d = q.get("d") if q.get("d") in REPORT_PERIODS else "30"
     src = q.get("src") if q.get("src") in REPORT_SRC else ""
     only = q.get("only") if q.get("only") in REPORT_ONLY else ""
+    up = q.get("up") if q.get("up") in REPORT_UPSIDE else ""
     sort = q.get("sort") if q.get("sort") in REPORT_SORTS else "date"
     pg = int(q["p"]) if str(q.get("p", "")).isdigit() and int(q["p"]) > 0 else 1
     conds = ["date >= ?"]
@@ -716,14 +719,25 @@ def view_report_list(conn, q):
         dart_codes = {r[0] for r in conn.execute("SELECT DISTINCT 종목코드 FROM summary")}
     if only == "dart":
         conds.append("code IN (SELECT DISTINCT 종목코드 FROM summary)" if dart_codes else "0")
-    if sort in ("target", "upside"):
+    if sort in ("target", "upside") or up:
         conds.append("target IS NOT NULL")
     where = " AND ".join(conds)
     closes = latest_closes(conn) if has_table(conn, "prices") else {}
-    if sort == "upside":
-        rows = conn.execute(f"SELECT * FROM reports WHERE {where}", args).fetchall()
-        rows = [r for r in rows if r["code"] in closes]
-        rows.sort(key=lambda r: -(r["target"] / closes[r["code"]][1]))
+
+    def up_ok(r):
+        """상승여력(목표가 ÷ 최근 종가 − 1) 필터"""
+        if not up:
+            return True
+        c = closes.get(r["code"], (None, None))[1]
+        if not c or not r["target"]:
+            return False
+        u = r["target"] / c - 1
+        return (u < 0 if up == "down" else 0 <= u < 0.1 if up == "0" else u >= int(up) / 100)
+    if sort == "upside" or up:
+        rows = conn.execute(f"SELECT * FROM reports WHERE {where} ORDER BY date DESC, rowid DESC", args).fetchall()
+        rows = [r for r in rows if r["code"] in closes and up_ok(r)]
+        if sort == "upside":
+            rows.sort(key=lambda r: -(r["target"] / closes[r["code"]][1]))
         total = len(rows)
         pages = max((total + PAGE_SIZE - 1) // PAGE_SIZE, 1)
         pg = min(pg, pages)
@@ -736,12 +750,13 @@ def view_report_list(conn, q):
                             args + [PAGE_SIZE, (pg - 1) * PAGE_SIZE]).fetchall()
 
     active = [x for x in (REPORT_SRC[src] if src else "", REPORT_ONLY[only] if only else "",
+                          REPORT_UPSIDE[up] if up else "",
                           f"증권사: {broker}" if broker else "") if x]
     form = (f'<form method="get"><div class="filters"><input type="search" name="q" value="{escape(text)}" '
             f'placeholder="종목명·종목코드·제목"><button>보기</button></div>'
             f'<details{" open" if active or sort != "date" else ""}><summary>필터·정렬</summary>'
             f'<div class="filters" style="margin-top:8px">{select("d", REPORT_PERIODS, d)}{select("src", REPORT_SRC, src)}'
-            f'{select("only", REPORT_ONLY, only)}'
+            f'{select("only", REPORT_ONLY, only)}{select("up", REPORT_UPSIDE, up)}'
             f'<input type="search" name="b" value="{escape(broker)}" placeholder="증권사 (예: 키움)">'
             f'{select("sort", {k: v[0] for k, v in REPORT_SORTS.items()}, sort)}<button>적용</button></div></details></form>')
     chips = ('<div style="margin:4px 0 10px">' + "".join(f'<span class="chip">{escape(a)}</span>' for a in active)
@@ -774,7 +789,7 @@ def view_report_list(conn, q):
             f'<div class="muted">{escape(r["broker"] or "")}{" · " + escape(r["author"]) if r["author"] else ""}'
             f' · <span class="chip">{SRC_CHIP.get(r["source"], "")}</span></div>'
             f'<div>{tgt}</div>{price_line}{summary_fold(r)}</div>')
-    keep = {k: v for k, v in {"q": text, "b": broker, "d": d if d != "30" else "", "src": src, "only": only,
+    keep = {k: v for k, v in {"q": text, "b": broker, "d": d if d != "30" else "", "src": src, "only": only, "up": up,
                               "sort": sort if sort != "date" else ""}.items() if v}
     link = lambda n: "/reports?" + urlencode({**keep, "p": n})   # noqa: E731
     body = (reports_last_line() + form + chips + ("".join(cards) or '<p class="muted">조건에 맞는 리포트가 없습니다.</p>')
@@ -901,6 +916,68 @@ def view_market(conn):
             + sparkline(i.points)
             + (f'<div class="muted" style="font-size:12px">{escape(i.note)}</div>' if i.note else "") + "</div>")
     return page("시장", hero + "".join(cards))
+
+
+# ---------------- 유대인 달력 ----------------
+def view_calendar(conn):
+    try:
+        import jewish_calendar as jc
+    except ImportError:
+        return page("달력", '<div class="card">달력 계산 라이브러리가 아직 없습니다. 설정 → 업데이트를 한 번 해 주세요.</div>')
+    import stock_market
+    today = dt.date.today()
+    hs = jc.holidays_between(today - dt.timedelta(days=30), today + dt.timedelta(days=400))
+    up = []
+    for h in hs:
+        if h["end"] < today:
+            continue
+        dd = (h["start"] - today).days
+        when = ("진행 중" if h["start"] <= today else "오늘" if dd == 0 else f"D-{dd}")
+        period = (f'{h["start"]:%Y-%m-%d}' + (f' ~ {h["end"]:%m-%d}' if h["days"] > 1 else "")
+                  + f' ({"월화수목금토일"[h["start"].weekday()]})')
+        up.append(f'<div style="border-top:1px solid var(--line);padding:9px 0"><div class="row">'
+                  f'<b>{escape(h["name"])}</b><b class="{"up" if dd <= 7 else ""}">{when}</b></div>'
+                  f'<div>{period}</div><div class="muted">{escape(h["desc"])} · {escape(h["hebrew"])}</div>'
+                  + (f'<div class="up" style="font-size:13px">{escape(h["note"])}</div>' if h["note"] else "") + "</div>")
+    cal = (f'<div class="card"><b>다가오는 유대 명절</b><div class="muted">오늘 {escape(jc.today_hebrew(today))} · '
+           '명절은 전날 해 질 때 시작합니다 (해외 기준 기간)</div>'
+           f'<div style="margin-top:6px">{"".join(up[:12])}</div></div>')
+
+    series = {"코스피": list(stock_market.series(conn, "idx:KOSPI")), "코스닥": list(stock_market.series(conn, "idx:KOSDAQ"))}
+    series = {k: v for k, v in series.items() if v}
+    if not series:
+        test = ('<div class="card"><b>격언 검증</b><div class="muted">지수 기록이 아직 없습니다. 위쪽 '
+                '<b>지금 수집 → 시장·정책만</b>을 누르면 코스피·코스닥 기록을 받아 검증합니다.</div></div>')
+    else:
+        rows = jc.rosh_to_yom(series)
+        names = list(series)
+        trs = "".join(
+            f'<tr><td>{r["year"]}</td><td>{r["rh"]:%m-%d} → {r["yk"]:%m-%d}</td>'
+            + "".join(f'<td>{gap_pct(r["chg"].get(n))}</td>' for n in names) + "</tr>" for r in reversed(rows))
+        summ = []
+        for n in names:
+            vals = [r["chg"][n] for r in rows if n in r["chg"]]
+            if not vals:
+                continue
+            avg = sum(vals) / len(vals)
+            down = sum(1 for v in vals if v < 0)
+            base = jc.baseline(series[n])
+            summ.append(f'<div><b>{n}</b>: {len(vals)}년 중 <b>{down}년 하락</b> · 평균 {gap_pct(avg)}'
+                        + (f' <span class="muted">(아무 때나 같은 길이 평균 {base:+.2%})</span>' if base is not None else "")
+                        + "</div>")
+        test = (f'<div class="card"><b>격언 검증: 로쉬 하샤나에 팔고 욤 키푸르에 사라</b>'
+                '<div class="muted">로쉬 하샤나 전날 종가 → 욤 키푸르 전날 종가 변화. 격언대로라면 이 기간에 내립니다. '
+                '미국 증시 격언이라 한국 지수에도 맞는지 확인하는 참고 자료입니다.</div>'
+                + "".join(summ)
+                + f'<div class="scroll"><table><tr><th>해</th><th>기간</th>{"".join(f"<th>{n}</th>" for n in names)}</tr>'
+                  f'{trs}</table></div></div>')
+    return page("달력", cal + test)
+
+
+def gap_pct(v):
+    if v is None:
+        return "-"
+    return f'<span class="{"up" if v > 0 else "down" if v < 0 else ""}">{v:+.2%}</span>'
 
 
 # ---------------- 정책 ----------------
@@ -1135,6 +1212,8 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     body = view_check(conn, st)
                 elif url.path == "/parse":
                     body = view_parse(conn, q.get("r", ""))
+                elif url.path == "/calendar":
+                    body = view_calendar(conn)
                 elif url.path == "/market":
                     body = view_market(conn)
                 elif url.path == "/policy":
