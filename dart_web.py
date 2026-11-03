@@ -352,9 +352,10 @@ def select(name, opts, cur):
         for k, v in opts.items()) + "</select>")
 
 
-def pager(total, pg, link):
+def pager(total, pg, link, size=None):
     """1 2 3 … 처럼 번호로 된 페이지 이동"""
-    pages = max((total + PAGE_SIZE - 1) // PAGE_SIZE, 1)
+    size = size or PAGE_SIZE
+    pages = max((total + size - 1) // size, 1)
     if pages == 1:
         return ""
     show = sorted({1, pages, *range(max(pg - 2, 1), min(pg + 2, pages) + 1)})
@@ -538,9 +539,57 @@ def view_new(conn, q):
     return page("새 공시", html)
 
 
-def view_stock(conn, code):
+STOCK_ROWS = 10      # 종목 화면 표는 한 번에 10줄
+GROUPS = {"date": "변동일별", "submit": "제출일별", "who": "보고자별"}
+
+
+def _group_sort(rows, g, who_key):
+    """묶음 기준대로 정렬 (같은 값끼리 이어지게). 기본은 변동일 최신순."""
+    rows = list(rows)
+    rows.sort(key=lambda r: str(r["제출일"]), reverse=True)
+    rows.sort(key=lambda r: str(r["변동일"]), reverse=True)
+    if g == "submit":
+        rows.sort(key=lambda r: str(r["제출일"]), reverse=True)
+    elif g == "who":
+        rows.sort(key=lambda r: str(r[who_key] or ""))
+    return rows
+
+
+def _group_key(r, g, who_key):
+    return str(r["변동일"] if g == "date" else r["제출일"] if g == "submit" else (r[who_key] or "(이름 없음)"))
+
+
+def paged_table(rows, g, who_key, pg, link, header, row_html, group_note, anchor):
+    """10줄씩 번호 페이지로 나눈 표. 같은 묶음(변동일·제출일·보고자)은 머리글 줄로 구분."""
+    rows = _group_sort(rows, g, who_key)
+    total = len(rows)
+    pages = max((total + STOCK_ROWS - 1) // STOCK_ROWS, 1)
+    pg = min(max(pg, 1), pages)
+    stats = {}
+    for r in rows:
+        stats.setdefault(_group_key(r, g, who_key), []).append(r)
+    out, prev = [], None
+    for r in rows[(pg - 1) * STOCK_ROWS: pg * STOCK_ROWS]:
+        k = _group_key(r, g, who_key)
+        if k != prev:
+            out.append(f'<tr><td colspan="6" style="background:var(--chip);font-weight:600">{escape(k)}'
+                       f' <span class="muted">{group_note(stats[k])}</span></td></tr>')
+            prev = k
+        out.append(row_html(r))
+    start = (pg - 1) * STOCK_ROWS
+    info = (f'<div class="muted" style="margin-top:6px">{total:,}줄 중 {start + 1 if total else 0:,}–'
+            f'{min(start + STOCK_ROWS, total):,}</div>')
+    return (f'<div class="scroll"><table>{header}{"".join(out)}</table></div>'
+            + pager(total, pg, link, STOCK_ROWS) + info)
+
+
+def view_stock(conn, code, q=None):
+    q = q or {}
     if not code or not has_table(conn, "detail"):
         return None
+    g = q.get("g") if q.get("g") in GROUPS else "date"
+    sp = int(q["sp"]) if str(q.get("sp", "")).isdigit() else 1
+    dp = int(q["dp"]) if str(q.get("dp", "")).isdigit() else 1
     rows = conn.execute("SELECT * FROM detail WHERE 종목코드=? ORDER BY 변동일 DESC, 제출일 DESC", (code,)).fetchall()
     if not rows:
         return None
@@ -549,14 +598,45 @@ def view_stock(conn, code):
     head = (f'<div class="row"><div><span class="big">{escape(str(name))}</span> '
             f'<span class="muted">{escape(code)}</span></div>'
             f'<div><a href="{naver_link(code)}">네이버 증권 ↗</a></div></div>')
-    t1 = "".join(f'<tr><td>{escape(str(r["변동일"]))}</td><td>{escape(str(r["제출인"]))}</td>'
-                 f'<td>{won(r["매수수량"])}</td><td>{won(r["평균매수단가"])}</td>'
-                 f'<td>{won(r["제출일종가"])} {gap(r["제출일종가"], r["평균매수단가"])}</td>'
-                 f'<td>{escape(str(r["제출일"]))}</td></tr>' for r in summ)
-    t2 = "".join(f'<tr><td>{escape(str(r["변동일"]))}</td><td>{escape(str(r["보고자"]))}</td>'
-                 f'<td>{escape(str(r["방법"]))}</td><td>{won(r["증감"])}</td><td>{won(r["단가"])}</td>'
-                 f'<td><a href="{dart_link(r["접수번호"])}">{escape(str(r["제출일"]))}</a> '
-                 f'<a class="muted" href="/parse?r={quote(str(r["접수번호"]))}">표 확인</a></td></tr>' for r in rows)
+    def link_s(n):
+        return "/stock?" + urlencode({"code": code, **({"g": g} if g != "date" else {}), "sp": n,
+                                      **({"dp": dp} if dp > 1 else {})}) + "#sum"
+
+    def link_d(n):
+        return "/stock?" + urlencode({"code": code, **({"g": g} if g != "date" else {}),
+                                      **({"sp": sp} if sp > 1 else {}), "dp": n}) + "#det"
+
+    def row_sum(r):
+        return (f'<tr><td>{escape(str(r["변동일"]))}</td><td>{escape(str(r["제출인"]))}</td>'
+                f'<td>{won(r["매수수량"])}</td><td>{won(r["평균매수단가"])}</td>'
+                f'<td>{won(r["제출일종가"])} {gap(r["제출일종가"], r["평균매수단가"])}</td>'
+                f'<td>{escape(str(r["제출일"]))}</td></tr>')
+
+    def note_sum(rs):
+        qty = sum(float(x["매수수량"] or 0) for x in rs)
+        amt = sum(float(x["매수금액"] or 0) for x in rs)
+        return f'{len(rs)}줄 · 매수 {won(qty)}주' + (f' · 평균 {won(amt / qty)}원' if qty else "")
+
+    def row_det(r):
+        return (f'<tr><td>{escape(str(r["변동일"]))}</td><td>{escape(str(r["보고자"]))}</td>'
+                f'<td>{escape(str(r["방법"]))}</td><td>{won(r["증감"])}</td><td>{won(r["단가"])}</td>'
+                f'<td><a href="{dart_link(r["접수번호"])}">{escape(str(r["제출일"]))}</a> '
+                f'<a class="muted" href="/parse?r={quote(str(r["접수번호"]))}">표 확인</a></td></tr>')
+
+    def note_det(rs):
+        net = sum(float(x["증감"] or 0) for x in rs)
+        return f'{len(rs)}줄 · 순증감 {net:+,.0f}주'
+
+    group_bar = ('<div style="margin:8px 0">묶어 보기: ' + " ".join(
+        (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == g else
+         f'<a class="chip" href="/stock?{urlencode({"code": code, **({"g": k} if k != "date" else {})})}#sum">{v}</a>')
+        for k, v in GROUPS.items()) + '</div>')
+    t1 = paged_table(summ, g, "제출인", sp, link_s,
+                     '<tr><th>변동일</th><th>제출인</th><th>매수수량</th><th>평균단가</th><th>제출일 종가</th><th>제출일</th></tr>',
+                     row_sum, note_sum, "sum") if summ else ""
+    t2 = paged_table(rows, g, "보고자", dp, link_d,
+                     '<tr><th>변동일</th><th>보고자</th><th>방법</th><th>증감</th><th>단가</th><th>제출일(원문)</th></tr>',
+                     row_det, note_det, "det")
     chart = ""
     tgt, n_br = consensus(conn, code)
     last_close = None
@@ -579,12 +659,9 @@ def view_stock(conn, code):
             chart = stat + price_chart([p["date"] for p in pr], [p["close"] for p in pr], buys, avg,
                                        title=f"{name} 주가와 기관 매수", target=tgt)
     reports = view_reports(conn, code, tgt, n_br, last_close)
-    body = (head + chart + reports + "<h2>날짜별 평균 매수단가</h2>"
-            + (f'<div class="scroll"><table><tr><th>변동일</th><th>제출인</th><th>매수수량</th><th>평균단가</th>'
-               f'<th>제출일 종가</th><th>제출일</th></tr>{t1}</table></div>' if t1 else '<p class="muted">매수 내역 없음</p>')
-            + "<h2>모든 변동 내역</h2>"
-            + f'<div class="scroll"><table><tr><th>변동일</th><th>보고자</th><th>방법</th><th>증감</th><th>단가</th>'
-              f'<th>제출일(원문)</th></tr>{t2}</table></div>')
+    body = (head + chart + reports + group_bar + '<h2 id="sum">날짜별 평균 매수단가</h2>'
+            + (t1 or '<p class="muted">매수 내역 없음</p>')
+            + '<h2 id="det">모든 변동 내역</h2>' + t2)
     return page(f"{name} — DART 단순투자", body, charts=bool(chart))
 
 
@@ -1282,7 +1359,7 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 elif url.path == "/new":
                     body = view_new(conn, q)
                 elif url.path == "/stock":
-                    body = view_stock(conn, q.get("code", ""))
+                    body = view_stock(conn, q.get("code", ""), q)
                 else:
                     body = None
             finally:
