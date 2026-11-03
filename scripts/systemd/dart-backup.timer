@@ -1,0 +1,9 @@
+[Unit]
+Description=DART 단순투자 매일 새벽 3시 백업
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 Asia/Seoul
+Persistent=true
+
+[Install]
+WantedBy=timers.target

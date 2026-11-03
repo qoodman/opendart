@@ -49,7 +49,7 @@ if [ ! -f .env ]; then
 fi
 
 echo "▶ 자동 실행 등록 (systemd)"
-for f in dart-web.service dart-daily.service dart-tick.service dart-tick.timer; do
+for f in dart-web.service dart-daily.service dart-tick.service dart-tick.timer dart-backup.service dart-backup.timer; do
   sed -e "s|__ROOT__|$ROOT|g" -e "s|__PY__|$PY|g" -e "s|__USER__|$USER_NAME|g" \
     "scripts/systemd/$f" | sudo tee "/etc/systemd/system/$f" >/dev/null
 done
@@ -58,7 +58,7 @@ sudo systemctl daemon-reload
 sudo systemctl disable --now dart-daily.timer >/dev/null 2>&1 || true
 sudo rm -f /etc/systemd/system/dart-daily.timer
 sudo systemctl daemon-reload
-sudo systemctl enable --now dart-web.service dart-tick.timer
+sudo systemctl enable --now dart-web.service dart-tick.timer dart-backup.timer
 sudo systemctl restart dart-web.service
 
 # ---- 대시보드 주소: DART 전용 Tailscale 연결로 https://dart.xxxx.ts.net ----

@@ -1,0 +1,11 @@
+[Unit]
+Description=DART 단순투자 데이터 백업 (~/backups, 최근 7개)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=__USER__
+WorkingDirectory=__ROOT__
+ExecStart=__ROOT__/scripts/backup_server.sh
+Nice=10
+IOSchedulingClass=idle
