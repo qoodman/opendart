@@ -299,6 +299,37 @@ def update_box(u):
             '<button formaction="/settings/update-run" formmethod="post">지금 업데이트</button></div>' + log)
 
 
+def _stamp_text(name):
+    """dart-backup-20261103-030000.tar.gz → 2026-11-03 03:00:00"""
+    m = re.search(r"(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})", name)
+    return f"{m.group(1)}-{m.group(2)}-{m.group(3)} {m.group(4)}:{m.group(5)}:{m.group(6)}" if m else name
+
+
+def backup_box(S):
+    """설정 → 백업: 지금 만들기, 목록, 다운로드 (기본은 API 키 뺀 파일)"""
+    if not S or "backup_list" not in S:
+        return ""
+    items = S["backup_list"]()
+    busy = S["backup_busy"]()
+    if busy:
+        state = '<div class="warn">백업을 만드는 중입니다… 잠시 뒤 새로고침하세요.</div>'
+    else:
+        state = '<div class="muted">최근 7개를 서버에 보관합니다. 매일 새벽 3시에도 자동으로 만들어요.</div>'
+    rows = "".join(
+        f'<div style="border-top:1px solid var(--line);padding:8px 0"><div class="row"><b>{escape(_stamp_text(name))}</b>'
+        f'<span class="muted">{size:.1f}MB</span></div>'
+        f'<div><a href="/backup/{escape(name)}">키 빼고 받기</a> · '
+        f'<a class="muted" href="/backup/{escape(name)}?key=1" onclick="return confirm(\'API 키가 들어 있는 파일입니다. 받을까요?\')">'
+        f'키 포함해서 받기</a></div></div>'
+        for name, size, when in items[:7])
+    run = ('<form method="post" action="/settings/backup-run" style="margin-top:6px">'
+           f'<button{" disabled" if busy else ""}>지금 백업 만들기</button></form>')
+    return (f'<div class="card"><b>백업</b>{state}{run}'
+            + (rows or '<div class="muted" style="margin-top:6px">아직 백업이 없습니다.</div>')
+            + '<div class="muted" style="margin-top:8px;font-size:12px">키 포함 파일은 API 키가 들어 있으니 '
+              '안전한 곳에만 보관하세요. 맥으로 자동 내려받기는 맥에서 scripts/backup_to_mac.sh를 실행하세요.</div></div>')
+
+
 def view_settings(get_key, q, S=None):
     cur = get_key() if get_key else ""
     msg, bad = "", False
@@ -310,6 +341,7 @@ def view_settings(get_key, q, S=None):
     if q.get("saved"):
         body += run_button()
     if S:
+        body += backup_box(S)
         errs = json.loads(q["errs"]) if q.get("errs") else {}
         note = ""
         if q.get("ok") is not None:
@@ -1396,6 +1428,13 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
             conn = sqlite3.connect(f"file:{quote(str(db_path))}?mode=ro", uri=True) if Path(db_path).exists() else sqlite3.connect(":memory:")
             conn.row_factory = sqlite3.Row
             try:
+                if url.path.startswith("/backup/") and settings_api:
+                    name = url.path[len("/backup/"):]
+                    data = settings()["backup_file"](name, q.get("key") == "1")
+                    if data is None:
+                        return self._send(404, "text/plain; charset=utf-8", "백업 파일이 없습니다.".encode("utf-8"))
+                    return self._send(200, "application/gzip", data,
+                                      [("Content-Disposition", f"attachment; filename*=UTF-8''{quote(name)}")])
                 if url.path == "/excel" and q.get("list") and has_table(conn, "summary"):
                     data = filtered_excel(conn, q)
                     fname = quote(f"단순투자_목록_{dt.date.today():%Y%m%d}.xlsx")
@@ -1504,6 +1543,11 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                         else:
                             msg += " 이미 수집 중이라 끝난 뒤 다시 눌러 주세요."
                 return self._redirect("/?" + urlencode({"cm": msg}))
+            if path == "/settings/backup-run" and settings_api:
+                n = min(int(self.headers.get("Content-Length") or 0), 4096)
+                self.rfile.read(n)
+                ok, why = settings()["backup_start"]()
+                return self._redirect("/settings?" + urlencode({"nt": ("✔ " if ok else "✖ ") + why}))
             if path in ("/settings/update-check", "/settings/update-run") and settings_api:
                 n = min(int(self.headers.get("Content-Length") or 0), 65536)
                 self.rfile.read(n)          # 함께 온 설정 칸 값은 쓰지 않음

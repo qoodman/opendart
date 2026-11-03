@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="${1:-$HOME/backups}"
 KEEP="${2:-7}"
-DATA="$(grep -E '^DART_DATA_DIR=' "$ROOT/.env" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+DATA="${DART_DATA_DIR:-$(grep -E '^DART_DATA_DIR=' "$ROOT/.env" 2>/dev/null | tail -1 | cut -d= -f2- || true)}"
 DATA="${DATA:-$ROOT/data}"
 mkdir -p "$DEST"
 STAMP="$(date +%Y%m%d-%H%M%S)"

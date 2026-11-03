@@ -791,6 +791,70 @@ def cmd_tick(args):
     return cmd_run(argparse.Namespace(quiet=False, only="all"))
 
 
+# ---------------- 백업 ----------------
+BACKUP_RE = re.compile(r"^dart-backup-\d{8}-\d{6}\.tar\.gz$")
+
+
+def backup_dir():
+    return Path(env("DART_BACKUP_DIR", str(Path.home() / "backups"))).expanduser()
+
+
+def backup_list():
+    """[(파일 이름, 크기 MB, 만든 때)] 최신순"""
+    d = backup_dir()
+    out = []
+    for p in sorted(d.glob("dart-backup-*.tar.gz"), reverse=True) if d.is_dir() else []:
+        if BACKUP_RE.match(p.name):
+            out.append((p.name, p.stat().st_size / 1048576, dt.datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M")))
+    return out
+
+
+def backup_busy():
+    lock = backup_dir() / ".making"
+    try:
+        return lock.exists() and time.time() - lock.stat().st_mtime < 3600
+    except OSError:
+        return False
+
+
+def backup_start():
+    """백업을 백그라운드로 시작 (원문이 많으면 몇 분 걸림). (성공 여부, 문구)"""
+    import subprocess
+    if backup_busy():
+        return False, "이미 백업을 만드는 중입니다. 잠시 뒤 새로고침하세요."
+    script = ROOT / "scripts" / "backup_server.sh"
+    if not script.exists():
+        return False, "백업 스크립트가 없습니다. 설정 → 업데이트로 최신 버전을 받아 주세요."
+    d = backup_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    lock = d / ".making"
+    lock.write_text(dt.datetime.now().isoformat(), encoding="utf-8")
+    cmd = f"'{script}' '{d}' 7 >> '{data_dir()}/backup.log' 2>&1; rm -f '{lock}'"
+    subprocess.Popen(["/bin/bash", "-c", cmd], start_new_session=True, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, close_fds=True, env={**os.environ, "DART_DATA_DIR": str(data_dir())})
+    return True, "백업을 시작했습니다. 원문이 많으면 몇 분 걸려요. 잠시 뒤 새로고침하세요."
+
+
+def backup_file(name, with_key):
+    """다운로드용 백업 파일 바이트. with_key가 False면 설정 파일(API 키)을 뺌."""
+    import io, tarfile
+    if not BACKUP_RE.match(name or ""):
+        return None
+    p = backup_dir() / name
+    if not p.is_file():
+        return None
+    if with_key:
+        return p.read_bytes()
+    buf = io.BytesIO()
+    with tarfile.open(p, "r:gz") as src, tarfile.open(fileobj=buf, mode="w:gz") as dst:
+        for m in src.getmembers():
+            if m.name.rstrip("/").endswith("env.txt"):
+                continue
+            f = src.extractfile(m) if m.isfile() else None
+            dst.addfile(m, f)
+    return buf.getvalue()
+
+
 # ---------------- 프로그램 업데이트 ----------------
 def _git(*args, timeout=60):
     import subprocess
@@ -1039,7 +1103,9 @@ def cmd_web(args):
         return dict(spec=SETTINGS_SPEC, choices=CHOICES, values=current_settings(), apply=apply_settings,
                     next_run=next_auto_run(), links=parse_links(env("NAV_LINKS")),
                     realestate=env("REALESTATE_URL"), test_notify=cmd_notify_test_web,
-                    update_info=update_info, check_update=check_update, start_update=start_update)
+                    update_info=update_info, check_update=check_update, start_update=start_update,
+                    backup_list=backup_list, backup_busy=backup_busy, backup_start=backup_start,
+                    backup_file=backup_file)
     serve(results_db(), host=args.host, port=args.port, child_env=child_env,
           get_key=lambda: read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", ""),
           save_key=save_key, settings_api=settings_api)
