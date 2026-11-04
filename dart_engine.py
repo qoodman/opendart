@@ -379,6 +379,25 @@ def parse_prices(content):
     return parse_ohlc(content)[0]
 
 
+PRICE_BAND = (0.2, 4.0)     # 단가 ÷ 그 날 주가가 이 범위를 벗어나면 잘못 읽은 것으로 봄
+
+
+def drop_implausible(detail, prices, band=PRICE_BAND):
+    """공시 단가가 그 날 주가와 너무 다르면 비움 (표를 잘못 읽은 경우, 예: 1,280원짜리 하이닉스 매수).
+    평균단가 계산에서 빠지고 분석 점검의 '단가를 읽지 못한 줄'에 나타남. 바꾼 줄 수를 돌려줌."""
+    n = 0
+    for row in detail:
+        p = row.get("단가")
+        code = (row.get("종목코드") or "").strip()
+        if p is None or not code or not prices.get(code):
+            continue
+        close = price_on(prices[code], row.get("변동일") or "")
+        if close and not (band[0] <= p / close <= band[1]):
+            row["단가"] = None
+            n += 1
+    return n
+
+
 def price_on(prices, ymd):
     """ymd(YYYY-MM-DD) 당일 종가. 휴장일이면 직전 거래일 종가."""
     import bisect
@@ -801,6 +820,9 @@ class Engine:
             self._set_stage("4단계 주가")
             self.add_prices(detail)
         self._set_stage("엑셀 저장")
+        dropped = drop_implausible(detail, getattr(self, "prices", None) or {})
+        if dropped:
+            self.log(f"[검사] 단가가 그 날 주가와 너무 달라 {dropped}줄을 비웠습니다 (분석 점검에서 확인)")
         self.detail = detail
         path = self.save_excel(detail, complete)
         self._set_stage("완료")

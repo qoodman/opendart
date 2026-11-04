@@ -495,6 +495,8 @@ def cmd_run_reanalyze(args):
             if cfg.add_prices:
                 eng._set_stage("4단계 주가")
                 eng.add_prices(detail)
+            from dart_engine import drop_implausible
+            drop_implausible(detail, getattr(eng, "prices", None) or {})
             eng._set_stage("엑셀 저장")
             eng.detail = detail
             path = eng.save_excel(detail, True)
