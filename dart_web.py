@@ -1299,7 +1299,17 @@ def view_policy(conn, q):
 
 
 # ---------------- 운용사별 성적표 ----------------
-PERF_HORIZONS = {"30": "30일 뒤", "90": "90일 뒤", "180": "180일 뒤"}
+PERF_HORIZONS = {"30": "30일 뒤", "90": "90일 뒤", "180": "180일 뒤", "now": "오늘까지"}
+PERF_MAX_DAYS = 1500    # 직접 입력할 수 있는 최대 보유 기간 (일)
+
+
+def perf_h_ok(h):
+    """'now'(오늘까지) 또는 1~1500 사이의 일수"""
+    return h == "now" or (h.isdigit() and 1 <= int(h) <= PERF_MAX_DAYS)
+
+
+def perf_label(h):
+    return "오늘까지" if h == "now" else f"{h}일 뒤"
 PERF_KINDS = {"": "기관·개인 전체", "inst": "기관만", "person": "개인(슈퍼개미 추정)만"}
 PERF_MIN_N = 5          # 이보다 적은 건수는 '표본 적음'으로 표시
 
@@ -1327,10 +1337,9 @@ def view_performance(conn, q):
     if not has_table(conn, "summary") or not has_table(conn, "prices"):
         return page("운용사별 성적표", '<div class="card">주가와 보고서 수집이 한 번 끝나야 볼 수 있습니다. '
                                     '위쪽 <b>지금 수집 → 보고서만</b>을 눌러 주세요.</div>')
-    h = q.get("h") if q.get("h") in PERF_HORIZONS else "90"
+    h = q.get("h") if perf_h_ok(q.get("h") or "") else "90"
     ex = q.get("ex") if q.get("ex") in ("0", "1") else "1"
     kind = q.get("k") if q.get("k") in PERF_KINDS else ""
-    days = int(h)
     today = dt.date.today()
 
     prices = {}
@@ -1355,9 +1364,12 @@ def view_performance(conn, q):
         if not pr or not sub:
             continue
         start = dt.date.fromisoformat(sub)
-        end = start + dt.timedelta(days=days)
-        if end > today:
-            continue                         # 아직 그만큼 지나지 않은 건은 제외
+        if h == "now":
+            end = today                      # 오늘까지: 제출일부터 오늘 종가까지
+        else:
+            end = start + dt.timedelta(days=int(h))
+            if end > today:
+                continue                     # 아직 그만큼 지나지 않은 건은 제외
         p0, p1 = _last_on(pr[0], pr[1], start), _last_on(pr[0], pr[1], end)
         k0, k1 = _last_on(kd, kv, start), _last_on(kd, kv, end)
         if not p0 or not p1 or not k0 or not k1:
@@ -1369,7 +1381,7 @@ def view_performance(conn, q):
 
     if q.get("who"):
         return view_performance_detail(q.get("who"), [e for e in evs if e["who"] == q.get("who")],
-                                       h, ex, kind, days)
+                                       h, ex, kind)
 
     per = {}
     for e in evs:
@@ -1384,9 +1396,18 @@ def view_performance(conn, q):
                          avg=sum(a["r"]) / n, excess=sum(a["x"]) / n))
     rows.sort(key=lambda r: (r["n"] < PERF_MIN_N, -r["excess"]))
 
+    preset = h in PERF_HORIZONS
     chips = " ".join(
         (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == h else
-         f'<a class="chip" href="/performance?{urlencode({"h": k, "ex": ex})}">{v}</a>') for k, v in PERF_HORIZONS.items())
+         f'<a class="chip" href="/performance?{urlencode({"h": k, "ex": ex, **({"k": kind} if kind else {})})}">{v}</a>')
+        for k, v in PERF_HORIZONS.items())
+    custom_form = (f'<form method="get" class="filters" style="margin-top:6px"><input type="hidden" name="ex" value="{ex}">'
+                   + (f'<input type="hidden" name="k" value="{kind}">' if kind else "")
+                   + f'<input type="number" name="h" min="1" max="{PERF_MAX_DAYS}" step="1" placeholder="직접 입력 (일)" '
+                   + (f'value="{h}"' if not preset else "") + ' style="width:9em">'
+                   + '<button>보기</button>'
+                   + (f' <span class="muted">{escape(perf_label(h))} 기준으로 보는 중</span>' if not preset else "")
+                   + '</form>')
     kchips = " ".join(
         (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == kind else
          f'<a class="chip" href="/performance?{urlencode({"h": h, "ex": ex, **({"k": k} if k else {})})}">{v}</a>')
@@ -1409,26 +1430,26 @@ def view_performance(conn, q):
             + ('' if ok else '<span class="chip">표본 적음</span>') + "</div>"
             f'<div>코스피 대비 평균 <b class="{cls}">{r["excess"]:+.1%}</b> · 평균 수익률 {r["avg"]:+.1%}</div>'
             f'<div class="muted">{r["n"]}건 중 {r["win"]:.0%}가 올랐어요</div></div>')
-    body = (intro + f'<div style="margin:8px 0"><span class="muted">보유 기간:</span> {chips}</div>'
+    body = (intro + f'<div style="margin:8px 0"><span class="muted">보유 기간:</span> {chips}{custom_form}</div>'
             + f'<div style="margin-bottom:8px">{toggle}</div>'
             + ("".join(cards) or '<p class="muted">아직 계산할 건이 없어요. 제출일부터 그 기간이 지나야 해요.</p>'))
     return page("운용사별 성적표", body)
 
 
-def view_performance_detail(who, evs, h, ex, kind, days):
+def view_performance_detail(who, evs, h, ex, kind):
     """운용사(또는 개인) 한 명의 건별 결과. 제목을 누르면 여기로 옵니다."""
     back_q = {"h": h, "ex": ex, **({"k": kind} if kind else {})}
     back = f'<a href="/performance?{urlencode(back_q)}">← 성적표로</a>'
     head = (f'<div class="row"><div><span class="big">{escape(who)}</span></div><div>{back}</div></div>')
     if not evs:
         return page(f"{who} — 성적표", head + f'<div class="card" style="margin-top:8px">'
-                    f'{days}일 뒤 결과를 계산할 건이 없어요. (국민연금 빼고 보기 설정이나 보유 기간을 바꿔 보세요)</div>')
+                    f'{perf_label(h)} 결과를 계산할 건이 없어요. (국민연금 빼고 보기 설정이나 보유 기간을 바꿔 보세요)</div>')
     n = len(evs)
     win = sum(1 for e in evs if e["r"] > 0) / n
     avg = sum(e["r"] for e in evs) / n
     exc = sum(e["x"] for e in evs) / n
     cls = "up" if exc > 0 else "down" if exc < 0 else ""
-    summary = (f'<div class="card" style="margin-top:8px">{n}건 · {days}일 뒤 기준'
+    summary = (f'<div class="card" style="margin-top:8px">{n}건 · {perf_label(h)} 기준'
                + ('' if n >= PERF_MIN_N else ' <span class="chip">표본 적음</span>') + "<br>"
                f'코스피 대비 평균 <b class="{cls}">{exc:+.1%}</b> · 평균 수익률 {avg:+.1%} · '
                f'{win:.0%}가 올랐어요</div>')
@@ -1440,7 +1461,7 @@ def view_performance_detail(who, evs, h, ex, kind, days):
         f'<td class="{"up" if e["x"] > 0 else "down" if e["x"] < 0 else ""}">{e["x"]:+.1%}</td></tr>'
         for e in sorted(evs, key=lambda e: e["sub"], reverse=True))
     table = ('<div style="overflow-x:auto;margin-top:8px"><table><tr><th>제출일</th><th>종목</th>'
-             f'<th>제출일 종가</th><th>{days}일 뒤 종가</th><th>수익률</th><th>코스피 대비</th></tr>{rows}</table></div>')
+             f'<th>제출일 종가</th><th>{"오늘 종가" if h == "now" else perf_label(h) + " 종가"}</th><th>수익률</th><th>코스피 대비</th></tr>{rows}</table></div>')
     note = ('<p class="muted">제출일 종가에 샀다고 가정하고, 그 뒤 날짜 종가로 계산했어요. 과거 성적이라 앞으로도 같다는 보장은 없어요.</p>')
     return page(f"{who} — 성적표", head + summary + table + note)
 
