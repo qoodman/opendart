@@ -1507,8 +1507,9 @@ def view_super(conn, q, days):
         more = f'<div class="muted" style="margin-top:4px">종목 {len(p["stocks"])}개 중 6개만 표시</div>' if len(p["stocks"]) > 6 else ""
         act = " · ".join(x for x in (f'매수 {won(p["bq"])}주' if p["bq"] else "", f'매도 {won(p["sq"])}주' if p["sq"] else "",
                                      f'약 {eok(p["amt"])}' if p["amt"] else "") if x)
+        who_link = f'/investor?{urlencode({"name": p["name"], "w": q.get("w", "90")})}'
         cards.append(
-            f'<div class="card"><div class="row"><div><span class="num">{i}</span><b>{escape(p["name"])}</b></div>'
+            f'<div class="card"><div class="row"><div><span class="num">{i}</span><a class="big" href="{who_link}">{escape(p["name"])}</a></div>'
             f'<div class="muted">최근 제출 {escape(p["last"])}</div></div>'
             f'<div>{act}</div>'
             f'<div>추정 수익률(평균 매수가 대비 현재가): <b>{pct(p["ret"])}</b></div>'
@@ -1526,6 +1527,44 @@ def latest_closes(conn):
 def tgt_line(conn, code, close):
     tgt, n = consensus(conn, code)
     return f'<div>증권사 목표가 평균 <b>{won(tgt)}원</b> ({n}곳) {upside(tgt, close)}</div>' if tgt else ""
+
+
+def view_investor(conn, name, days):
+    """슈퍼개미 한 사람의 상세: 종목별 평균·수익률, 공시 전체 기록(날짜순), 공시 원문·표 확인 링크"""
+    people = [p for p in super_investors(conn, days, {"q": name}) if p["name"] == name]
+    if not people:
+        return page("슈퍼개미", f'<div class="card">{escape(name)}님의 최근 {days}일 공시를 찾지 못했어요.</div>')
+    p = people[0]
+    ret_txt = "-" if p["ret"] is None else f'{p["ret"]:+.1%}'
+    head = (f'<div class="card"><div class="row"><div><b class="big">{escape(name)}</b> '
+            f'<span class="muted">개인 투자자(이름으로 추정)</span></div>'
+            f'<div class="muted">최근 제출 {escape(p["last"])}</div></div>'
+            f'<div style="margin-top:6px">기간 안 매수 <b>{won(p["bq"])}주</b>'
+            + (f' (약 {eok(p["amt"])})' if p["amt"] else "")
+            + (f' · 매도 <b>{won(p["sq"])}주</b>' if p["sq"] else "")
+            + f' · 추정 수익률 <b>{ret_txt}</b></div>'
+            '<div class="muted" style="font-size:12px;margin-top:4px">수익률은 공시 매수 가격과 최근 종가로 계산한 추정치예요. 참고용입니다.</div></div>')
+    stocks = ""
+    for g in sorted(p["stocks"], key=lambda g: -(g["cost"] or 0)):
+        ret = "-" if g["ret"] is None else f'<span class="{"up" if g["ret"] > 0 else "down"}">{g["ret"]:+.1%}</span>'
+        stocks += (f'<tr><td><b>{escape(str(g["name"]))}</b><div class="muted">{escape(str(g["code"]))}</div></td>'
+                   f'<td>{won(g["avg"]) if g["avg"] else "-"}</td><td>{won(g["last_unit"]) if g["last_unit"] else "-"}</td>'
+                   f'<td>{won(g["close"]) if g["close"] else "-"}</td><td>{ret}</td></tr>')
+    stock_tbl = ('<h2>종목별</h2><div class="scroll"><table><tr><th>종목</th><th>평균 매수가</th><th>최근 제출 단가</th>'
+                 f'<th>현재가</th><th>수익률</th></tr>{stocks}</table></div>') if stocks else ""
+    hist = ""
+    for r in p["items"]:
+        if r["buy_q"] and r["sell_q"]:
+            act = f'매수 {won(r["buy_q"])}주 · 매도 {won(r["sell_q"])}주'
+        elif r["buy_q"]:
+            act = f'<span class="up">매수 {won(r["buy_q"])}주</span>' + (f' (약 {eok(r["buy_amt"])})' if r["buy_amt"] else "")
+        else:
+            act = f'<span class="down">매도 {won(r["sell_q"])}주</span>'
+        hist += (f'<div class="card"><div class="row"><b>{escape(str(r["제출일"]))}</b>'
+                 f'<span class="muted">변동일 {escape(str(r["last"]))}</span></div>'
+                 f'<div>{escape(str(r["name"] or r["종목코드"]))} <span class="muted">{escape(str(r["종목코드"]))}</span> · {act}</div></div>')
+    return page(f"{name} — 슈퍼개미", head + stock_tbl + "<h2>공시 기록</h2>" + (hist or '<p class="muted">기록 없음</p>')
+                + f'<p><a href="/performance?k=person">개인 투자자 성적표 보기 →</a> · <a href="/ideas?t=super">← 슈퍼개미 목록</a></p>')
 
 
 def view_ideas(conn, q):
@@ -1731,6 +1770,9 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     body = view_policy(conn, q)
                 elif url.path == "/reports":
                     body = view_report_list(conn, q)
+                elif url.path == "/investor":
+                    w = q.get("w") if q.get("w") in WINDOWS else "90"
+                    body = view_investor(conn, q.get("name", ""), int(w))
                 elif url.path == "/performance":
                     body = view_performance(conn, q)
                 elif url.path == "/ideas":
