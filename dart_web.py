@@ -1255,6 +1255,7 @@ def view_policy(conn, q):
 
 # ---------------- 운용사별 성적표 ----------------
 PERF_HORIZONS = {"30": "30일 뒤", "90": "90일 뒤", "180": "180일 뒤"}
+PERF_KINDS = {"": "기관·개인 전체", "inst": "기관만", "person": "개인(슈퍼개미 추정)만"}
 PERF_MIN_N = 5          # 이보다 적은 건수는 '표본 적음'으로 표시
 
 
@@ -1283,6 +1284,7 @@ def view_performance(conn, q):
                                     '위쪽 <b>지금 수집 → 보고서만</b>을 눌러 주세요.</div>')
     h = q.get("h") if q.get("h") in PERF_HORIZONS else "90"
     ex = q.get("ex") if q.get("ex") in ("0", "1") else "1"
+    kind = q.get("k") if q.get("k") in PERF_KINDS else ""
     days = int(h)
     today = dt.date.today()
 
@@ -1298,6 +1300,10 @@ def view_performance(conn, q):
     per = {}
     for who, code, sub, qty in perf_events(conn):
         if ex == "1" and who and "국민연금" in who:
+            continue
+        if kind == "person" and not is_person(who):
+            continue
+        if kind == "inst" and is_person(who):
             continue
         pr = prices.get(code)
         if not pr or not sub:
@@ -1326,7 +1332,12 @@ def view_performance(conn, q):
     chips = " ".join(
         (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == h else
          f'<a class="chip" href="/performance?{urlencode({"h": k, "ex": ex})}">{v}</a>') for k, v in PERF_HORIZONS.items())
-    toggle = (f'<a class="chip" href="/performance?{urlencode({"h": h, "ex": "0" if ex == "1" else "1"})}">'
+    kchips = " ".join(
+        (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == kind else
+         f'<a class="chip" href="/performance?{urlencode({"h": h, "ex": ex, **({"k": k} if k else {})})}">{v}</a>')
+        for k, v in PERF_KINDS.items())
+    toggle = (f'<div style="margin-bottom:6px">{kchips}</div>'
+              f'<a class="chip" href="/performance?{urlencode({"h": h, "ex": "0" if ex == "1" else "1", **({"k": kind} if kind else {})})}">'
               + ("국민연금 포함해서 보기" if ex == "1" else "국민연금 빼고 보기") + "</a>")
     intro = ('<div class="card"><b>이 화면은 무엇인가요?</b><div class="muted" style="margin-top:4px">'
              '기관이 단순투자 공시를 낸 날(제출일)에 그 종목을 샀다고 가정하고, 그 뒤 수익률을 코스피 수익률과 비교했어요. '
@@ -1349,7 +1360,68 @@ def view_performance(conn, q):
 
 
 # ---------------- 아이디어 ----------------
-IDEA_TABS = {"cheap": "기관 평단보다 싼 종목", "cluster": "여러 기관이 함께 산 종목"}
+IDEA_TABS = {"cheap": "기관 평단보다 싼 종목", "cluster": "여러 기관이 함께 산 종목", "super": "슈퍼개미 움직임"}
+
+# 공시 제출인이 개인인지 추정: 한글 이름 2~4자. 기관 이름(운용·증권·공단 등)이나 '외 N명'은 제외
+_INST_WORDS = ("자산", "운용", "증권", "투자", "공단", "펀드", "은행", "보험", "재단", "캐피탈", "파트너스",
+               "홀딩스", "자문", "신탁", "연금", "조합", "주식회사", "회사", "금융", "사모", "외")
+
+
+def is_person(name):
+    n = (name or "").strip()
+    return bool(re.fullmatch(r"[가-힣]{2,4}", n)) and not any(w in n for w in _INST_WORDS)
+
+
+def super_investors(conn, days):
+    """개인(이름으로 추정) 제출인의 최근 days일 매수·매도를 사람별로 묶음. 최근 활동 순."""
+    since = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+    rows = conn.execute(
+        "SELECT 제출인, 종목코드, MAX(종목명) name, 제출일, "
+        "SUM(CASE WHEN 증감>0 THEN 증감 END) buy_q, SUM(CASE WHEN 증감<0 THEN -증감 END) sell_q, "
+        "SUM(CASE WHEN 증감>0 AND 단가 IS NOT NULL THEN 증감*단가 END) buy_amt, "
+        "SUM(증감) net, MAX(변동일) last FROM detail WHERE 제출일 >= ? GROUP BY 제출인, 종목코드, 제출일",
+        (since,)).fetchall()
+    people = {}
+    for r in rows:
+        if not is_person(r["제출인"]):
+            continue
+        p = people.setdefault(r["제출인"], {"name": r["제출인"], "last": "", "amt": 0.0, "items": []})
+        p["last"] = max(p["last"], r["제출일"] or "")
+        p["amt"] += r["buy_amt"] or 0
+        p["items"].append(r)
+    out = sorted(people.values(), key=lambda p: (p["last"], p["amt"]), reverse=True)
+    for p in out:
+        p["items"].sort(key=lambda r: r["제출일"] or "", reverse=True)
+    return out
+
+
+def view_super(conn, q, days):
+    people = super_investors(conn, days)
+    if not people:
+        return ('<div class="card">이 기간에 개인(슈퍼개미 추정) 공시가 없어요. 기간을 늘려 보세요.</div>')
+    cards = []
+    for i, p in enumerate(people[:30], 1):
+        lines = []
+        for r in p["items"][:5]:
+            if r["buy_q"] and r["sell_q"]:
+                act = f'매수 {r["buy_q"]:,.0f}주 · 매도 {r["sell_q"]:,.0f}주'
+            elif r["buy_q"]:
+                act = f'<span class="up">매수 {r["buy_q"]:,.0f}주</span>'
+                if r["buy_amt"]:
+                    act += f' (약 {eok(r["buy_amt"])})'
+            else:
+                act = f'<span class="down">매도 {r["sell_q"]:,.0f}주</span>'
+            lines.append(f'<div>{escape(str(r["name"] or r["종목코드"]))} <span class="muted">{escape(str(r["종목코드"]))}</span> · '
+                         f'{escape(str(r["제출일"]))} · {act}</div>')
+        more = f'<div class="muted">외 {len(p["items"]) - 5}건</div>' if len(p["items"]) > 5 else ""
+        cards.append(f'<div class="card"><div class="row"><div><span class="num">{i}</span><b>{escape(p["name"])}</b></div>'
+                     f'<div class="muted">최근 {escape(p["last"])}</div></div>'
+                     + "".join(lines) + more + "</div>")
+    note = ('<div class="card"><b>슈퍼개미 움직임</b><div class="muted" style="margin-top:4px">'
+            '5% 이상 보유 공시를 낸 개인 투자자를 모았어요. 이름이 사람 이름처럼 보이는 제출인을 개인으로 보고, '
+            '기관(운용·증권·공단 등)은 뺐어요. 이름으로 추정한 것이라 가끔 틀릴 수 있어요. '
+            '개인의 매수가 항상 좋은 신호는 아니고, 참고용으로만 보세요.</div></div>')
+    return note + "".join(cards)
 WINDOWS = {"30": "최근 1달 매수", "90": "최근 3달 매수", "180": "최근 6달 매수", "365": "최근 1년 매수"}
 NPS_OPTS = {"1": "국민연금 제외", "0": "국민연금 포함"}
 
@@ -1368,6 +1440,18 @@ def view_ideas(conn, q):
     if not has_table(conn, "summary"):
         return page("아이디어", '<div class="card">보고서(DART) 수집이 한 번 끝나야 볼 수 있습니다. '
                               '위쪽 <b>지금 수집 → 보고서만</b>을 눌러 주세요.</div>')
+    if q.get("t") == "super" and has_table(conn, "detail"):
+        w = q.get("w") if q.get("w") in WINDOWS else "90"
+        tabs = " ".join(
+            (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == "super" else
+             f'<a class="chip" href="/ideas?{urlencode({"t": k})}">{v}</a>') for k, v in IDEA_TABS.items())
+        win = " ".join(
+            (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == w else
+             f'<a class="chip" href="/ideas?{urlencode({"t": "super", "w": k})}">{v}</a>')
+            for k, v in (("30", "최근 1달"), ("90", "최근 3달"), ("180", "최근 6달"), ("365", "최근 1년")))
+        body = (tabs + f'<div style="margin:8px 0">{win}</div>' + view_super(conn, q, int(w))
+                + f'<p style="margin-top:10px"><a href="/performance?k=person">개인 투자자 성적표 보기 →</a></p>')
+        return page("아이디어", body)
     if not has_table(conn, "prices"):
         return page("아이디어", '<div class="card">주가 데이터가 아직 없습니다. 위쪽 <b>지금 수집 → 보고서만</b>을 '
                               '한 번 돌리면 볼 수 있습니다. (설정 → 수집의 \'주가 받기\'가 켜져 있어야 합니다)</div>')
