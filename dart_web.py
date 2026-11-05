@@ -133,7 +133,7 @@ def page(title, body, refresh=False, charts=False):
 <link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#2b5a9e">
 <link rel="icon" href="/icon-192.png"><link rel="apple-touch-icon" href="/icon-192.png">
 </head><body>
-<header><div class="hrow"><b>DART 단순투자</b>{run_widget()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/reports">리포트</a><a href="/market">시장</a><a href="/policy">정책</a><a href="/calendar">달력</a><a href="/new">새 공시</a>
+<header><div class="hrow"><b>DART 단순투자</b>{run_widget()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/performance">성적표</a><a href="/reports">리포트</a><a href="/market">시장</a><a href="/policy">정책</a><a href="/calendar">달력</a><a href="/new">새 공시</a>
 <a href="/settings">설정</a>{extra}</nav>
 </header><main>{body}</main>{"<script>" + CHART_JS + "</script>" if charts else ""}</body></html>""".encode()
 
@@ -1253,6 +1253,101 @@ def view_policy(conn, q):
                 + ("".join(cards) or '<p class="muted">조건에 맞는 소식이 없습니다.</p>') + pager(total, pg, link_fn, size) + rows_bar(q, size))
 
 
+# ---------------- 운용사별 성적표 ----------------
+PERF_HORIZONS = {"30": "30일 뒤", "90": "90일 뒤", "180": "180일 뒤"}
+PERF_MIN_N = 5          # 이보다 적은 건수는 '표본 적음'으로 표시
+
+
+def _last_on(dates, vals, day, maxgap=10):
+    """날짜 목록에서 day(포함) 이전 마지막 값 (maxgap일 넘게 떨어졌으면 None)"""
+    import bisect
+    i = bisect.bisect_right(dates, day.isoformat()) - 1
+    if i < 0:
+        return None
+    if (day - dt.date.fromisoformat(dates[i])).days > maxgap:
+        return None
+    return vals[i]
+
+
+def perf_events(conn):
+    """기관 매수 한 건씩: (제출인, 종목코드, 제출일) — 같은 날 같은 종목은 한 번만"""
+    return conn.execute(
+        "SELECT 제출인, 종목코드, 제출일, SUM(매수수량) q FROM summary WHERE 매수수량 > 0 "
+        "GROUP BY 제출인, 종목코드, 제출일").fetchall()
+
+
+def view_performance(conn, q):
+    import stock_market
+    if not has_table(conn, "summary") or not has_table(conn, "prices"):
+        return page("운용사별 성적표", '<div class="card">주가와 보고서 수집이 한 번 끝나야 볼 수 있습니다. '
+                                    '위쪽 <b>지금 수집 → 보고서만</b>을 눌러 주세요.</div>')
+    h = q.get("h") if q.get("h") in PERF_HORIZONS else "90"
+    ex = q.get("ex") if q.get("ex") in ("0", "1") else "1"
+    days = int(h)
+    today = dt.date.today()
+
+    prices = {}
+    for code, d, c in conn.execute("SELECT code, date, close FROM prices WHERE close IS NOT NULL ORDER BY code, date"):
+        prices.setdefault(code, ([], []))
+        prices[code][0].append(d)
+        prices[code][1].append(c)
+    kp = list(stock_market.series(conn, "idx:KOSPI"))
+    kd = [p for p, _ in kp]
+    kv = [v for _, v in kp]
+
+    per = {}
+    for who, code, sub, qty in perf_events(conn):
+        if ex == "1" and who and "국민연금" in who:
+            continue
+        pr = prices.get(code)
+        if not pr or not sub:
+            continue
+        start = dt.date.fromisoformat(sub)
+        end = start + dt.timedelta(days=days)
+        if end > today:
+            continue                         # 아직 그만큼 지나지 않은 건은 제외
+        p0, p1 = _last_on(pr[0], pr[1], start), _last_on(pr[0], pr[1], end)
+        k0, k1 = _last_on(kd, kv, start), _last_on(kd, kv, end)
+        if not p0 or not p1 or not k0 or not k1:
+            continue
+        r = p1 / p0 - 1
+        m = k1 / k0 - 1
+        acc = per.setdefault(who or "(이름 없음)", {"r": [], "x": []})
+        acc["r"].append(r)
+        acc["x"].append(r - m)
+
+    rows = []
+    for who, a in per.items():
+        n = len(a["r"])
+        rows.append(dict(who=who, n=n, win=sum(1 for v in a["r"] if v > 0) / n,
+                         avg=sum(a["r"]) / n, excess=sum(a["x"]) / n))
+    rows.sort(key=lambda r: (r["n"] < PERF_MIN_N, -r["excess"]))
+
+    chips = " ".join(
+        (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == h else
+         f'<a class="chip" href="/performance?{urlencode({"h": k, "ex": ex})}">{v}</a>') for k, v in PERF_HORIZONS.items())
+    toggle = (f'<a class="chip" href="/performance?{urlencode({"h": h, "ex": "0" if ex == "1" else "1"})}">'
+              + ("국민연금 포함해서 보기" if ex == "1" else "국민연금 빼고 보기") + "</a>")
+    intro = ('<div class="card"><b>이 화면은 무엇인가요?</b><div class="muted" style="margin-top:4px">'
+             '기관이 단순투자 공시를 낸 날(제출일)에 그 종목을 샀다고 가정하고, 그 뒤 수익률을 코스피 수익률과 비교했어요. '
+             '<b>초과수익</b>이 플러스면 그 기관의 매수 뒤 종목이 시장보다 더 올랐다는 뜻이에요.</div>'
+             '<div class="muted" style="margin-top:6px"><b>주의:</b> 과거 성적이라 앞으로도 같다는 보장은 없어요. '
+             f'건수가 {PERF_MIN_N}건 미만이면 우연일 수 있어요. 투자 추천이 아니니 참고만 하세요.</div></div>')
+    cards = []
+    for i, r in enumerate(rows, 1):
+        ok = r["n"] >= PERF_MIN_N
+        cls = "up" if r["excess"] > 0 else "down" if r["excess"] < 0 else ""
+        cards.append(
+            f'<div class="card"><div class="row"><div><span class="num">{i}</span><b>{escape(r["who"])}</b></div>'
+            + ('' if ok else '<span class="chip">표본 적음</span>') + "</div>"
+            f'<div>코스피 대비 평균 <b class="{cls}">{r["excess"]:+.1%}</b> · 평균 수익률 {r["avg"]:+.1%}</div>'
+            f'<div class="muted">{r["n"]}건 중 {r["win"]:.0%}가 올랐어요</div></div>')
+    body = (intro + f'<div style="margin:8px 0"><span class="muted">보유 기간:</span> {chips}</div>'
+            + f'<div style="margin-bottom:8px">{toggle}</div>'
+            + ("".join(cards) or '<p class="muted">아직 계산할 건이 없어요. 제출일부터 그 기간이 지나야 해요.</p>'))
+    return page("운용사별 성적표", body)
+
+
 # ---------------- 아이디어 ----------------
 IDEA_TABS = {"cheap": "기관 평단보다 싼 종목", "cluster": "여러 기관이 함께 산 종목"}
 WINDOWS = {"30": "최근 1달 매수", "90": "최근 3달 매수", "180": "최근 6달 매수", "365": "최근 1년 매수"}
@@ -1318,7 +1413,8 @@ def view_ideas(conn, q):
     form = (f'<form method="get" class="filters" style="margin-top:10px"><input type="hidden" name="t" value="{tab}">'
             f'{select("w", WINDOWS, w)}' + (select("m", MARKET_OPTS, m) if "시장" in cols else "")
             + f'{select("ex", NPS_OPTS, ex)}<button>적용</button></form>')
-    note = ('<p class="muted">살펴볼 후보를 찾는 화면입니다. 공시는 매매 후 최대 5영업일 뒤에 나오고, '
+    perf_link = '<p><a href="/performance">운용사별 성적표 보기 →</a> (어느 기관의 매수가 과거에 잘 맞았는지)</p>'
+    note = perf_link + ('<p class="muted">살펴볼 후보를 찾는 화면입니다. 공시는 매매 후 최대 5영업일 뒤에 나오고, '
             '국민연금처럼 큰 기관은 비중 조절로 사고팔 때가 많아 기본으로 뺐습니다.</p>')
     if not ideas:
         priced = sum(1 for r in rows if r["code"] in closes)
@@ -1446,6 +1542,8 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     body = view_policy(conn, q)
                 elif url.path == "/reports":
                     body = view_report_list(conn, q)
+                elif url.path == "/performance":
+                    body = view_performance(conn, q)
                 elif url.path == "/ideas":
                     body = view_ideas(conn, q)
                 elif url.path == "/new":
