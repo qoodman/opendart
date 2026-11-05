@@ -1367,13 +1367,49 @@ _INST_WORDS = ("자산", "운용", "증권", "투자", "공단", "펀드", "은�
                "홀딩스", "자문", "신탁", "연금", "조합", "주식회사", "회사", "금융", "사모", "외")
 
 
-def is_person(name):
-    n = (name or "").strip()
-    return bool(re.fullmatch(r"[가-힣]{2,4}", n)) and not any(w in n for w in _INST_WORDS)
+_COMPANY_CACHE = {"key": None, "names": set()}
+_COMPANY_WORDS = ("주식회사", "산업", "중공업", "전자", "화학", "건설", "제약", "바이오", "그룹", "홀딩스", "에너지",
+                  "전기", "기계", "물산", "상사", "개발", "시스템", "통신", "해운", "항공", "철강", "식품", "생명",
+                  "인베스트", "파트너스", "엔지니어링", "디스플레이", "반도체", "케미칼", "하이닉스", "은행", "카드")
 
 
-def super_investors(conn, days):
-    """개인(이름으로 추정) 제출인의 최근 days일 매수·매도를 사람별로 묶음. 최근 활동 순."""
+def _norm_company(n):
+    return re.sub(r"\s|㈜|주식회사", "", n or "")
+
+
+def company_names():
+    """DART 회사 목록(상장·비상장 전체)의 이름 집합. 캐시가 없으면 빈 집합."""
+    path = Path(_DATA_DIR["path"] or ".") / "dart_cache" / "corp_names.json"
+    try:
+        key = path.stat().st_mtime
+    except OSError:
+        return set()
+    if _COMPANY_CACHE["key"] != key:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            names = set()
+            for group in ("stock", "corp"):
+                names.update(_norm_company(v) for v in (data.get(group) or {}).values())
+        except (OSError, ValueError):
+            names = set()
+        _COMPANY_CACHE.update(key=key, names=names)
+    return _COMPANY_CACHE["names"]
+
+
+def is_person(name, companies=None):
+    """개인(이름으로 추정): 한글 2~4자, 기업 이름이 아니고 기업 말이 없음"""
+    n = _norm_company(name).strip()
+    if not re.fullmatch(r"[가-힣]{2,4}", n):
+        return False
+    if any(w in n for w in _INST_WORDS + _COMPANY_WORDS):
+        return False
+    return not (companies and n in companies)
+
+
+def super_investors(conn, days, flt=None):
+    """개인 제출인의 최근 days일 매수·매도를 사람별로 묶음. flt: q(이름 검색), amt(최소 매수금액), dir(buy/sell)"""
+    flt = flt or {}
+    companies = company_names()
     since = (dt.date.today() - dt.timedelta(days=days)).isoformat()
     rows = conn.execute(
         "SELECT 제출인, 종목코드, MAX(종목명) name, 제출일, "
@@ -1383,22 +1419,39 @@ def super_investors(conn, days):
         (since,)).fetchall()
     people = {}
     for r in rows:
-        if not is_person(r["제출인"]) or not (r["buy_q"] or r["sell_q"]):
-            continue                         # 수량을 못 읽은 줄(증감 없음)은 건너뜀
-        p = people.setdefault(r["제출인"], {"name": r["제출인"], "last": "", "amt": 0.0, "items": []})
+        if not is_person(r["제출인"], companies) or not (r["buy_q"] or r["sell_q"]):
+            continue                         # 기업·수량 없는 줄은 뺌
+        p = people.setdefault(r["제출인"], {"name": r["제출인"], "last": "", "amt": 0.0, "bq": 0, "sq": 0, "items": []})
         p["last"] = max(p["last"], r["제출일"] or "")
         p["amt"] += r["buy_amt"] or 0
+        p["bq"] += r["buy_q"] or 0
+        p["sq"] += r["sell_q"] or 0
         p["items"].append(r)
-    out = sorted(people.values(), key=lambda p: (p["last"], p["amt"]), reverse=True)
+    q = (flt.get("q") or "").strip()
+    amt = float(flt.get("amt") or 0)
+    d = flt.get("dir") or ""
+    out = []
+    for p in people.values():
+        if q and q not in p["name"]:
+            continue
+        if amt and p["amt"] < amt:
+            continue
+        if d == "buy" and not p["bq"]:
+            continue
+        if d == "sell" and not p["sq"]:
+            continue
+        out.append(p)
+    out.sort(key=lambda p: (p["last"], p["amt"]), reverse=True)
     for p in out:
         p["items"].sort(key=lambda r: r["제출일"] or "", reverse=True)
     return out
 
 
 def view_super(conn, q, days):
-    people = super_investors(conn, days)
+    flt = {"q": q.get("sq", ""), "amt": q.get("amt", ""), "dir": q.get("dir", "")}
+    people = super_investors(conn, days, flt)
     if not people:
-        return ('<div class="card">이 기간에 개인(슈퍼개미 추정) 공시가 없어요. 기간을 늘려 보세요.</div>')
+        return ('<div class="card">조건에 맞는 개인 공시가 없어요. 기간이나 필터를 바꿔 보세요.</div>')
     cards = []
     for i, p in enumerate(people[:30], 1):
         lines = []
@@ -1454,7 +1507,14 @@ def view_ideas(conn, q):
             listing = view_super(conn, q, int(w))
         except Exception as e:                # 한 부분이 실패해도 화면은 열리게
             listing = f'<div class="card warn">슈퍼개미 목록을 만드는 중 문제가 생겼습니다: {escape(str(e))[:120]}</div>'
-        body = (tabs + f'<div style="margin:8px 0">{win}</div>' + listing
+        fq = escape(q.get("sq", ""))
+        amt_opts = {"": "최소 매수금액 없음", "100000000": "1억 이상", "1000000000": "10억 이상", "10000000000": "100억 이상"}
+        dir_opts = {"": "매수·매도 전체", "buy": "매수한 사람만", "sell": "매도한 사람만"}
+        form = (f'<form method="get" class="filters" style="margin:8px 0"><input type="hidden" name="t" value="super">'
+                f'<input type="hidden" name="w" value="{escape(w)}">'
+                f'<input type="search" name="sq" value="{fq}" placeholder="이름 검색">'
+                f'{select("amt", amt_opts, q.get("amt", ""))}{select("dir", dir_opts, q.get("dir", ""))}<button>적용</button></form>')
+        body = (tabs + f'<div style="margin:8px 0">{win}</div>' + form + listing
                 + f'<p style="margin-top:10px"><a href="/performance?k=person">개인 투자자 성적표 보기 →</a></p>')
         return page("아이디어", body)
     if not has_table(conn, "prices"):
