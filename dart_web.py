@@ -1567,6 +1567,26 @@ def view_investor(conn, name, days):
                 + f'<p><a href="/performance?k=person">개인 투자자 성적표 보기 →</a> · <a href="/ideas?t=super">← 슈퍼개미 목록</a></p>')
 
 
+IDEA_SORTS = {"": "정렬: 기본", "amt": "정렬: 매수금액 큰 순", "n": "정렬: 기관 수 많은 순",
+              "disc": "정렬: 평단 대비 많이 싼 순", "gain": "정렬: 평단 대비 많이 오른 순",
+              "last": "정렬: 최근 매수일순", "name": "정렬: 이름순"}
+
+
+def sort_ideas(ideas, srt, tab):
+    """아이디어 목록 정렬. srt가 없으면 탭의 기본 순서 그대로."""
+    if not srt:
+        return ideas
+    key = {
+        "amt": lambda i: -i["r"]["amt"],
+        "n": lambda i: (-i["r"]["n"], -i["r"]["amt"]),
+        "disc": lambda i: i["disc"],
+        "gain": lambda i: -i["disc"],
+        "last": lambda i: str(i["r"]["last"] or ""),
+        "name": lambda i: str(i["r"]["name"] or ""),
+    }[srt]
+    return sorted(ideas, key=key, reverse=(srt == "last"))
+
+
 def view_ideas(conn, q):
     if not has_table(conn, "summary"):
         return page("아이디어", '<div class="card">보고서(DART) 수집이 한 번 끝나야 볼 수 있습니다. '
@@ -1624,13 +1644,16 @@ def view_ideas(conn, q):
         day, close = closes[r["code"]]
         avg = r["amt"] / r["qty"]
         ideas.append(dict(r=r, avg=avg, close=close, day=day, disc=close / avg - 1))
+    srt = q.get("s") if q.get("s") in IDEA_SORTS else ""
     if tab == "cheap":
         ideas = sorted((i for i in ideas if i["disc"] < 0), key=lambda i: i["disc"])
+        ideas = sort_ideas(ideas, srt, tab)
         chart = bar_list([(i["r"]["name"], f'/stock?code={quote(i["r"]["code"])}', i["disc"] * 100) for i in ideas[:12]],
                          lambda v: f"{v:+.1f}%")
         chart_title = "최근 종가가 기관 평균매수단가보다 몇 % 낮은지"
     else:
         ideas = sorted((i for i in ideas if i["r"]["n"] >= 2), key=lambda i: (-i["r"]["n"], -i["r"]["amt"]))
+        ideas = sort_ideas(ideas, srt, tab)
         chart = bar_list([(i["r"]["name"], f'/stock?code={quote(i["r"]["code"])}', i["r"]["amt"]) for i in ideas[:12]],
                          lambda v: eok(v))
         chart_title = "함께 산 기관들의 매수금액 합계"
@@ -1640,7 +1663,7 @@ def view_ideas(conn, q):
                     else f'<a class="chip" href="/ideas?{urlencode({**base, "t": k})}">{v}</a>' for k, v in IDEA_TABS.items())
     form = (f'<form method="get" class="filters" style="margin-top:10px"><input type="hidden" name="t" value="{tab}">'
             f'{select("w", WINDOWS, w)}' + (select("m", MARKET_OPTS, m) if "시장" in cols else "")
-            + f'{select("ex", NPS_OPTS, ex)}<button>적용</button></form>')
+            + f'{select("ex", NPS_OPTS, ex)}{select("s", IDEA_SORTS, srt)}<button>적용</button></form>')
     perf_link = '<p><a href="/performance">운용사별 성적표 보기 →</a> (어느 기관의 매수가 과거에 잘 맞았는지)</p>'
     note = perf_link + ('<p class="muted">살펴볼 후보를 찾는 화면입니다. 공시는 매매 후 최대 5영업일 뒤에 나오고, '
             '국민연금처럼 큰 기관은 비중 조절로 사고팔 때가 많아 기본으로 뺐습니다.</p>')
