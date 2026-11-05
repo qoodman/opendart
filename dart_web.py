@@ -1383,8 +1383,8 @@ def super_investors(conn, days):
         (since,)).fetchall()
     people = {}
     for r in rows:
-        if not is_person(r["제출인"]):
-            continue
+        if not is_person(r["제출인"]) or not (r["buy_q"] or r["sell_q"]):
+            continue                         # 수량을 못 읽은 줄(증감 없음)은 건너뜀
         p = people.setdefault(r["제출인"], {"name": r["제출인"], "last": "", "amt": 0.0, "items": []})
         p["last"] = max(p["last"], r["제출일"] or "")
         p["amt"] += r["buy_amt"] or 0
@@ -1403,14 +1403,15 @@ def view_super(conn, q, days):
     for i, p in enumerate(people[:30], 1):
         lines = []
         for r in p["items"][:5]:
-            if r["buy_q"] and r["sell_q"]:
-                act = f'매수 {r["buy_q"]:,.0f}주 · 매도 {r["sell_q"]:,.0f}주'
-            elif r["buy_q"]:
-                act = f'<span class="up">매수 {r["buy_q"]:,.0f}주</span>'
+            bq, sq = r["buy_q"] or 0, r["sell_q"] or 0
+            if bq and sq:
+                act = f'매수 {bq:,.0f}주 · 매도 {sq:,.0f}주'
+            elif bq:
+                act = f'<span class="up">매수 {bq:,.0f}주</span>'
                 if r["buy_amt"]:
                     act += f' (약 {eok(r["buy_amt"])})'
             else:
-                act = f'<span class="down">매도 {r["sell_q"]:,.0f}주</span>'
+                act = f'<span class="down">매도 {sq:,.0f}주</span>'
             lines.append(f'<div>{escape(str(r["name"] or r["종목코드"]))} <span class="muted">{escape(str(r["종목코드"]))}</span> · '
                          f'{escape(str(r["제출일"]))} · {act}</div>')
         more = f'<div class="muted">외 {len(p["items"]) - 5}건</div>' if len(p["items"]) > 5 else ""
@@ -1449,7 +1450,11 @@ def view_ideas(conn, q):
             (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == w else
              f'<a class="chip" href="/ideas?{urlencode({"t": "super", "w": k})}">{v}</a>')
             for k, v in (("30", "최근 1달"), ("90", "최근 3달"), ("180", "최근 6달"), ("365", "최근 1년")))
-        body = (tabs + f'<div style="margin:8px 0">{win}</div>' + view_super(conn, q, int(w))
+        try:
+            listing = view_super(conn, q, int(w))
+        except Exception as e:                # 한 부분이 실패해도 화면은 열리게
+            listing = f'<div class="card warn">슈퍼개미 목록을 만드는 중 문제가 생겼습니다: {escape(str(e))[:120]}</div>'
+        body = (tabs + f'<div style="margin:8px 0">{win}</div>' + listing
                 + f'<p style="margin-top:10px"><a href="/performance?k=person">개인 투자자 성적표 보기 →</a></p>')
         return page("아이디어", body)
     if not has_table(conn, "prices"):
