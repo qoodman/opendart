@@ -1326,10 +1326,42 @@ def _last_on(dates, vals, day, maxgap=10):
 
 
 def perf_events(conn):
-    """기관 매수 한 건씩: (제출인, 종목코드, 제출일) — 같은 날 같은 종목은 한 번만"""
+    """기관 매수 한 건씩: (제출인, 종목코드, 제출일, 매수수량, 매수금액) — 같은 날 같은 종목은 한 번만"""
     return conn.execute(
-        "SELECT 제출인, 종목코드, 제출일, SUM(매수수량) q FROM summary WHERE 매수수량 > 0 "
+        "SELECT 제출인, 종목코드, 제출일, SUM(매수수량) q, SUM(매수금액) amt FROM summary WHERE 매수수량 > 0 "
         "GROUP BY 제출인, 종목코드, 제출일").fetchall()
+
+
+# 성적표 정렬 (목록: 운용사 단위 / 상세: 건별)
+PERF_SORTS = {"": "정렬: 코스피 대비 높은 순", "ret": "정렬: 평균 수익률 높은 순", "win": "정렬: 오른 비율 높은 순",
+              "worst": "정렬: 최악 수익률 (손실 큰 순)", "amt": "정렬: 매수금액 큰 순", "n": "정렬: 건수 많은 순",
+              "last": "정렬: 최근 제출일순", "hold": "정렬: 평균 보유기간 긴 순", "name": "정렬: 이름순"}
+PERF_SORTS_DETAIL = {"": "정렬: 제출일 최신순", "old": "정렬: 제출일 오래된 순", "exc": "정렬: 코스피 대비 높은 순",
+                     "ret": "정렬: 수익률 높은 순", "amt": "정렬: 매수금액 큰 순", "hold": "정렬: 보유기간 긴 순",
+                     "name": "정렬: 종목명순"}
+
+
+def sort_perf(rows, s):
+    """운용사 목록 정렬. 표본이 적은 곳(PERF_MIN_N 미만)은 항상 뒤로."""
+    def key(r):
+        val = {"": -r["excess"], "ret": -r["avg"], "win": -r["win"], "worst": r["worst"], "amt": -r["amt"],
+               "n": -r["n"], "last": -dt.date.fromisoformat(r["last"]).toordinal(), "hold": -r["hold"],
+               "name": r["who"]}.get(s, -r["excess"])
+        return (r["n"] < PERF_MIN_N, val)
+    return sorted(rows, key=key)
+
+
+def sort_perf_events(evs, s):
+    d = lambda e: dt.date.fromisoformat(e["sub"]).toordinal()
+    keys = {"": lambda e: -d(e), "old": d, "exc": lambda e: -e["x"], "ret": lambda e: -e["r"],
+            "amt": lambda e: -e["amt"], "hold": lambda e: -e["hold"], "name": lambda e: e["name"]}
+    return sorted(evs, key=keys.get(s, keys[""]))
+
+
+def perf_sort_form(opts, cur, hidden):
+    hid = "".join(f'<input type="hidden" name="{k}" value="{escape(str(v))}">'
+                  for k, v in hidden.items() if v not in (None, ""))
+    return f'<form method="get" class="filters" style="margin:6px 0">{hid}{select("s", opts, cur)}<button>적용</button></form>'
 
 
 def view_performance(conn, q):
@@ -1353,7 +1385,7 @@ def view_performance(conn, q):
 
     names = {r[0]: r[1] for r in conn.execute("SELECT 종목코드, MAX(종목명) FROM summary GROUP BY 종목코드")}
     evs = []                                  # 건별 결과: 상세 화면과 목록이 같이 씀
-    for who, code, sub, qty in perf_events(conn):
+    for who, code, sub, qty, amt in perf_events(conn):
         if ex == "1" and who and "국민연금" in who:
             continue
         if kind == "person" and not is_person(who):
@@ -1377,32 +1409,40 @@ def view_performance(conn, q):
         r = p1 / p0 - 1
         m = k1 / k0 - 1
         evs.append(dict(who=who or "(이름 없음)", code=code, name=names.get(code) or code, sub=sub,
-                        end=end.isoformat(), p0=p0, p1=p1, r=r, x=r - m))
+                        end=end.isoformat(), p0=p0, p1=p1, r=r, x=r - m,
+                        amt=float(amt or 0), hold=(end - start).days))
 
+    s = q.get("s") if q.get("s") in (PERF_SORTS_DETAIL if q.get("who") else PERF_SORTS) else ""
+    keep = {"s": s} if s else {}
     if q.get("who"):
         return view_performance_detail(q.get("who"), [e for e in evs if e["who"] == q.get("who")],
-                                       h, ex, kind)
+                                       h, ex, kind, s)
 
     per = {}
     for e in evs:
-        acc = per.setdefault(e["who"], {"r": [], "x": []})
+        acc = per.setdefault(e["who"], {"r": [], "x": [], "amt": 0.0, "last": "", "hold": []})
         acc["r"].append(e["r"])
         acc["x"].append(e["x"])
+        acc["amt"] += e["amt"]
+        acc["last"] = max(acc["last"], e["sub"])
+        acc["hold"].append(e["hold"])
 
     rows = []
     for who, a in per.items():
         n = len(a["r"])
         rows.append(dict(who=who, n=n, win=sum(1 for v in a["r"] if v > 0) / n,
-                         avg=sum(a["r"]) / n, excess=sum(a["x"]) / n))
-    rows.sort(key=lambda r: (r["n"] < PERF_MIN_N, -r["excess"]))
+                         avg=sum(a["r"]) / n, excess=sum(a["x"]) / n, amt=a["amt"], last=a["last"],
+                         hold=sum(a["hold"]) / n, worst=min(a["r"])))
+    rows = sort_perf(rows, s)
 
     preset = h in PERF_HORIZONS
     chips = " ".join(
         (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == h else
-         f'<a class="chip" href="/performance?{urlencode({"h": k, "ex": ex, **({"k": kind} if kind else {})})}">{v}</a>')
+         f'<a class="chip" href="/performance?{urlencode({"h": k, "ex": ex, **({"k": kind} if kind else {}), **keep})}">{v}</a>')
         for k, v in PERF_HORIZONS.items())
     custom_form = (f'<form method="get" class="filters" style="margin-top:6px"><input type="hidden" name="ex" value="{ex}">'
                    + (f'<input type="hidden" name="k" value="{kind}">' if kind else "")
+                   + (f'<input type="hidden" name="s" value="{s}">' if s else "")
                    + f'<input type="number" name="h" min="1" max="{PERF_MAX_DAYS}" step="1" placeholder="직접 입력 (일)" '
                    + (f'value="{h}"' if not preset else "") + ' style="width:9em">'
                    + '<button>보기</button>'
@@ -1410,10 +1450,10 @@ def view_performance(conn, q):
                    + '</form>')
     kchips = " ".join(
         (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == kind else
-         f'<a class="chip" href="/performance?{urlencode({"h": h, "ex": ex, **({"k": k} if k else {})})}">{v}</a>')
+         f'<a class="chip" href="/performance?{urlencode({"h": h, "ex": ex, **({"k": k} if k else {}), **keep})}">{v}</a>')
         for k, v in PERF_KINDS.items())
     toggle = (f'<div style="margin-bottom:6px">{kchips}</div>'
-              f'<a class="chip" href="/performance?{urlencode({"h": h, "ex": "0" if ex == "1" else "1", **({"k": kind} if kind else {})})}">'
+              f'<a class="chip" href="/performance?{urlencode({"h": h, "ex": "0" if ex == "1" else "1", **({"k": kind} if kind else {}), **keep})}">'
               + ("국민연금 포함해서 보기" if ex == "1" else "국민연금 빼고 보기") + "</a>")
     intro = ('<div class="card"><b>이 화면은 무엇인가요?</b><div class="muted" style="margin-top:4px">'
              '기관이 단순투자 공시를 낸 날(제출일)에 그 종목을 샀다고 가정하고, 그 뒤 수익률을 코스피 수익률과 비교했어요. '
@@ -1424,21 +1464,24 @@ def view_performance(conn, q):
     for i, r in enumerate(rows, 1):
         ok = r["n"] >= PERF_MIN_N
         cls = "up" if r["excess"] > 0 else "down" if r["excess"] < 0 else ""
-        wlink = "/performance?" + urlencode({"who": r["who"], "h": h, "ex": ex, **({"k": kind} if kind else {})})
+        wlink = "/performance?" + urlencode({"who": r["who"], "h": h, "ex": ex, **({"k": kind} if kind else {}), **keep})
         cards.append(
             f'<div class="card"><div class="row"><div><span class="num">{i}</span><a class="big" href="{wlink}">{escape(r["who"])}</a></div>'
             + ('' if ok else '<span class="chip">표본 적음</span>') + "</div>"
             f'<div>코스피 대비 평균 <b class="{cls}">{r["excess"]:+.1%}</b> · 평균 수익률 {r["avg"]:+.1%}</div>'
-            f'<div class="muted">{r["n"]}건 중 {r["win"]:.0%}가 올랐어요</div></div>')
+            f'<div class="muted">{r["n"]}건 중 {r["win"]:.0%}가 올랐어요 · 최악 {r["worst"]:+.1%} · '
+            f'매수 합계 {eok(r["amt"])} · 평균 보유 {r["hold"]:.0f}일 · 최근 제출 {escape(r["last"])}</div></div>')
+    sort_form = perf_sort_form(PERF_SORTS, s, {"h": h, "ex": ex, "k": kind})
     body = (intro + f'<div style="margin:8px 0"><span class="muted">보유 기간:</span> {chips}{custom_form}</div>'
-            + f'<div style="margin-bottom:8px">{toggle}</div>'
+            + f'<div style="margin-bottom:8px">{toggle}</div>' + sort_form
             + ("".join(cards) or '<p class="muted">아직 계산할 건이 없어요. 제출일부터 그 기간이 지나야 해요.</p>'))
     return page("운용사별 성적표", body)
 
 
-def view_performance_detail(who, evs, h, ex, kind):
+def view_performance_detail(who, evs, h, ex, kind, s=""):
     """운용사(또는 개인) 한 명의 건별 결과. 제목을 누르면 여기로 옵니다."""
-    back_q = {"h": h, "ex": ex, **({"k": kind} if kind else {})}
+    keep = {"s": s} if s else {}
+    back_q = {"h": h, "ex": ex, **({"k": kind} if kind else {}), **keep}
     back = f'<a href="/performance?{urlencode(back_q)}">← 성적표로</a>'
     head = (f'<div class="row"><div><span class="big">{escape(who)}</span></div><div>{back}</div></div>')
     if not evs:
@@ -1448,22 +1491,30 @@ def view_performance_detail(who, evs, h, ex, kind):
     win = sum(1 for e in evs if e["r"] > 0) / n
     avg = sum(e["r"] for e in evs) / n
     exc = sum(e["x"] for e in evs) / n
+    amt = sum(e["amt"] for e in evs)
+    hold = sum(e["hold"] for e in evs) / n
+    worst = min(e["r"] for e in evs)
     cls = "up" if exc > 0 else "down" if exc < 0 else ""
     summary = (f'<div class="card" style="margin-top:8px">{n}건 · {perf_label(h)} 기준'
                + ('' if n >= PERF_MIN_N else ' <span class="chip">표본 적음</span>') + "<br>"
                f'코스피 대비 평균 <b class="{cls}">{exc:+.1%}</b> · 평균 수익률 {avg:+.1%} · '
-               f'{win:.0%}가 올랐어요</div>')
+               f'{win:.0%}가 올랐어요 · 최악 {worst:+.1%}<br>'
+               f'<span class="muted">매수 합계 {eok(amt)} · 평균 보유 {hold:.0f}일</span></div>')
+    def cl(v):
+        return "up" if v > 0 else "down" if v < 0 else ""
     rows = "".join(
         f'<tr><td>{escape(e["sub"])}</td>'
         f'<td><a href="/stock?code={quote(e["code"])}">{escape(e["name"])}</a></td>'
-        f'<td>{won(e["p0"])}</td><td>{won(e["p1"])}</td>'
-        f'<td class="{"up" if e["r"] > 0 else "down" if e["r"] < 0 else ""}">{e["r"]:+.1%}</td>'
-        f'<td class="{"up" if e["x"] > 0 else "down" if e["x"] < 0 else ""}">{e["x"]:+.1%}</td></tr>'
-        for e in sorted(evs, key=lambda e: e["sub"], reverse=True))
-    table = ('<div style="overflow-x:auto;margin-top:8px"><table><tr><th>제출일</th><th>종목</th>'
-             f'<th>제출일 종가</th><th>{"오늘 종가" if h == "now" else perf_label(h) + " 종가"}</th><th>수익률</th><th>코스피 대비</th></tr>{rows}</table></div>')
+        f'<td>{eok(e["amt"])}</td><td>{won(e["p0"])}</td><td>{won(e["p1"])}</td>'
+        f'<td>{e["hold"]}일</td>'
+        f'<td class="{cl(e["r"])}">{e["r"]:+.1%}</td><td class="{cl(e["x"])}">{e["x"]:+.1%}</td></tr>'
+        for e in sort_perf_events(evs, s))
+    table = ('<div style="overflow-x:auto;margin-top:8px"><table><tr><th>제출일</th><th>종목</th><th>매수금액</th>'
+             f'<th>제출일 종가</th><th>{"오늘 종가" if h == "now" else perf_label(h) + " 종가"}</th><th>보유</th>'
+             f'<th>수익률</th><th>코스피 대비</th></tr>{rows}</table></div>')
+    sort_form = perf_sort_form(PERF_SORTS_DETAIL, s, {"who": who, "h": h, "ex": ex, "k": kind})
     note = ('<p class="muted">제출일 종가에 샀다고 가정하고, 그 뒤 날짜 종가로 계산했어요. 과거 성적이라 앞으로도 같다는 보장은 없어요.</p>')
-    return page(f"{who} — 성적표", head + summary + table + note)
+    return page(f"{who} — 성적표", head + summary + sort_form + table + note)
 
 
 # ---------------- 아이디어 ----------------
