@@ -1415,8 +1415,10 @@ def super_investors(conn, days, flt=None):
         "SELECT 제출인, 종목코드, MAX(종목명) name, 제출일, "
         "SUM(CASE WHEN 증감>0 THEN 증감 END) buy_q, SUM(CASE WHEN 증감<0 THEN -증감 END) sell_q, "
         "SUM(CASE WHEN 증감>0 AND 단가 IS NOT NULL THEN 증감*단가 END) buy_amt, "
+        "SUM(CASE WHEN 증감>0 AND 단가 IS NOT NULL THEN 증감 END) buy_q_p, "
         "SUM(증감) net, MAX(변동일) last FROM detail WHERE 제출일 >= ? GROUP BY 제출인, 종목코드, 제출일",
         (since,)).fetchall()
+    closes = latest_closes(conn) if has_table(conn, "prices") else {}
     people = {}
     for r in rows:
         if not is_person(r["제출인"], companies) or not (r["buy_q"] or r["sell_q"]):
@@ -1427,6 +1429,31 @@ def super_investors(conn, days, flt=None):
         p["bq"] += r["buy_q"] or 0
         p["sq"] += r["sell_q"] or 0
         p["items"].append(r)
+    q = (flt.get("q") or "").strip()
+    amt = float(flt.get("amt") or 0)
+    d = flt.get("dir") or ""
+    for p in people.values():
+        # 종목별: 기간 안 평균 매수단가, 최근 제출 단가, 최근 종가, 수익률
+        by = {}
+        for r in sorted(p["items"], key=lambda r: r["제출일"] or ""):
+            g = by.setdefault(r["종목코드"], {"name": r["name"] or r["종목코드"], "code": r["종목코드"],
+                                              "cost": 0.0, "qty": 0, "last_unit": None, "last_sub": ""})
+            if r["buy_q_p"] and r["buy_amt"]:
+                g["cost"] += r["buy_amt"]
+                g["qty"] += r["buy_q_p"]
+                g["last_unit"] = r["buy_amt"] / r["buy_q_p"]
+                g["last_sub"] = r["제출일"] or ""
+        stocks = []
+        for g in by.values():
+            g["avg"] = g["cost"] / g["qty"] if g["qty"] else None
+            c = closes.get(g["code"])
+            g["close"] = c[1] if c else None
+            g["ret"] = (g["close"] / g["avg"] - 1) if g["avg"] and g["close"] else None
+            if g["avg"] or g["last_unit"]:
+                stocks.append(g)
+        p["stocks"] = stocks
+        rets = [(g["ret"], g["cost"]) for g in stocks if g["ret"] is not None and g["cost"]]
+        p["ret"] = sum(r * c for r, c in rets) / sum(c for _, c in rets) if rets else None
     q = (flt.get("q") or "").strip()
     amt = float(flt.get("amt") or 0)
     d = flt.get("dir") or ""
@@ -1441,43 +1468,54 @@ def super_investors(conn, days, flt=None):
         if d == "sell" and not p["sq"]:
             continue
         out.append(p)
-    out.sort(key=lambda p: (p["last"], p["amt"]), reverse=True)
+    srt = flt.get("sort") or "date"
+    if srt == "amt":
+        out.sort(key=lambda p: p["amt"], reverse=True)
+    elif srt == "name":
+        out.sort(key=lambda p: p["name"])
+    elif srt == "ret":
+        out.sort(key=lambda p: (p["ret"] is None, -(p["ret"] or 0)))
+    else:
+        out.sort(key=lambda p: (p["last"], p["amt"]), reverse=True)
     for p in out:
         p["items"].sort(key=lambda r: r["제출일"] or "", reverse=True)
     return out
 
 
+NPS_OPTS = {"1": "국민연금 제외", "0": "국민연금 포함"}
+WINDOWS = {"30": "최근 1달 매수", "90": "최근 3달 매수", "180": "최근 6달 매수", "365": "최근 1년 매수"}
+
+
 def view_super(conn, q, days):
-    flt = {"q": q.get("sq", ""), "amt": q.get("amt", ""), "dir": q.get("dir", "")}
+    flt = {"q": q.get("sq", ""), "amt": q.get("amt", ""), "dir": q.get("dir", ""), "sort": q.get("sort", "")}
     people = super_investors(conn, days, flt)
     if not people:
         return ('<div class="card">조건에 맞는 개인 공시가 없어요. 기간이나 필터를 바꿔 보세요.</div>')
+
+    def pct(v):
+        return "-" if v is None else f'<span class="{"up" if v > 0 else "down" if v < 0 else ""}">{v:+.1%}</span>'
+
     cards = []
     for i, p in enumerate(people[:30], 1):
         lines = []
-        for r in p["items"][:5]:
-            bq, sq = r["buy_q"] or 0, r["sell_q"] or 0
-            if bq and sq:
-                act = f'매수 {bq:,.0f}주 · 매도 {sq:,.0f}주'
-            elif bq:
-                act = f'<span class="up">매수 {bq:,.0f}주</span>'
-                if r["buy_amt"]:
-                    act += f' (약 {eok(r["buy_amt"])})'
-            else:
-                act = f'<span class="down">매도 {sq:,.0f}주</span>'
-            lines.append(f'<div>{escape(str(r["name"] or r["종목코드"]))} <span class="muted">{escape(str(r["종목코드"]))}</span> · '
-                         f'{escape(str(r["제출일"]))} · {act}</div>')
-        more = f'<div class="muted">외 {len(p["items"]) - 5}건</div>' if len(p["items"]) > 5 else ""
-        cards.append(f'<div class="card"><div class="row"><div><span class="num">{i}</span><b>{escape(p["name"])}</b></div>'
-                     f'<div class="muted">최근 {escape(p["last"])}</div></div>'
-                     + "".join(lines) + more + "</div>")
-    note = ('<div class="card"><b>슈퍼개미 움직임</b><div class="muted" style="margin-top:4px">'
-            '5% 이상 보유 공시를 낸 개인 투자자를 모았어요. 이름이 사람 이름처럼 보이는 제출인을 개인으로 보고, '
-            '기관(운용·증권·공단 등)은 뺐어요. 이름으로 추정한 것이라 가끔 틀릴 수 있어요. '
-            '개인의 매수가 항상 좋은 신호는 아니고, 참고용으로만 보세요.</div></div>')
-    return note + "".join(cards)
-WINDOWS = {"30": "최근 1달 매수", "90": "최근 3달 매수", "180": "최근 6달 매수", "365": "최근 1년 매수"}
-NPS_OPTS = {"1": "국민연금 제외", "0": "국민연금 포함"}
+        for g in sorted(p["stocks"], key=lambda g: -(g["cost"] or 0))[:6]:
+            avg = f'평균 {won(g["avg"])}원' if g["avg"] else "평균 -"
+            last = f'최근 제출 {won(g["last_unit"])}원 ({escape(g["last_sub"])})' if g["last_unit"] else ""
+            now = f'현재 {won(g["close"])}원 · 수익률 {pct(g["ret"])}' if g["close"] else "현재가 없음"
+            lines.append(f'<div style="margin-top:6px"><b>{escape(str(g["name"]))}</b> <span class="muted">{escape(str(g["code"]))}</span>'
+                         f'<div>{avg} · {last}</div><div class="muted">{now}</div></div>')
+        more = f'<div class="muted" style="margin-top:4px">종목 {len(p["stocks"])}개 중 6개만 표시</div>' if len(p["stocks"]) > 6 else ""
+        act = " · ".join(x for x in (f'매수 {won(p["bq"])}주' if p["bq"] else "", f'매도 {won(p["sq"])}주' if p["sq"] else "",
+                                     f'약 {eok(p["amt"])}' if p["amt"] else "") if x)
+        cards.append(
+            f'<div class="card"><div class="row"><div><span class="num">{i}</span><b>{escape(p["name"])}</b></div>'
+            f'<div class="muted">최근 제출 {escape(p["last"])}</div></div>'
+            f'<div>{act}</div>'
+            f'<div>추정 수익률(평균 매수가 대비 현재가): <b>{pct(p["ret"])}</b></div>'
+            + "".join(lines) + more + "</div>")
+    return ("".join(cards)
+            + '<p class="muted" style="font-size:12px">수익률은 기간 안에서 공시로 확인된 매수 가격의 평균과 최근 종가로 계산한 추정치예요. '
+              '단가가 없는 줄은 빼고 계산해요.</p>')
 
 
 def latest_closes(conn):
@@ -1510,10 +1548,12 @@ def view_ideas(conn, q):
         fq = escape(q.get("sq", ""))
         amt_opts = {"": "최소 매수금액 없음", "100000000": "1억 이상", "1000000000": "10억 이상", "10000000000": "100억 이상"}
         dir_opts = {"": "매수·매도 전체", "buy": "매수한 사람만", "sell": "매도한 사람만"}
+        sort_opts = {"date": "정렬: 최근 제출일순", "amt": "정렬: 매수금액순", "name": "정렬: 이름순", "ret": "정렬: 수익률순"}
         form = (f'<form method="get" class="filters" style="margin:8px 0"><input type="hidden" name="t" value="super">'
                 f'<input type="hidden" name="w" value="{escape(w)}">'
                 f'<input type="search" name="sq" value="{fq}" placeholder="이름 검색">'
-                f'{select("amt", amt_opts, q.get("amt", ""))}{select("dir", dir_opts, q.get("dir", ""))}<button>적용</button></form>')
+                f'{select("amt", amt_opts, q.get("amt", ""))}{select("dir", dir_opts, q.get("dir", ""))}'
+                f'{select("sort", sort_opts, q.get("sort", "date"))}<button>적용</button></form>')
         body = (tabs + f'<div style="margin:8px 0">{win}</div>' + form + listing
                 + f'<p style="margin-top:10px"><a href="/performance?k=person">개인 투자자 성적표 보기 →</a></p>')
         return page("아이디어", body)
