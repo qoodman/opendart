@@ -633,6 +633,31 @@ def paged_table(rows, g, who_key, pg, link, header, row_html, group_note, anchor
             + pager(total, pg, link, size) + info)
 
 
+def _sg(x):
+    return f"{x:+,.0f}" if x is not None else "-"
+
+
+def flow_block(conn, code):
+    """종목 화면: 최근 20거래일 외국인·기관·개인 순매수 (접는 표)."""
+    try:
+        import stock_value
+        rs = stock_value.flows(conn, code, 20)
+    except Exception:
+        rs = []
+    if not rs:
+        return ""
+    last5 = rs[-5:]
+    f5 = sum(r[1] or 0 for r in last5)
+    i5 = sum(r[2] or 0 for r in last5)
+    body = "".join(
+        f'<tr><td>{escape(d[:4])}-{escape(d[4:6])}-{escape(d[6:])}</td><td>{_sg(fo)}</td><td>{_sg(ins)}</td><td>{_sg(ind)}</td></tr>'
+        for d, fo, ins, ind in reversed(rs))
+    return (f'<details style="margin:8px 0"><summary>순매수 · 최근 5거래일 외국인 <b>{_sg(f5)}</b>주 · 기관 <b>{_sg(i5)}</b>주 '
+            '<span class="muted">(펼치기 · 네이버 증권 기준, 참고용)</span></summary>'
+            '<table><tr><th>날짜</th><th>외국인(주)</th><th>기관(주)</th><th>개인(주)</th></tr>'
+            f'{body}</table></details>')
+
+
 def value_map(conn):
     """종목별 PER·PBR·배당 (stock_value.py가 받아 둔 값). 없으면 빈 dict."""
     try:
@@ -732,7 +757,7 @@ def view_stock(conn, code, q=None):
             chart = stat + price_chart([p["date"] for p in pr], [p["close"] for p in pr], buys, avg,
                                        title=f"{name} 주가와 기관 매수", target=tgt)
     reports = view_reports(conn, code, tgt, n_br, last_close)
-    body = (head + value_line(value_map(conn).get(code)) + chart + reports + group_bar + '<h2 id="sum">날짜별 평균 매수단가</h2>'
+    body = (head + value_line(value_map(conn).get(code)) + flow_block(conn, code) + chart + reports + group_bar + '<h2 id="sum">날짜별 평균 매수단가</h2>'
             + (t1 or '<p class="muted">매수 내역 없음</p>')
             + '<h2 id="det">모든 변동 내역</h2>' + t2)
     return page(f"{name} — DART 단순투자", body, charts=bool(chart))
@@ -1670,6 +1695,11 @@ def view_ideas(conn, q):
     vals = value_map(conn)
     for i in ideas:
         i["v"] = vals.get(i["r"]["code"]) or {}
+    try:
+        import stock_value
+        fsum = stock_value.flow_sums(conn, [i["r"]["code"] for i in ideas[:30]], 5)
+    except Exception:
+        fsum = {}
     if tab == "cheap":
         ideas = sorted((i for i in ideas if i["disc"] < 0), key=lambda i: i["disc"])
         ideas = sort_ideas(ideas, srt, tab)
@@ -1720,6 +1750,8 @@ def view_ideas(conn, q):
             f'{gap(i["close"], i["avg"])}</div>{tgt_line(conn, r["code"], i["close"])}'
             + (f'<div class="muted">PER {i["v"]["per"]:.1f}배 · PBR {i["v"]["pbr"]:.2f}배</div>'
                if i["v"].get("pbr") is not None and i["v"].get("per") is not None else "")
+            + (f'<div class="muted">최근 5일 외국인 {_sg(fsum[r["code"]][0])}주 · 기관 {_sg(fsum[r["code"]][1])}주</div>'
+               if r["code"] in fsum else "")
             + f'{sparkline(pr, i["avg"])}</div>')
     body = (tabs + form + note + f"<h2>{chart_title}</h2>" + chart
             + '<div class="legend"><span><i class="ln" style="background:var(--price)"></i>최근 120거래일 종가</span>'

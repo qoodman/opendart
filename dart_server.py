@@ -446,6 +446,12 @@ def run_market_policy(log=print):
         except Exception as e:
             out["valuation"] = f"실패: {e}"
             log(f"밸류에이션 실패: {e}")
+        try:
+            import stock_value
+            out["flow"] = stock_value.sync_flow(results_db(), log=log)
+        except Exception as e:
+            out["flow"] = f"실패: {e}"
+            log(f"순매수 실패: {e}")
     if env("DART_POLICY", "1") != "0":
         try:
             import stock_policy

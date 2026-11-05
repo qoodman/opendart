@@ -12,6 +12,7 @@ import re, time, sqlite3, datetime as dt
 import requests
 
 INTEGRATION_URL = "https://m.stock.naver.com/api/stock/{code}/integration"
+TREND_URL = "https://m.stock.naver.com/api/stock/{code}/trend"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
     "Referer": "https://m.stock.naver.com/",
@@ -30,6 +31,9 @@ def ensure(conn):
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS valuation (
         code TEXT PRIMARY KEY, per REAL, pbr REAL, div REAL, eps REAL, bps REAL, fetched TEXT);
+    CREATE TABLE IF NOT EXISTS flow (
+        code TEXT, date TEXT, foreign_qty REAL, inst_qty REAL, indiv_qty REAL, fetched TEXT,
+        PRIMARY KEY (code, date));
     """)
 
 
@@ -112,3 +116,103 @@ def values(conn):
     except sqlite3.OperationalError:
         return {}
     return {r[0]: {"per": r[1], "pbr": r[2], "div": r[3], "eps": r[4], "bps": r[5]} for r in rows}
+
+
+# ---------------- 외국인·기관·개인 순매수 (일별, 주 단위) ----------------
+def _signed(text):
+    """'+1,234' '-56' 같은 순매수 수량 → float. 빈 값은 None."""
+    if text is None:
+        return None
+    s = str(text).replace(",", "").replace("+", "").strip()
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def parse_trend(payload):
+    """네이버 trend 응답(날짜별 목록) → [{date, foreign, inst, indiv}]"""
+    items = payload if isinstance(payload, list) else (payload or {}).get("items") or (payload or {}).get("trend") or []
+    out = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        date = str(it.get("bizdate") or it.get("localTradedAt") or it.get("date") or "").replace("-", "")[:8]
+        if not re.fullmatch(r"\d{8}", date):
+            continue
+        keys = {k.lower(): v for k, v in it.items()}
+        def pick(word):
+            for k, v in keys.items():
+                if word in k and "quant" in k:
+                    return _signed(v)
+            return None
+        out.append({"date": date, "foreign": pick("foreign"), "inst": pick("organ"), "indiv": pick("individual")})
+    return out
+
+
+def fetch_trend(code, session=None, timeout=10):
+    s = session or requests
+    r = s.get(TREND_URL.format(code=code), headers=HEADERS, timeout=timeout)
+    if r.status_code != 200:
+        raise ValueError_(f"HTTP {r.status_code}")
+    try:
+        return parse_trend(r.json())
+    except ValueError:
+        raise ValueError_("응답을 읽지 못함")
+
+
+def sync_flow(db_path, log=print, sleep=0.4, session=None):
+    """공시 종목들의 최근 순매수를 받아 저장. 오늘 받은 종목은 건너뜀."""
+    conn = sqlite3.connect(db_path)
+    try:
+        ensure(conn)
+        try:
+            codes = [r[0] for r in conn.execute(
+                "SELECT DISTINCT 종목코드 FROM summary WHERE 종목코드 IS NOT NULL AND 종목코드 != ''")]
+        except sqlite3.OperationalError:
+            return {"대상": 0, "저장": 0, "건너뜀": 0, "실패": 0}
+        today = dt.date.today().isoformat()
+        done = {r[0] for r in conn.execute("SELECT DISTINCT code FROM flow WHERE fetched=?", (today,))}
+        todo = [c for c in codes if c not in done]
+        saved = failed = streak = 0
+        for i, code in enumerate(todo):
+            if streak >= MAX_FAIL_STREAK:
+                log(f"순매수: {MAX_FAIL_STREAK}번 연속 실패해서 나머지 {len(todo) - i}개는 다음에 받습니다.")
+                break
+            try:
+                rows = fetch_trend(code, session=session)
+                conn.executemany("INSERT OR REPLACE INTO flow VALUES (?,?,?,?,?,?)",
+                                 [(code, r["date"], r["foreign"], r["inst"], r["indiv"], today) for r in rows])
+                conn.commit()
+                saved += 1
+                streak = 0
+            except Exception as e:
+                failed += 1
+                streak += 1
+                log(f"순매수 {code} 실패: {e}")
+            time.sleep(sleep)
+        log(f"순매수: 대상 {len(codes)}개 · 새로 저장 {saved} · 실패 {failed}")
+        return {"대상": len(codes), "저장": saved, "건너뜀": len(codes) - len(todo), "실패": failed}
+    finally:
+        conn.close()
+
+
+def flows(conn, code, days=20):
+    """최근 days거래일 순매수 [(date, foreign, inst, indiv)] 날짜 오래된 순. 없으면 []"""
+    try:
+        rows = conn.execute(
+            "SELECT date, foreign_qty, inst_qty, indiv_qty FROM flow WHERE code=? ORDER BY date DESC LIMIT ?",
+            (code, days)).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [tuple(r) for r in rows][::-1]
+
+
+def flow_sums(conn, codes, days=5):
+    """{code: (foreign, inst)} 최근 days거래일 합계 (표시용)"""
+    out = {}
+    for c in codes:
+        rs = flows(conn, c, days)
+        if rs:
+            out[c] = (sum(r[1] or 0 for r in rs), sum(r[2] or 0 for r in rs))
+    return out
