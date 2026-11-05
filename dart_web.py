@@ -1342,7 +1342,8 @@ def view_performance(conn, q):
     kd = [p for p, _ in kp]
     kv = [v for _, v in kp]
 
-    per = {}
+    names = {r[0]: r[1] for r in conn.execute("SELECT 종목코드, MAX(종목명) FROM summary GROUP BY 종목코드")}
+    evs = []                                  # 건별 결과: 상세 화면과 목록이 같이 씀
     for who, code, sub, qty in perf_events(conn):
         if ex == "1" and who and "국민연금" in who:
             continue
@@ -1363,9 +1364,18 @@ def view_performance(conn, q):
             continue
         r = p1 / p0 - 1
         m = k1 / k0 - 1
-        acc = per.setdefault(who or "(이름 없음)", {"r": [], "x": []})
-        acc["r"].append(r)
-        acc["x"].append(r - m)
+        evs.append(dict(who=who or "(이름 없음)", code=code, name=names.get(code) or code, sub=sub,
+                        end=end.isoformat(), p0=p0, p1=p1, r=r, x=r - m))
+
+    if q.get("who"):
+        return view_performance_detail(q.get("who"), [e for e in evs if e["who"] == q.get("who")],
+                                       h, ex, kind, days)
+
+    per = {}
+    for e in evs:
+        acc = per.setdefault(e["who"], {"r": [], "x": []})
+        acc["r"].append(e["r"])
+        acc["x"].append(e["x"])
 
     rows = []
     for who, a in per.items():
@@ -1393,8 +1403,9 @@ def view_performance(conn, q):
     for i, r in enumerate(rows, 1):
         ok = r["n"] >= PERF_MIN_N
         cls = "up" if r["excess"] > 0 else "down" if r["excess"] < 0 else ""
+        wlink = "/performance?" + urlencode({"who": r["who"], "h": h, "ex": ex, **({"k": kind} if kind else {})})
         cards.append(
-            f'<div class="card"><div class="row"><div><span class="num">{i}</span><b>{escape(r["who"])}</b></div>'
+            f'<div class="card"><div class="row"><div><span class="num">{i}</span><a class="big" href="{wlink}">{escape(r["who"])}</a></div>'
             + ('' if ok else '<span class="chip">표본 적음</span>') + "</div>"
             f'<div>코스피 대비 평균 <b class="{cls}">{r["excess"]:+.1%}</b> · 평균 수익률 {r["avg"]:+.1%}</div>'
             f'<div class="muted">{r["n"]}건 중 {r["win"]:.0%}가 올랐어요</div></div>')
@@ -1402,6 +1413,36 @@ def view_performance(conn, q):
             + f'<div style="margin-bottom:8px">{toggle}</div>'
             + ("".join(cards) or '<p class="muted">아직 계산할 건이 없어요. 제출일부터 그 기간이 지나야 해요.</p>'))
     return page("운용사별 성적표", body)
+
+
+def view_performance_detail(who, evs, h, ex, kind, days):
+    """운용사(또는 개인) 한 명의 건별 결과. 제목을 누르면 여기로 옵니다."""
+    back_q = {"h": h, "ex": ex, **({"k": kind} if kind else {})}
+    back = f'<a href="/performance?{urlencode(back_q)}">← 성적표로</a>'
+    head = (f'<div class="row"><div><span class="big">{escape(who)}</span></div><div>{back}</div></div>')
+    if not evs:
+        return page(f"{who} — 성적표", head + f'<div class="card" style="margin-top:8px">'
+                    f'{days}일 뒤 결과를 계산할 건이 없어요. (국민연금 빼고 보기 설정이나 보유 기간을 바꿔 보세요)</div>')
+    n = len(evs)
+    win = sum(1 for e in evs if e["r"] > 0) / n
+    avg = sum(e["r"] for e in evs) / n
+    exc = sum(e["x"] for e in evs) / n
+    cls = "up" if exc > 0 else "down" if exc < 0 else ""
+    summary = (f'<div class="card" style="margin-top:8px">{n}건 · {days}일 뒤 기준'
+               + ('' if n >= PERF_MIN_N else ' <span class="chip">표본 적음</span>') + "<br>"
+               f'코스피 대비 평균 <b class="{cls}">{exc:+.1%}</b> · 평균 수익률 {avg:+.1%} · '
+               f'{win:.0%}가 올랐어요</div>')
+    rows = "".join(
+        f'<tr><td>{escape(e["sub"])}</td>'
+        f'<td><a href="/stock?code={quote(e["code"])}">{escape(e["name"])}</a></td>'
+        f'<td>{won(e["p0"])}</td><td>{won(e["p1"])}</td>'
+        f'<td class="{"up" if e["r"] > 0 else "down" if e["r"] < 0 else ""}">{e["r"]:+.1%}</td>'
+        f'<td class="{"up" if e["x"] > 0 else "down" if e["x"] < 0 else ""}">{e["x"]:+.1%}</td></tr>'
+        for e in sorted(evs, key=lambda e: e["sub"], reverse=True))
+    table = ('<div style="overflow-x:auto;margin-top:8px"><table><tr><th>제출일</th><th>종목</th>'
+             f'<th>제출일 종가</th><th>{days}일 뒤 종가</th><th>수익률</th><th>코스피 대비</th></tr>{rows}</table></div>')
+    note = ('<p class="muted">제출일 종가에 샀다고 가정하고, 그 뒤 날짜 종가로 계산했어요. 과거 성적이라 앞으로도 같다는 보장은 없어요.</p>')
+    return page(f"{who} — 성적표", head + summary + table + note)
 
 
 # ---------------- 아이디어 ----------------
