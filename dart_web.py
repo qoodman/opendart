@@ -633,6 +633,26 @@ def paged_table(rows, g, who_key, pg, link, header, row_html, group_note, anchor
             + pager(total, pg, link, size) + info)
 
 
+def value_map(conn):
+    """종목별 PER·PBR·배당 (stock_value.py가 받아 둔 값). 없으면 빈 dict."""
+    try:
+        import stock_value
+        return stock_value.values(conn)
+    except Exception:
+        return {}
+
+
+def value_line(v):
+    """종목 화면용 한 줄. 값이 하나도 없으면 빈 문자열."""
+    if not v or all(v.get(k) is None for k in ("per", "pbr", "div")):
+        return ""
+    def f(x, unit):
+        return f"{x:,.2f}{unit}" if x is not None else "-"
+    return (f'<div class="muted" style="margin-top:6px">PER <b>{f(v.get("per"), "배")}</b> · '
+            f'PBR <b>{f(v.get("pbr"), "배")}</b> · 배당 <b>{f(v.get("div"), "%")}</b> '
+            '<span>(네이버 증권 기준, 참고용)</span></div>')
+
+
 def view_stock(conn, code, q=None):
     q = q or {}
     if not code or not has_table(conn, "detail"):
@@ -712,7 +732,7 @@ def view_stock(conn, code, q=None):
             chart = stat + price_chart([p["date"] for p in pr], [p["close"] for p in pr], buys, avg,
                                        title=f"{name} 주가와 기관 매수", target=tgt)
     reports = view_reports(conn, code, tgt, n_br, last_close)
-    body = (head + chart + reports + group_bar + '<h2 id="sum">날짜별 평균 매수단가</h2>'
+    body = (head + value_line(value_map(conn).get(code)) + chart + reports + group_bar + '<h2 id="sum">날짜별 평균 매수단가</h2>'
             + (t1 or '<p class="muted">매수 내역 없음</p>')
             + '<h2 id="det">모든 변동 내역</h2>' + t2)
     return page(f"{name} — DART 단순투자", body, charts=bool(chart))
@@ -1569,7 +1589,8 @@ def view_investor(conn, name, days):
 
 IDEA_SORTS = {"": "정렬: 기본", "amt": "정렬: 매수금액 큰 순", "n": "정렬: 기관 수 많은 순",
               "disc": "정렬: 평단 대비 많이 싼 순", "gain": "정렬: 평단 대비 많이 오른 순",
-              "last": "정렬: 최근 매수일순", "name": "정렬: 이름순"}
+              "last": "정렬: 최근 매수일순", "name": "정렬: 이름순",
+              "pbr": "정렬: PBR 낮은 순"}
 
 
 def sort_ideas(ideas, srt, tab):
@@ -1583,6 +1604,7 @@ def sort_ideas(ideas, srt, tab):
         "gain": lambda i: -i["disc"],
         "last": lambda i: str(i["r"]["last"] or ""),
         "name": lambda i: str(i["r"]["name"] or ""),
+        "pbr": lambda i: (i["v"].get("pbr") is None, i["v"].get("pbr") or 0),
     }[srt]
     return sorted(ideas, key=key, reverse=(srt == "last"))
 
@@ -1645,6 +1667,9 @@ def view_ideas(conn, q):
         avg = r["amt"] / r["qty"]
         ideas.append(dict(r=r, avg=avg, close=close, day=day, disc=close / avg - 1))
     srt = q.get("s") if q.get("s") in IDEA_SORTS else ""
+    vals = value_map(conn)
+    for i in ideas:
+        i["v"] = vals.get(i["r"]["code"]) or {}
     if tab == "cheap":
         ideas = sorted((i for i in ideas if i["disc"] < 0), key=lambda i: i["disc"])
         ideas = sort_ideas(ideas, srt, tab)
@@ -1692,7 +1717,10 @@ def view_ideas(conn, q):
             f'<div class="muted">마지막 매수 {escape(r["last"])}</div></div>'
             f'<div>기관 {r["n"]}곳: {escape(who_txt)}</div>'
             f'<div>매수 {eok(r["amt"])} · 평단 <b>{won(i["avg"])}원</b> · 최근 종가 {won(i["close"])}원 '
-            f'{gap(i["close"], i["avg"])}</div>{tgt_line(conn, r["code"], i["close"])}{sparkline(pr, i["avg"])}</div>')
+            f'{gap(i["close"], i["avg"])}</div>{tgt_line(conn, r["code"], i["close"])}'
+            + (f'<div class="muted">PER {i["v"]["per"]:.1f}배 · PBR {i["v"]["pbr"]:.2f}배</div>'
+               if i["v"].get("pbr") is not None and i["v"].get("per") is not None else "")
+            + f'{sparkline(pr, i["avg"])}</div>')
     body = (tabs + form + note + f"<h2>{chart_title}</h2>" + chart
             + '<div class="legend"><span><i class="ln" style="background:var(--price)"></i>최근 120거래일 종가</span>'
               '<span><i class="dash"></i>기관 평균매수단가</span></div>' + "".join(cards))
