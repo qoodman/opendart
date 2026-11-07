@@ -37,8 +37,8 @@ border-radius:12px;box-shadow:0 6px 18px rgba(0,0,0,.15);padding:6px;display:fle
 background:var(--accent);color:var(--bg);cursor:pointer;white-space:nowrap;margin-left:auto}
 a.runbtn.busy{background:var(--chip);color:var(--fg);text-decoration:none}
 main{max-width:980px;margin:0 auto;padding:14px 16px 40px}
-.pair{display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:start}.pair .card{margin-bottom:0;min-width:0}
-@media (max-width:480px){.pair{gap:6px}.pair .card{padding:8px 9px}.pair button{padding:6px 9px}}
+.runbar{display:flex;gap:8px;align-items:center;margin-left:auto}.runbar .runbtn{margin-left:0}
+.runbtn.alt{background:var(--chip);color:var(--fg)}.runmenu .dot2{color:var(--up)}
 form.filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
 input,select{font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:8px;
 background:var(--card);color:var(--fg);min-width:0}input[type=search]{flex:1 1 180px}
@@ -99,7 +99,7 @@ def icon_png(size):
 _ICONS = {}
 
 
-_NAV = {"realestate": "", "links": [], "status": {}}   # 요청마다 설정·진행 상황으로 새로 채움
+_NAV = {"realestate": "", "links": [], "status": {}, "has_update": False}   # 요청마다 설정·진행 상황으로 새로 채움
 
 
 def run_widget():
@@ -124,6 +124,30 @@ def run_widget():
             '</form></details>')
 
 
+def update_widget():
+    """모든 화면 위쪽: '업데이트' 메뉴(새 버전 확인 / 지금 업데이트). 새 버전이 있다고 확인된 상태면 점을 붙임."""
+    if not _NAV.get("has_update"):
+        return ""
+    behind = 0
+    try:
+        c = json.loads((Path(_DATA_DIR["path"] or ".") / "update_check.json").read_text(encoding="utf-8"))
+        behind = int(c.get("behind") or 0)
+    except (OSError, ValueError, TypeError):
+        pass
+    dot = ' <span class="dot2">●</span>' if behind else ""
+    return (f'<details class="runmenu"><summary class="runbtn alt">업데이트{dot} ▾</summary>'
+            '<form method="post" class="menu">'
+            '<button formaction="/settings/update-check">새 버전 확인'
+            + (f' <span class="muted">새 버전 있음 ({behind}개)</span>' if behind else "") + '</button>'
+            '<button formaction="/settings/update-run" onclick="return confirm(\'지금 업데이트할까요? 1~3분 걸리고 화면이 잠깐 끊길 수 있습니다.\')">'
+            '지금 업데이트</button>'
+            '</form></details>')
+
+
+def header_actions():
+    return f'<div class="runbar">{update_widget()}{run_widget()}</div>'
+
+
 def page(title, body, refresh=False, charts=False):
     other = _NAV["realestate"] or os.environ.get("REALESTATE_URL", "").strip()
     extra = f'<a href="{escape(other)}">부동산 ↗</a>' if other else ""
@@ -135,7 +159,7 @@ def page(title, body, refresh=False, charts=False):
 <link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#2b5a9e">
 <link rel="icon" href="/icon-192.png"><link rel="apple-touch-icon" href="/icon-192.png">
 </head><body>
-<header><div class="hrow"><b>DART 단순투자</b>{run_widget()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/performance">성적표</a><a href="/reports">리포트</a><a href="/market">시장</a><a href="/policy">정책</a><a href="/calendar">달력</a><a href="/new">새 공시</a>
+<header><div class="hrow"><b>DART 단순투자</b>{header_actions()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/performance">성적표</a><a href="/reports">리포트</a><a href="/market">시장</a><a href="/policy">정책</a><a href="/calendar">달력</a><a href="/new">새 공시</a>
 <a href="/settings">설정</a>{extra}</nav>
 </header><main>{body}</main>{"<script>" + CHART_JS + "</script>" if charts else ""}</body></html>""".encode()
 
@@ -358,18 +382,13 @@ def view_settings(get_key, q, S=None):
         for g, key, label, kind, default, help_ in S["spec"]:
             groups.setdefault(g, []).append(setting_field(key, label, kind, help_, S["values"].get(key, ""),
                                                           S["choices"], errs.get(key)))
-        cards = {}
         for g, fields in groups.items():
             extra = ""
             if g == "수집" and nxt:
                 extra = f'<div class="muted">다음 자동 수집: {nxt:%m-%d %H:%M}</div>'
             if g == "업데이트" and "update_info" in S:
                 extra = update_box(S["update_info"]())
-            cards[g] = f'<div class="card"><b>{g}</b>{extra}{"".join(fields)}</div>'
-        # '수집'과 '업데이트'는 옆에 나란히 (폰에서는 위아래로)
-        if "수집" in cards and "업데이트" in cards:
-            cards["수집"] = f'<div class="pair">{cards.pop("수집")}{cards.pop("업데이트")}</div>'
-        form = "".join(cards.values())
+            form += f'<div class="card"><b>{g}</b>{extra}{"".join(fields)}</div>'
         body = (note + body + '<form method="post" action="/settings/save">' + form
                 + '<button style="width:100%;padding:11px">설정 저장</button></form>'
                 + '<form method="post" action="/settings/notify-test" style="margin-top:10px">'
@@ -1896,6 +1915,7 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
             return None
         S = settings_api()
         _NAV["realestate"], _NAV["links"] = S["realestate"], S["links"]
+        _NAV["has_update"] = "start_update" in S
         return S
 
     class Handler(BaseHTTPRequestHandler):
