@@ -37,8 +37,8 @@ border-radius:12px;box-shadow:0 6px 18px rgba(0,0,0,.15);padding:6px;display:fle
 background:var(--accent);color:var(--bg);cursor:pointer;white-space:nowrap;margin-left:auto}
 a.runbtn.busy{background:var(--chip);color:var(--fg);text-decoration:none}
 main{max-width:980px;margin:0 auto;padding:14px 16px 40px}
-.pair{display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:start}.pair .card{margin-bottom:0}
-@media (max-width:680px){.pair{grid-template-columns:1fr}}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:start}.pair .card{margin-bottom:0;min-width:0}
+@media (max-width:480px){.pair{gap:6px}.pair .card{padding:8px 9px}.pair button{padding:6px 9px}}
 form.filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
 input,select{font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:8px;
 background:var(--card);color:var(--fg);min-width:0}input[type=search]{flex:1 1 180px}
