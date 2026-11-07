@@ -37,6 +37,8 @@ border-radius:12px;box-shadow:0 6px 18px rgba(0,0,0,.15);padding:6px;display:fle
 background:var(--accent);color:var(--bg);cursor:pointer;white-space:nowrap;margin-left:auto}
 a.runbtn.busy{background:var(--chip);color:var(--fg);text-decoration:none}
 main{max-width:980px;margin:0 auto;padding:14px 16px 40px}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:start}.pair .card{margin-bottom:0}
+@media (max-width:680px){.pair{grid-template-columns:1fr}}
 form.filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
 input,select{font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:8px;
 background:var(--card);color:var(--fg);min-width:0}input[type=search]{flex:1 1 180px}
@@ -356,13 +358,18 @@ def view_settings(get_key, q, S=None):
         for g, key, label, kind, default, help_ in S["spec"]:
             groups.setdefault(g, []).append(setting_field(key, label, kind, help_, S["values"].get(key, ""),
                                                           S["choices"], errs.get(key)))
+        cards = {}
         for g, fields in groups.items():
             extra = ""
             if g == "수집" and nxt:
                 extra = f'<div class="muted">다음 자동 수집: {nxt:%m-%d %H:%M}</div>'
             if g == "업데이트" and "update_info" in S:
                 extra = update_box(S["update_info"]())
-            form += f'<div class="card"><b>{g}</b>{extra}{"".join(fields)}</div>'
+            cards[g] = f'<div class="card"><b>{g}</b>{extra}{"".join(fields)}</div>'
+        # '수집'과 '업데이트'는 옆에 나란히 (폰에서는 위아래로)
+        if "수집" in cards and "업데이트" in cards:
+            cards["수집"] = f'<div class="pair">{cards.pop("수집")}{cards.pop("업데이트")}</div>'
+        form = "".join(cards.values())
         body = (note + body + '<form method="post" action="/settings/save">' + form
                 + '<button style="width:100%;padding:11px">설정 저장</button></form>'
                 + '<form method="post" action="/settings/notify-test" style="margin-top:10px">'
