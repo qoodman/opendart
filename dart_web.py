@@ -165,7 +165,7 @@ def page(title, body, refresh=False, charts=False):
 <link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#2b5a9e">
 <link rel="icon" href="/icon-192.png"><link rel="apple-touch-icon" href="/icon-192.png">
 </head><body>
-<header><div class="hrow"><b>DART 단순투자</b>{header_actions()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/reports">리포트</a><a href="/market">시장</a><a href="/new">새 공시</a>
+<header><div class="hrow"><b>DART 단순투자</b>{header_actions()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/ideas?t=rank">분석</a><a href="/market">시장</a>
 <a href="/settings">설정</a>{extra}</nav>
 </header><main>{body}</main>{"<script>" + CHART_JS + "</script>" if charts else ""}</body></html>""".encode()
 
@@ -1668,6 +1668,13 @@ def view_performance_detail(who, evs, h, ex, kind, s=""):
 # ---------------- 아이디어 ----------------
 IDEA_TABS = {"cheap": "기관 평단보다 싼 종목", "cluster": "여러 기관이 함께 산 종목", "super": "슈퍼개미 움직임",
              "rank": "종목 순위", "score": "점수표 (오일전문가)", "perf": "운용사 성적표"}
+IDEA_GROUPS = [["cheap", "cluster", "super"], ["rank", "score", "perf"]]     # 위쪽 메뉴의 '아이디어' / '분석'
+
+
+def idea_group_tabs(active):
+    """active 탭이 속한 묶음의 탭들 [(키, 이름)]"""
+    grp = next((g for g in IDEA_GROUPS if active in g), IDEA_GROUPS[0])
+    return [(k, IDEA_TABS[k]) for k in grp]
 
 # 공시 제출인이 개인인지 추정: 한글 이름 2~4자. 기관 이름(운용·증권·공단 등)이나 '외 N명'은 제외
 _INST_WORDS = ("자산", "운용", "증권", "투자", "공단", "펀드", "은행", "보험", "재단", "캐피탈", "파트너스",
@@ -1904,10 +1911,17 @@ def perf_url(**kw):
 MARKET_HUB = {"/market": "시장 온도", "/policy": "정책", "/radar": "대비 레이더", "/calendar": "달력"}
 
 
-def market_tabs_row(active):
-    return '<div style="margin:0 0 8px">' + " ".join(
-        (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == active else
-         f'<a class="chip" href="{k}">{v}</a>') for k, v in MARKET_HUB.items()) + '</div>'
+REPORT_HUB = {"/": "보고서", "/new": "새 공시", "/reports": "증권사 리포트"}
+
+
+def hub_tabs_row(path):
+    """시장·보고서 묶음 화면 맨 위의 탭 줄. 묶음에 안 속한 화면은 빈 문자열."""
+    for hub in (MARKET_HUB, REPORT_HUB):
+        if path in hub:
+            return '<div style="margin:0 0 8px">' + " ".join(
+                (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == path else
+                 f'<a class="chip" href="{k}">{v}</a>') for k, v in hub.items()) + '</div>'
+    return ""
 
 
 def view_ideas(conn, q):
@@ -1926,7 +1940,7 @@ def view_ideas(conn, q):
         w = q.get("w") if q.get("w") in WINDOWS else "90"
         tabs = " ".join(
             (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == "super" else
-             f'<a class="chip" href="/ideas?{urlencode({"t": k})}">{v}</a>') for k, v in IDEA_TABS.items())
+             f'<a class="chip" href="/ideas?{urlencode({"t": k})}">{v}</a>') for k, v in idea_group_tabs("cheap"))
         win = " ".join(
             (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == w else
              f'<a class="chip" href="/ideas?{urlencode({"t": "super", "w": k})}">{v}</a>')
@@ -1999,7 +2013,7 @@ def view_ideas(conn, q):
 
     base = {"w": w, "ex": ex, **({"m": m} if m else {})}
     tabs = " ".join(f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == tab
-                    else f'<a class="chip" href="/ideas?{urlencode({**base, "t": k})}">{v}</a>' for k, v in IDEA_TABS.items())
+                    else f'<a class="chip" href="/ideas?{urlencode({**base, "t": k})}">{v}</a>' for k, v in idea_group_tabs(tab))
     form = (f'<form method="get" class="filters" style="margin-top:10px"><input type="hidden" name="t" value="{tab}">'
             f'{select("w", WINDOWS, w)}' + (select("m", MARKET_OPTS, m) if "시장" in cols else "")
             + f'{select("ex", NPS_OPTS, ex)}{select("s", IDEA_SORTS, srt)}<button>적용</button></form>')
@@ -2046,7 +2060,7 @@ def view_ideas(conn, q):
 # ---------------- 종목 순위 ----------------
 RANK_MAX = 92          # 항목별 최고점의 합 (기관 24 + 평단 15 + 목표가 15 + 수급 10 + 밸류 10 + 지분 8 + 운용사 성적 10)
 RANK_SORTS = {"": "정렬: 종합 점수순", "up": "정렬: 목표가 상승여력순", "disc": "정렬: 기관 평단보다 싼 순",
-              "amt": "정렬: 기관 매수금액순", "n": "정렬: 함께 산 기관 수순"}
+              "amt": "정렬: 기관 매수금액순", "n": "정렬: 함께 산 기관 수순", "card": "정렬: 점수표 점수순"}
 RANK_HELP = (
     "<b>기관이 함께 산 종목</b> 1곳당 8점 (최대 24점) · "
     "<b>현재가가 기관 평균매수단가보다 쌀수록</b> 최대 15점 (평단보다 10% 이상 비싸면 -5점) · "
@@ -2108,6 +2122,21 @@ def rank_stocks(conn, w, ex, m):
         b = tot_code.setdefault((e["who"], e["code"]), [0, 0.0])
         b[0] += 1
         b[1] += e["x"]
+    # 점수표 점수: 직접 평가한 종목은 총점, 아니면 PER·PBR·배당 3항목(35점 만점)
+    card_of = {}
+    try:
+        import score_card as sc, score_auto
+        evaluated = dict(sc.evaluated(conn))
+        allans, allauto = sc.load_all(conn), score_auto.load_auto_all(conn)
+        for code in codes:
+            v = vals.get(code) or {}
+            if code in evaluated:
+                rr = sc.compute(v, allans.get(code, {}), allauto.get(code))
+                card_of[code] = dict(kind="eval", total=rr["total"], grade=rr["grade"][0], full=rr["full"])
+            elif any(v.get(k) is not None for k in ("per", "pbr", "div")):
+                card_of[code] = dict(kind="auto", total=sc.auto_total(v)[0])
+    except Exception:
+        card_of = {}
     out = []
     for r in rows:
         code = r["code"]
@@ -2162,8 +2191,21 @@ def rank_stocks(conn, w, ex, m):
         else:
             missing.append("운용사 성적")
         out.append(dict(r=r, close=close, avg=avg, disc=disc, up=up, f=f, missing=missing,
-                        score=round(sum(x[1] for x in f), 1)))
+                        score=round(sum(x[1] for x in f), 1), card=card_of.get(code)))
     return out
+
+
+def _rank_card_line(i):
+    """순위 카드에 점수표 점수 한 줄 (직접 평가한 종목은 총점·등급, 아니면 자동 3항목 점수와 평가하기 링크)"""
+    c = i.get("card")
+    link = score_url(code=i["r"]["code"])
+    if not c:
+        return f'<div class="muted"><a href="{link}">점수표로 평가하기 →</a></div>'
+    if c["kind"] == "eval":
+        return (f'<div style="margin-top:4px">점수표 <b>{c["total"]:g}점</b> {c["grade"]}등급'
+                f'{"" if c["full"] else " (잠정)"} · <a href="{link}">자세히</a></div>')
+    return (f'<div class="muted" style="margin-top:4px">점수표 자동 3항목 {c["total"]:g}/35점 · '
+            f'<a href="{link}">직접 평가하기 →</a></div>')
 
 
 def view_ranking(conn, q):
@@ -2178,7 +2220,8 @@ def view_ranking(conn, q):
     items = rank_stocks(conn, w, ex, m)
     key = {"": lambda i: -i["score"], "up": lambda i: (i["up"] is None, -(i["up"] or 0)),
            "disc": lambda i: i["disc"], "amt": lambda i: -i["r"]["amt"],
-           "n": lambda i: (-i["r"]["n"], -i["score"])}[srt]
+           "n": lambda i: (-i["r"]["n"], -i["score"]),
+           "card": lambda i: ((i["card"] or {}).get("kind") != "eval", i["card"] is None, -(i["card"] or {}).get("total", 0))}[srt]
     items = sorted(items, key=key)
     form = (f'<form method="get" class="filters" style="margin:8px 0"><input type="hidden" name="t" value="rank">{select("w", WINDOWS, w)}'
             + (select("m", MARKET_OPTS, m) if "시장" in cols else "")
@@ -2209,6 +2252,7 @@ def view_ranking(conn, q):
             f'<div style="height:5px;background:var(--chip);border-radius:3px;margin:6px 0">'
             f'<div style="height:5px;width:{pct:.0f}%;background:var(--accent);border-radius:3px"></div></div>'
             f'<div>{chips}</div><div class="muted" style="margin-top:4px">{detail}</div>'
+            + _rank_card_line(i) +
             f'<div class="muted">기관 매수 {eok(r["amt"])} · 평단 {won(i["avg"])}원 · 종가 {won(i["close"])}원 · '
             f'마지막 매수 {escape(r["last"])}</div>{miss}</div>')
     body = (intro + form + ("".join(cards) or '<p class="muted">조건에 맞는 종목이 없어요. 기간을 늘려 보세요.</p>'))
@@ -2243,7 +2287,7 @@ def score_url(**kw):
 def idea_tabs_row(active="score"):
     return '<div style="margin:0 0 8px">' + " ".join(
         (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == active else
-         f'<a class="chip" href="/ideas?{urlencode({"t": k})}">{v}</a>') for k, v in IDEA_TABS.items()) + '</div>'
+         f'<a class="chip" href="/ideas?{urlencode({"t": k})}">{v}</a>') for k, v in idea_group_tabs(active)) + '</div>'
 
 
 def score_search_form(q=""):
@@ -2674,7 +2718,7 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 return self._send(200, "application/json", json.dumps(st, ensure_ascii=False).encode())
             conn = sqlite3.connect(f"file:{quote(str(db_path))}?mode=ro", uri=True) if Path(db_path).exists() else sqlite3.connect(":memory:")
             conn.row_factory = sqlite3.Row
-            _CTX.pre = market_tabs_row(url.path) if url.path in MARKET_HUB else ""
+            _CTX.pre = hub_tabs_row(url.path)
             try:
                 if url.path.startswith("/backup/") and settings_api:
                     name = url.path[len("/backup/"):]
