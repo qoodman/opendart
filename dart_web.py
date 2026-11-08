@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 from dart_charts import CHART_CSS, CHART_JS, bar_list, net_line, price_chart, sparkline
+import position_flow as pf
 from research import consensus, suspicious
 
 PAGE_SIZE = 50
@@ -1768,12 +1769,26 @@ def super_investors(conn, days, flt=None):
         p["stocks"] = stocks
         rets = [(g["ret"], g["cost"]) for g in stocks if g["ret"] is not None and g["cost"]]
         p["ret"] = sum(r * c for r, c in rets) / sum(c for _, c in rets) if rets else None
+    # 매도 단가·차익·잔량: 수집한 공시 전체 이력 기준 (기간과 상관없이 '아직 안 팔았는지'를 봄)
+    POS = pf.compute(conn)
+    sold_who = {w for (w, _), ps in POS.items() if ps["sold"]}
+    for p in people.values():
+        p["ever_sold"] = p["name"] in sold_who
+        realized = []
+        for g in p["stocks"]:
+            g["pos"] = POS.get((p["name"], g["code"]))
+            if g["pos"] and g["pos"]["realized_cost"]:
+                realized.append(g["pos"]["realized"])
+        p["realized"] = sum(realized)
+        p["realized_known"] = bool(realized)
     q = (flt.get("q") or "").strip()
     amt = float(flt.get("amt") or 0)
     d = flt.get("dir") or ""
     out = []
     for p in people.values():
         if q and q not in p["name"]:
+            continue
+        if d == "never" and p["ever_sold"]:
             continue
         if amt and p["amt"] < amt:
             continue
@@ -1789,6 +1804,8 @@ def super_investors(conn, days, flt=None):
         out.sort(key=lambda p: p["name"])
     elif srt == "ret":
         out.sort(key=lambda p: (p["ret"] is None, -(p["ret"] or 0)))
+    elif srt == "gain":
+        out.sort(key=lambda p: (not p["realized_known"], -p["realized"]))
     else:
         out.sort(key=lambda p: (p["last"], p["amt"]), reverse=True)
     for p in out:
@@ -1798,6 +1815,61 @@ def super_investors(conn, days, flt=None):
 
 NPS_OPTS = {"1": "국민연금 제외", "0": "국민연금 포함"}
 WINDOWS = {"30": "최근 1달 매수", "90": "최근 3달 매수", "180": "최근 6달 매수", "365": "최근 1년 매수"}
+
+
+def money(v):
+    """부호가 붙은 금액: +2.3억 / −3,000만 / +850원"""
+    if v is None:
+        return "-"
+    a, sign = abs(v), "+" if v > 0 else "−" if v < 0 else ""
+    return f"{sign}{a / 1e8:,.1f}억" if a >= 1e8 else f"{sign}{a / 1e4:,.0f}만" if a >= 1e4 else f"{sign}{a:,.0f}원"
+
+
+def gain_html(v, pct=None):
+    if v is None:
+        return '<span class="muted">-</span>'
+    cls = "up" if v > 0 else "down" if v < 0 else ""
+    return f'<b class="{cls}">{money(v)}</b>' + (f' <span class="{cls}">({pct:+.0%})</span>' if pct is not None else "")
+
+
+def pos_line(p, close):
+    """한 제출인의 한 종목: 매수 평단 · 매도 단가 · 실현 차익 · 잔량 · 평가 손익 (한 줄 HTML)"""
+    parts = [f'매수 평단 {won(p["avg_buy"])}원' if p["avg_buy"] else "매수 평단 -"]
+    if p["sold"]:
+        parts.append(f'매도 {won(p["sell_q"])}주' + (f' @ {won(p["avg_sell"])}원' if p["avg_sell"] else ""))
+        parts.append("실현 차익 " + gain_html(p["realized"], p["realized_pct"]) if p["realized_cost"]
+                     else '<span class="muted">차익 계산 불가 (산 가격을 모르는 매도)</span>')
+        if p["unmatched_sell"] and p["realized_cost"]:
+            parts.append(f'<span class="muted">산 가격 모르는 매도 {won(p["unmatched_sell"])}주는 차익에서 뺌</span>')
+    else:
+        parts.append("<b>아직 매도 안 함</b>")
+    src = f'{p["remain_src"]}' + (f' {p["report_pct"]:.2f}%' if p["remain_src"] == "보고서" and p["report_pct"] is not None else "")
+    parts.append(f'잔량 <b>{won(p["remain"])}주</b> <span class="muted">({escape(src)})</span>')
+    u, upct = pf.unrealized(p, close)
+    if u is not None:
+        parts.append("남은 주식 평가 손익 " + gain_html(u, upct))
+    return " · ".join(parts)
+
+
+def _pos_block(i):
+    """아이디어 카드: 이 종목을 산 기관들의 매도 현황"""
+    pl = i.get("pl") or []
+    if not pl:
+        return ""
+    s_ = i["pos"]
+    head = ('<div style="margin-top:6px"><b>매도 현황</b> <span class="muted">기관 %d곳 중 ' % s_["n"]
+            + (f'<b>{s_["sold_n"]}곳이 매도</b> · 아직 안 판 곳 {s_["n"] - s_["sold_n"]}곳' if s_["sold_n"]
+               else "<b>아직 아무도 안 팔았어요</b>") + "</span></div>")
+    shown = sorted(pl, key=lambda p: -(p["buy_amt"] or 0))[:5]
+    lines = "".join(f'<div style="font-size:13px;margin-top:3px"><b>{escape(p["who"])}</b> — {pos_line(p, i["close"])}</div>'
+                    for p in shown)
+    more = f'<div class="muted" style="font-size:12px">{len(pl)}곳 중 5곳만 표시</div>' if len(pl) > 5 else ""
+    total = (f'<div class="muted" style="font-size:12px;margin-top:3px">실현 차익 합계 {gain_html(s_["realized"])} · 평균 매도 단가 '
+             f'{won(s_["avg_sell"]) if s_["avg_sell"] else "-"}원 · 남은 잔량 합계 {won(s_["remain"])}주</div>' if s_["sold_n"] else "")
+    return head + lines + more + total
+
+
+SOLD_OPTS = {"": "매도 여부: 전체", "none": "아직 아무도 안 판 종목만", "some": "매도한 기관이 있는 종목만"}
 
 
 def view_super(conn, q, days):
@@ -1817,7 +1889,9 @@ def view_super(conn, q, days):
             last = f'최근 제출 {won(g["last_unit"])}원 ({escape(g["last_sub"])})' if g["last_unit"] else ""
             now = f'현재 {won(g["close"])}원 · 수익률 {pct(g["ret"])}' if g["close"] else "현재가 없음"
             lines.append(f'<div style="margin-top:6px"><b>{escape(str(g["name"]))}</b> <span class="muted">{escape(str(g["code"]))}</span>'
-                         f'<div>{avg} · {last}</div><div class="muted">{now}</div></div>')
+                         f'<div>{avg} · {last}</div><div class="muted">{now}</div>'
+                         + (f'<div style="font-size:13px;margin-top:2px">{pos_line(g["pos"], g["close"])}</div>' if g.get("pos") else "")
+                         + '</div>')
         more = f'<div class="muted" style="margin-top:4px">종목 {len(p["stocks"])}개 중 6개만 표시</div>' if len(p["stocks"]) > 6 else ""
         act = " · ".join(x for x in (f'매수 {won(p["bq"])}주' if p["bq"] else "", f'매도 {won(p["sq"])}주' if p["sq"] else "",
                                      f'약 {eok(p["amt"])}' if p["amt"] else "") if x)
@@ -1827,6 +1901,8 @@ def view_super(conn, q, days):
             f'<div class="muted">최근 제출 {escape(p["last"])}</div></div>'
             f'<div>{act}</div>'
             f'<div>추정 수익률(평균 매수가 대비 현재가): <b>{pct(p["ret"])}</b></div>'
+            + (f'<div>실현 차익 합계 {gain_html(p["realized"])} <span class="muted">(매도한 종목만, 추정)</span></div>' if p.get("ever_sold") and p.get("realized_known") else "")
+            + ("" if p.get("ever_sold") else '<div class="muted">공시에서 아직 매도한 기록이 없어요</div>')
             + "".join(lines) + more + "</div>")
     return ("".join(cards)
             + '<p class="muted" style="font-size:12px">수익률은 기간 안에서 공시로 확인된 매수 가격의 평균과 최근 종가로 계산한 추정치예요. '
@@ -1861,11 +1937,18 @@ def view_investor(conn, name, days):
     stocks = ""
     for g in sorted(p["stocks"], key=lambda g: -(g["cost"] or 0)):
         ret = "-" if g["ret"] is None else f'<span class="{"up" if g["ret"] > 0 else "down"}">{g["ret"]:+.1%}</span>'
+        ps = g.get("pos")
+        sell = ("-" if not ps else "아직 안 팖" if not ps["sold"] else
+                f'{won(ps["sell_q"])}주' + (f' @ {won(ps["avg_sell"])}원' if ps["avg_sell"] else ""))
         stocks += (f'<tr><td><b>{escape(str(g["name"]))}</b><div class="muted">{escape(str(g["code"]))}</div></td>'
                    f'<td>{won(g["avg"]) if g["avg"] else "-"}</td><td>{won(g["last_unit"]) if g["last_unit"] else "-"}</td>'
-                   f'<td>{won(g["close"]) if g["close"] else "-"}</td><td>{ret}</td></tr>')
+                   f'<td>{won(g["close"]) if g["close"] else "-"}</td><td>{ret}</td>'
+                   f'<td>{sell}</td><td>{gain_html(ps["realized"], ps["realized_pct"]) if ps and ps["realized_cost"] else "-"}</td>'
+                   f'<td>{won(ps["remain"]) + "주" if ps else "-"}</td></tr>')
     stock_tbl = ('<h2>종목별</h2><div class="scroll"><table><tr><th>종목</th><th>평균 매수가</th><th>최근 제출 단가</th>'
-                 f'<th>현재가</th><th>수익률</th></tr>{stocks}</table></div>') if stocks else ""
+                 f'<th>현재가</th><th>수익률</th><th>매도</th><th>실현 차익</th><th>잔량</th></tr>{stocks}</table></div>'
+                 '<p class="muted" style="font-size:12px">매도·차익·잔량은 수집한 공시 전체를 평균단가법으로 따라간 추정이에요. '
+                 '공시 이전에 산 주식을 판 경우는 차익에서 빠지고, 잔량은 보고서에 적힌 보유수량(있으면) 또는 공시 증감 합이에요.</p>') if stocks else ""
     hist = ""
     for r in p["items"]:
         if r["buy_q"] and r["sell_q"]:
@@ -1884,7 +1967,7 @@ def view_investor(conn, name, days):
 IDEA_SORTS = {"": "정렬: 기본", "amt": "정렬: 매수금액 큰 순", "n": "정렬: 기관 수 많은 순",
               "disc": "정렬: 평단 대비 많이 싼 순", "gain": "정렬: 평단 대비 많이 오른 순",
               "last": "정렬: 최근 매수일순", "name": "정렬: 이름순",
-              "pbr": "정렬: PBR 낮은 순"}
+              "pbr": "정렬: PBR 낮은 순", "rgain": "정렬: 실현 차익 큰 순", "remain": "정렬: 남은 잔량 많은 순"}
 
 
 def sort_ideas(ideas, srt, tab):
@@ -1899,6 +1982,8 @@ def sort_ideas(ideas, srt, tab):
         "last": lambda i: str(i["r"]["last"] or ""),
         "name": lambda i: str(i["r"]["name"] or ""),
         "pbr": lambda i: (i["v"].get("pbr") is None, i["v"].get("pbr") or 0),
+        "rgain": lambda i: -((i.get("pos") or {}).get("realized") or 0),
+        "remain": lambda i: -((i.get("pos") or {}).get("remain") or 0),
     }[srt]
     return sorted(ideas, key=key, reverse=(srt == "last"))
 
@@ -1951,8 +2036,9 @@ def view_ideas(conn, q):
             listing = f'<div class="card warn">슈퍼개미 목록을 만드는 중 문제가 생겼습니다: {escape(str(e))[:120]}</div>'
         fq = escape(q.get("sq", ""))
         amt_opts = {"": "최소 매수금액 없음", "100000000": "1억 이상", "1000000000": "10억 이상", "10000000000": "100억 이상"}
-        dir_opts = {"": "매수·매도 전체", "buy": "매수한 사람만", "sell": "매도한 사람만"}
-        sort_opts = {"date": "정렬: 최근 제출일순", "amt": "정렬: 매수금액순", "name": "정렬: 이름순", "ret": "정렬: 수익률순"}
+        dir_opts = {"": "매수·매도 전체", "buy": "매수한 사람만", "sell": "매도한 사람만", "never": "아직 한 번도 안 판 사람만"}
+        sort_opts = {"date": "정렬: 최근 제출일순", "amt": "정렬: 매수금액순", "name": "정렬: 이름순", "ret": "정렬: 수익률순",
+                     "gain": "정렬: 실현 차익순"}
         form = (f'<form method="get" class="filters" style="margin:8px 0"><input type="hidden" name="t" value="super">'
                 f'<input type="hidden" name="w" value="{escape(w)}">'
                 f'<input type="search" name="sq" value="{fq}" placeholder="이름 검색">'
@@ -1990,6 +2076,16 @@ def view_ideas(conn, q):
         avg = r["amt"] / r["qty"]
         ideas.append(dict(r=r, avg=avg, close=close, day=day, disc=close / avg - 1))
     srt = q.get("s") if q.get("s") in IDEA_SORTS else ""
+    sold = q.get("sold") if q.get("sold") in SOLD_OPTS else ""
+    POS = pf.compute(conn)                      # 매도 단가·차익·잔량 (수집한 공시 전체 이력 기준)
+    for i in ideas:
+        code = i["r"]["code"]
+        i["pl"] = [POS[(w_, code)] for w_ in (i["r"]["whos"] or "").split(",") if (w_, code) in POS]
+        i["pos"] = pf.summarize(i["pl"]) if i["pl"] else None
+    if sold == "none":
+        ideas = [i for i in ideas if i["pos"] and i["pos"]["none_sold"]]
+    elif sold == "some":
+        ideas = [i for i in ideas if i["pos"] and not i["pos"]["none_sold"]]
     vals = value_map(conn)
     for i in ideas:
         i["v"] = vals.get(i["r"]["code"]) or {}
@@ -2016,10 +2112,12 @@ def view_ideas(conn, q):
                     else f'<a class="chip" href="/ideas?{urlencode({**base, "t": k})}">{v}</a>' for k, v in idea_group_tabs(tab))
     form = (f'<form method="get" class="filters" style="margin-top:10px"><input type="hidden" name="t" value="{tab}">'
             f'{select("w", WINDOWS, w)}' + (select("m", MARKET_OPTS, m) if "시장" in cols else "")
-            + f'{select("ex", NPS_OPTS, ex)}{select("s", IDEA_SORTS, srt)}<button>적용</button></form>')
+            + f'{select("ex", NPS_OPTS, ex)}{select("sold", SOLD_OPTS, sold)}{select("s", IDEA_SORTS, srt)}<button>적용</button></form>')
     perf_link = '<p><a href="/ideas?t=perf">운용사별 성적표 보기 →</a> (어느 기관의 매수가 과거에 잘 맞았는지)</p>'
     note = perf_link + ('<p class="muted">살펴볼 후보를 찾는 화면입니다. 공시는 매매 후 최대 5영업일 뒤에 나오고, '
-            '국민연금처럼 큰 기관은 비중 조절로 사고팔 때가 많아 기본으로 뺐습니다.</p>')
+            '국민연금처럼 큰 기관은 비중 조절로 사고팔 때가 많아 기본으로 뺐습니다. '
+            '매도 단가·차익·잔량은 수집한 공시 이력을 평균단가법으로 따라간 추정이에요 '
+            '(공시 이전에 산 주식을 판 경우는 차익에서 빠지고, 정정 공시가 겹치면 어긋날 수 있어요).</p>')
     if not ideas:
         priced = sum(1 for r in rows if r["code"] in closes)
         why = (f'{WINDOWS[w]} 기록이 있는 종목이 없습니다. ' if not rows else
@@ -2050,7 +2148,7 @@ def view_ideas(conn, q):
                if i["v"].get("pbr") is not None and i["v"].get("per") is not None else "")
             + (f'<div class="muted">최근 5일 외국인 {_sg(fsum[r["code"]][0])}주 · 기관 {_sg(fsum[r["code"]][1])}주</div>'
                if r["code"] in fsum else "")
-            + f'{sparkline(pr, i["avg"])}</div>')
+            + _pos_block(i) + f'{sparkline(pr, i["avg"])}</div>')
     body = (tabs + form + note + f"<h2>{chart_title}</h2>" + chart
             + '<div class="legend"><span><i class="ln" style="background:var(--price)"></i>최근 120거래일 종가</span>'
               '<span><i class="dash"></i>기관 평균매수단가</span></div>' + "".join(cards))
