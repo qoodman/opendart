@@ -159,7 +159,7 @@ def page(title, body, refresh=False, charts=False):
 <link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#2b5a9e">
 <link rel="icon" href="/icon-192.png"><link rel="apple-touch-icon" href="/icon-192.png">
 </head><body>
-<header><div class="hrow"><b>DART 단순투자</b>{header_actions()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/ranking">순위</a><a href="/score">점수표</a><a href="/performance">성적표</a><a href="/reports">리포트</a><a href="/market">시장</a><a href="/policy">정책</a><a href="/calendar">달력</a><a href="/new">새 공시</a>
+<header><div class="hrow"><b>DART 단순투자</b>{header_actions()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/ranking">순위</a><a href="/performance">성적표</a><a href="/reports">리포트</a><a href="/market">시장</a><a href="/policy">정책</a><a href="/calendar">달력</a><a href="/new">새 공시</a>
 <a href="/settings">설정</a>{extra}</nav>
 </header><main>{body}</main>{"<script>" + CHART_JS + "</script>" if charts else ""}</body></html>""".encode()
 
@@ -1660,7 +1660,8 @@ def view_performance_detail(who, evs, h, ex, kind, s=""):
 
 
 # ---------------- 아이디어 ----------------
-IDEA_TABS = {"cheap": "기관 평단보다 싼 종목", "cluster": "여러 기관이 함께 산 종목", "super": "슈퍼개미 움직임"}
+IDEA_TABS = {"cheap": "기관 평단보다 싼 종목", "cluster": "여러 기관이 함께 산 종목", "super": "슈퍼개미 움직임",
+             "score": "점수표 (오일전문가)"}
 
 # 공시 제출인이 개인인지 추정: 한글 이름 2~4자. 기관 이름(운용·증권·공단 등)이나 '외 N명'은 제외
 _INST_WORDS = ("자산", "운용", "증권", "투자", "공단", "펀드", "은행", "보험", "재단", "캐피탈", "파트너스",
@@ -1890,6 +1891,8 @@ def sort_ideas(ideas, srt, tab):
 
 
 def view_ideas(conn, q):
+    if q.get("t") == "score":
+        return view_score(conn, q)
     if not has_table(conn, "summary"):
         return page("아이디어", '<div class="card">보고서(DART) 수집이 한 번 끝나야 볼 수 있습니다. '
                               '위쪽 <b>지금 수집 → 보고서만</b>을 눌러 주세요.</div>')
@@ -2206,8 +2209,19 @@ def _score_names(conn):
     return names
 
 
+def score_url(**kw):
+    """점수표는 아이디어 탭 안에 있음"""
+    return "/ideas?" + urlencode({"t": "score", **kw})
+
+
+def idea_tabs_row(active="score"):
+    return '<div style="margin:0 0 8px">' + " ".join(
+        (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == active else
+         f'<a class="chip" href="/ideas?{urlencode({"t": k})}">{v}</a>') for k, v in IDEA_TABS.items()) + '</div>'
+
+
 def score_search_form(q=""):
-    return ('<form method="get" action="/score" class="filters" style="margin:8px 0">'
+    return ('<form method="get" action="/ideas" class="filters" style="margin:8px 0"><input type="hidden" name="t" value="score">'
             f'<input type="search" name="q" value="{escape(q)}" placeholder="종목 이름 또는 6자리 코드 (예: 005930)">'
             '<button>점수 보기</button></form>')
 
@@ -2215,7 +2229,7 @@ def score_search_form(q=""):
 def score_nav(active=""):
     tabs = " ".join(
         (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == active else
-         f'<a class="chip" href="/score?{urlencode({"view": "rank", "t": k})}">{v}</a>') for k, v in SCORE_TABS.items())
+         f'<a class="chip" href="{score_url(view="rank", st=k)}">{v}</a>') for k, v in SCORE_TABS.items())
     return f'<div style="margin:8px 0">{tabs}</div>'
 
 
@@ -2286,12 +2300,12 @@ def score_detail(conn, code, name, note=""):
             + (f'{escape(fetched)}에 받았어요. ' if fetched else "") +
             '점수 기준은 \'오일전문가 점수표\'를 그대로 썼어요. 표에 없는 경우(적자·자본잠식·배당 없음)는 0점으로 봤어요. '
             '나머지 항목은 직접 판단해서 고르는 값이고, 투자 추천이 아니에요.</p>')
-    return page(f"{name or code} — 점수표", score_search_form() + (note or "") + head + top + form + foot)
+    return page(f"{name or code} — 점수표", idea_tabs_row() + score_search_form() + (note or "") + head + top + form + foot)
 
 
 def score_rank(conn, q):
     import score_card as sc
-    tab = q.get("t") if q.get("t") in SCORE_TABS else "mine"
+    tab = q.get("st") if q.get("st") in SCORE_TABS else "mine"
     names = _score_names(conn)
     vals = value_map(conn)
     rows = []
@@ -2306,7 +2320,7 @@ def score_rank(conn, q):
             g, gtext = r["grade"]
             cards.append(
                 f'<div class="card"><div class="row"><div><span class="num">{k}</span>'
-                f'<a class="big" href="/score?code={quote(code)}">{escape(name)}</a> <span class="muted">{escape(code)}</span></div>'
+                f'<a class="big" href="{score_url(code=code)}">{escape(name)}</a> <span class="muted">{escape(code)}</span></div>'
                 f'<div><b class="big">{total:g}</b><span class="muted">점</span> <span class="chip">{g}등급'
                 f'{"" if r["full"] else " 잠정"}</span></div></div>'
                 f'<div class="muted">{r["n_known"]}/{sc.N_ITEMS}개 항목 반영'
@@ -2329,17 +2343,17 @@ def score_rank(conn, q):
                     ("dy", "배당", f'{v["div"]:.2f}%' if v.get("div") is not None else "-")))
             cards.append(
                 f'<div class="card"><div class="row"><div><span class="num">{k}</span>'
-                f'<a class="big" href="/score?code={quote(code)}">{escape(name)}</a> <span class="muted">{escape(code)}</span></div>'
+                f'<a class="big" href="{score_url(code=code)}">{escape(name)}</a> <span class="muted">{escape(code)}</span></div>'
                 f'<div><b class="big">{tot:g}</b><span class="muted">/{sc.AUTO_MAX}점</span></div></div><div>{chips}</div></div>')
         body = (score_nav(tab) + '<div class="card"><div class="muted">PER·PBR·배당수익률 3항목(35점)만 자동으로 계산한 순위예요. '
                 '나머지 65점은 직접 판단해야 해서 들어 있지 않아요. 점수가 같으면 PER이 낮은 순이에요. '
                 '적자·자본잠식 기업은 0점 처리돼서 아래로 가요.</div></div>'
                 + ("".join(cards) or '<p class="muted">받아 둔 PER·PBR 값이 아직 없어요. 시장·정책 수집을 한 번 돌려 주세요.</p>'))
-    return page("점수표 순위", body)
+    return page("점수표 순위", idea_tabs_row() + body)
 
 
 def view_score(conn, q):
-    """/score — 종목 검색, 종목 하나의 점수, 점수 순위"""
+    """아이디어 → 점수표: 종목 검색, 종목 하나의 점수, 점수 순위"""
     if q.get("view") == "rank":
         return score_rank(conn, q)
     raw = (q.get("code") or q.get("q") or "").strip()
@@ -2347,11 +2361,11 @@ def view_score(conn, q):
         import score_card as sc
         mine = sc.evaluated(conn)
         names = _score_names(conn)
-        recent = "".join(f'<a class="chip" href="/score?code={quote(c)}">{escape(names.get(c) or n or c)}</a> ' for c, n in mine[:12])
+        recent = "".join(f'<a class="chip" href="{score_url(code=c)}">{escape(names.get(c) or n or c)}</a> ' for c, n in mine[:12])
         intro = ('<div class="card"><b>오일전문가 점수표</b><div class="muted" style="margin-top:4px">'
                  '종목을 넣으면 100점 만점으로 몇 점인지 계산해요. PER·PBR·배당수익률(35점)은 자동이고, '
                  '나머지 10개 항목(65점)은 직접 골라요. 80점 초과 A · 70~80 B · 50~70 C · 50 미만 D.</div></div>')
-        return page("점수표", score_search_form() + intro + score_nav("")
+        return page("점수표", idea_tabs_row() + score_search_form() + intro + score_nav("")
                     + (f'<h2>최근 평가한 종목</h2><div>{recent}</div>' if recent else ""))
     # 종목 찾기: 6자리 코드면 그대로, 아니면 이름으로 찾음
     if SCORE_CODE.fullmatch(raw):
@@ -2376,11 +2390,11 @@ def view_score(conn, q):
     if len(hits) == 1:
         return score_detail(conn, hits[0][0], hits[0][1], "")
     if not hits:
-        return page("점수표", score_search_form(raw) + '<div class="card">이름으로 찾지 못했어요. 공시에 나온 종목이나 이미 평가한 종목만 이름으로 찾을 수 있어요. '
+        return page("점수표", idea_tabs_row() + score_search_form(raw) + '<div class="card">이름으로 찾지 못했어요. 공시에 나온 종목이나 이미 평가한 종목만 이름으로 찾을 수 있어요. '
                     '다른 종목은 <b>6자리 종목 코드</b>(예: 삼성전자 005930)로 넣어 주세요.</div>')
-    links = "".join(f'<div class="card"><a class="big" href="/score?code={quote(c)}">{escape(n)}</a> '
+    links = "".join(f'<div class="card"><a class="big" href="{score_url(code=c)}">{escape(n)}</a> '
                     f'<span class="muted">{escape(c)}</span></div>' for c, n in sorted(hits, key=lambda h: h[1] or "")[:30])
-    return page("점수표", score_search_form(raw) + f'<p class="muted">{len(hits)}개 종목이 맞아요. 하나를 골라 주세요.</p>' + links)
+    return page("점수표", idea_tabs_row() + score_search_form(raw) + f'<p class="muted">{len(hits)}개 종목이 맞아요. 하나를 골라 주세요.</p>' + links)
 
 
 def latest_excel(conn):
@@ -2488,7 +2502,7 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 elif url.path == "/ranking":
                     body = view_ranking(conn, q)
                 elif url.path == "/score":
-                    body = view_score(conn, q)
+                    return self._redirect(score_url(**{k: v for k, v in q.items() if not k.startswith("_")}))
                 elif url.path == "/new":
                     body = view_new(conn, q)
                 elif url.path == "/stock":
@@ -2538,14 +2552,14 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                                                      keep_blank_values=True).items()}
                 code = form.get("code", "")
                 if not SCORE_CODE.fullmatch(code):
-                    return self._redirect("/score")
+                    return self._redirect(score_url())
                 import score_card as sc
                 conn = sqlite3.connect(db_path)
                 try:
                     sc.save(conn, code, form.get("name", ""), form)
                 finally:
                     conn.close()
-                return self._redirect("/score?" + urlencode({"code": code, "saved": 1}))
+                return self._redirect(score_url(code=code, saved=1))
             if path in ("/calendar/add", "/calendar/del"):
                 n = min(int(self.headers.get("Content-Length") or 0), 8192)
                 form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore")).items()}
