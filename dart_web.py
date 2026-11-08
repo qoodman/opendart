@@ -2485,6 +2485,62 @@ def _radar_card(it):
             f'<div style="margin:4px 0">{chips}</div>{when}{blocks}{src}{status_form}{manage}</div>')
 
 
+def _radar_countries(conn):
+    """대비 레이더 맨 위: 한국 주식을 많이 가진 외국인 국적별 영향력 지도"""
+    import radar as rd
+    rows, _ = rd.country_overview(conn)
+    if not rows:
+        return ""
+    top5 = [r for r in rows[:5] if r["share"] is not None]
+    top5_sum = sum(r["share"] for r in top5)
+    asofs = sorted({r["asof"] for r in top5})
+    mixed = len(asofs) > 1
+    head = ('<div class="card"><b>국가별 영향력 지도</b><div class="muted" style="margin-top:4px">'
+            '한국 상장주식을 많이 가진 외국인 투자자를 <b>국적별</b>로 봐요. 영향력은 <b>비중</b>(방향을 정하는 힘) × '
+            '<b>매매 성향</b>(얼마나 자주·크게 움직이나) × <b>세제·정책 민감도</b>를 같이 봐야 해요. '
+            '비중은 작아도 매매가 잦은 나라가 단기 흐름을 흔들기도 해요.</div>'
+            f'<div style="margin-top:6px">상위 {len(top5)}개국 합계 <b>{top5_sum:.1f}%</b>'
+            + (f' <span class="muted">(기준월 {escape(asofs[0])}~{escape(asofs[-1])} 혼합)</span>' if mixed
+               else f' <span class="muted">({escape(asofs[0])} 기준)</span>')
+            + f' · 1위 {escape(top5[0]["country"])} 단독 <b>{top5[0]["share"]:.1f}%</b></div>'
+            '<div class="muted" style="margin-top:4px">숫자는 금융감독원 \'외국인 증권투자 동향\' 집계를 인용한 언론 보도에서 가져왔어요 '
+            '(원문은 직접 확인하지 못했어요). 해석과 민감 요인은 \'가설\'이에요. 최신 숫자는 금감원 보도자료로 고쳐 주세요.</div></div>')
+    cards = []
+    for k, r in enumerate(rows, 1):
+        pr = r["profile"] or {}
+        share = r["share"]
+        bar = (f'<div style="height:6px;background:var(--chip);border-radius:3px;margin:6px 0">'
+               f'<div style="height:6px;width:{_clamp(share / 41 * 100 if share else 0, 2, 100):.0f}%;background:var(--accent);border-radius:3px"></div></div>')
+        change = ""
+        if r["prev_share"] is not None and share is not None:
+            d = share - r["prev_share"]
+            change = f' <span class="muted">({r["prev_share"]:.1f}% → {d:+.1f}%p)</span>'
+        last = r["flows"][0] if r["flows"] else None
+        lastchip = (f' <span class="chip {"down" if last[1] < 0 else "up"}">{escape(last[0])} {last[1]:+.1f}조</span>' if last else "")
+        flows = "".join(
+            f'<div class="muted">· {escape(per)}: <b class="{"down" if net < 0 else "up"}">{net:+,.1f}조원</b> <span style="font-size:12px">— {escape(src)}</span></div>'
+            for per, net, src in r["flows"][:6])
+        body = ""
+        if pr:
+            for label, key in (("해석(가설)", "read"), ("이런 소식이 나오면 의심", "triggers"), ("확인할 지표", "checks")):
+                body += f'<div style="margin-top:6px"><b style="font-size:13px">{label}</b><div style="white-space:pre-wrap">{escape(pr[key])}</div></div>'
+        cards.append(
+            f'<details class="card"><summary><b>{k}. {escape(r["country"])}</b> '
+            + (f'<b>{share:.1f}%</b>' if share is not None else "")
+            + (' <span class="muted">(계산)</span>' if r["share_calc"] else "") + change
+            + (f'<div class="muted">{escape(pr["type"])}</div>' if pr else "") + bar + lastchip + '</summary>'
+            f'<div class="muted" style="margin-top:6px">{escape(r["asof"])} 보유 {r["holding"]:,.1f}조원 · {escape(r["source"])}</div>'
+            + (f'<div style="margin-top:6px"><b style="font-size:13px">최근 순매매</b>{flows}</div>' if flows else "")
+            + body + '</details>')
+    upd = ('<details class="card"><summary>국가 현황 갱신 (금감원 보도자료가 나오면)</summary>'
+           '<form method="post" action="/radar/countries" style="margin-top:8px">'
+           '<textarea name="data" rows="6" placeholder="한 줄에 한 나라:&#10;국가,기준월,보유(조원),비중(%),순매매(조원),기간 이름&#10;미국,2026-10,720.5,41.3,-3.2,2026년 10월&#10;영국,2026-10,170"></textarea>'
+           '<div class="muted" style="margin-top:4px">비중·순매매·기간 이름은 비워도 돼요 (비중을 비우면 \'외국인 전체\' 보유액 대비로 계산). '
+           '\'외국인 전체,2026-10,총보유액\' 줄도 넣어 두면 비중이 맞게 계산돼요. 같은 나라·같은 기준월은 덮어써요.</div>'
+           '<button style="margin-top:6px">반영</button></form></details>')
+    return (head + "".join(cards) + f'<div class="muted" style="margin:6px 0">{escape(rd.COMMON)}</div>' + upd)
+
+
 def view_radar(conn, q):
     import radar as rd
     path = _DB["path"]
@@ -2493,6 +2549,7 @@ def view_radar(conn, q):
             w = sqlite3.connect(path)
             try:
                 rd.seed(w)
+                rd.seed_countries(w)
             finally:
                 w.close()
         except sqlite3.Error:
@@ -2525,7 +2582,11 @@ def view_radar(conn, q):
     def section(title, rows):
         return (f'<h2>{title} <span class="muted" style="font-size:13px">({len(rows)})</span></h2>'
                 + "".join(_radar_card(i) for i in rows)) if rows else ""
-    body = (intro + f'<div style="margin:8px 0">{chips}</div>{kform}' + add
+    notice = ""
+    if q.get("cn"):
+        notice = f'<div class="card">{escape(q["cn"])}</div>'
+    body = (intro + notice + _radar_countries(conn)
+            + '<h2>대비 변수 목록</h2>' + f'<div style="margin:8px 0">{chips}</div>{kform}' + add
             + section("날짜가 다가오는 변수", upcoming) + section("이미 시작됐거나 지난 변수", started)
             + section("날짜 미정", undated)
             + ("" if shown else '<p class="muted">이 조건에 맞는 변수가 없어요.</p>'))
@@ -2683,6 +2744,20 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 if errors:
                     qs["errs"] = json.dumps(errors, ensure_ascii=False)
                 return self._redirect("/settings?" + urlencode(qs))
+            if path == "/radar/countries":
+                n = min(int(self.headers.get("Content-Length") or 0), 32768)
+                form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore"),
+                                                     keep_blank_values=True).items()}
+                import radar as rd
+                conn = sqlite3.connect(db_path)
+                try:
+                    rd.ensure(conn)
+                    rd.ensure_countries(conn)
+                    ok, errors = rd.import_text(conn, form.get("data", ""))
+                finally:
+                    conn.close()
+                msg = f"✔ {ok}줄 반영했어요." + (f" 오류 {len(errors)}줄: " + " / ".join(errors[:3]) if errors else "")
+                return self._redirect("/radar?" + urlencode({"cn": msg}))
             if path in ("/radar/add", "/radar/edit", "/radar/status", "/radar/del"):
                 n = min(int(self.headers.get("Content-Length") or 0), 16384)
                 form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore"),
