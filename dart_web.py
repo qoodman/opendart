@@ -159,7 +159,7 @@ def page(title, body, refresh=False, charts=False):
 <link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#2b5a9e">
 <link rel="icon" href="/icon-192.png"><link rel="apple-touch-icon" href="/icon-192.png">
 </head><body>
-<header><div class="hrow"><b>DART 단순투자</b>{header_actions()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/ranking">순위</a><a href="/performance">성적표</a><a href="/reports">리포트</a><a href="/market">시장</a><a href="/policy">정책</a><a href="/calendar">달력</a><a href="/new">새 공시</a>
+<header><div class="hrow"><b>DART 단순투자</b>{header_actions()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/ranking">순위</a><a href="/score">점수표</a><a href="/performance">성적표</a><a href="/reports">리포트</a><a href="/market">시장</a><a href="/policy">정책</a><a href="/calendar">달력</a><a href="/new">새 공시</a>
 <a href="/settings">설정</a>{extra}</nav>
 </header><main>{body}</main>{"<script>" + CHART_JS + "</script>" if charts else ""}</body></html>""".encode()
 
@@ -2186,6 +2186,203 @@ def view_ranking(conn, q):
     return page("종목 순위", body)
 
 
+# ---------------- 점수표 (오일전문가 100점 점수표) ----------------
+_DB = {"path": None}           # serve()가 채움: 점수표에서 값을 새로 받아 저장할 때 씀
+SCORE_CODE = re.compile(r"[0-9A-Za-z]{6}")
+SCORE_TABS = {"mine": "내가 평가한 종목", "auto": "자동 3항목 순위 (35점 만점)"}
+
+
+def _score_names(conn):
+    names = {}
+    try:
+        names.update({r[0]: r[1] for r in conn.execute("SELECT 종목코드, MAX(종목명) FROM summary GROUP BY 종목코드")})
+    except sqlite3.OperationalError:
+        pass
+    try:
+        for c, n in conn.execute("SELECT code, name FROM scorecard_stock"):
+            names.setdefault(c, n)
+    except sqlite3.OperationalError:
+        pass
+    return names
+
+
+def score_search_form(q=""):
+    return ('<form method="get" action="/score" class="filters" style="margin:8px 0">'
+            f'<input type="search" name="q" value="{escape(q)}" placeholder="종목 이름 또는 6자리 코드 (예: 005930)">'
+            '<button>점수 보기</button></form>')
+
+
+def score_nav(active=""):
+    tabs = " ".join(
+        (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == active else
+         f'<a class="chip" href="/score?{urlencode({"view": "rank", "t": k})}">{v}</a>') for k, v in SCORE_TABS.items())
+    return f'<div style="margin:8px 0">{tabs}</div>'
+
+
+def _pts(p, mx):
+    if p is None:
+        return '<span class="muted">-</span>'
+    cls = "up" if p == mx else "down" if p == 0 else ""
+    return f'<b class="{cls}">{p:g}</b><span class="muted">/{mx}</span>'
+
+
+def score_detail(conn, code, name, note=""):
+    import score_card as sc
+    vals = value_map(conn).get(code) or {}
+    answers = sc.load(conn, code)
+    r = sc.compute(vals, answers)
+    g, gtext = r["grade"]
+    pct = _clamp(r["total"], 0, 100)
+    fetched = ""
+    try:
+        row = conn.execute("SELECT fetched FROM valuation WHERE code=?", (code,)).fetchone()
+        fetched = row[0] if row else ""
+    except sqlite3.OperationalError:
+        pass
+    in_dart = False
+    try:
+        in_dart = bool(conn.execute("SELECT 1 FROM summary WHERE 종목코드=? LIMIT 1", (code,)).fetchone())
+    except sqlite3.OperationalError:
+        pass
+    links = (f'<a href="/stock?code={quote(code)}">공시 화면</a> · ' if in_dart else "") + f'<a href="{naver_link(code)}">네이버 증권 ↗</a>'
+    head = (f'<div class="row"><div><span class="big">{escape(name or code)}</span> <span class="muted">{escape(code)}</span></div>'
+            f'<div>{links}</div></div>')
+    if r["full"]:
+        status = f'<div class="muted">13개 항목을 모두 반영한 점수예요.</div>'
+    else:
+        gb, _ = r["grade_best"]
+        status = (f'<div class="muted">{r["n_known"]}/{sc.N_ITEMS}개 항목 기준이에요. 못 채운 {len(r["missing"])}개를 모두 '
+                  f'만점으로 받아도 최대 <b>{r["best"]:g}점 ({gb}등급)</b>이에요. 아래에서 고르고 저장하면 점수가 바뀌어요.</div>')
+    top = (f'<div class="card"><div class="row"><div><span class="big" style="font-size:30px">{r["total"]:g}</span>'
+           f'<span class="muted"> / 100점</span></div>'
+           f'<div><b class="big">{g}등급</b>{"" if r["full"] else " <span class=chip>잠정</span>"}'
+           f'<div class="muted">{escape(gtext)}</div></div></div>'
+           f'<div style="height:6px;background:var(--chip);border-radius:3px;margin:8px 0">'
+           f'<div style="height:6px;width:{pct:.0f}%;background:var(--accent);border-radius:3px"></div></div>{status}</div>')
+    blocks = []
+    for sec in sc.SECTIONS:
+        d = r["sections"][sec]
+        rows = []
+        for it in d["items"]:
+            if it["auto"]:
+                right = f'<b>{escape(it["text"])}</b> → {_pts(it["points"], it["max"])}점'
+                sub = f'<div class="muted" style="font-size:12px">{escape(it["rule"])}</div>'
+                if it["points"] is None:
+                    sub += '<div class="warn" style="font-size:12px">값을 받지 못해 점수에 넣지 않았어요</div>'
+            else:
+                opts = '<option value="">미입력</option>' + "".join(
+                    f'<option value="{escape(v)}"{" selected" if v == it["value"] else ""}>{escape(lbl)} ({pt}점)</option>'
+                    for v, lbl, pt in it["options"])
+                right = f'<select name="{it["key"]}" style="max-width:100%">{opts}</select> {_pts(it["points"], it["max"])}점'
+                sub = f'<div class="muted" style="font-size:12px">{escape(it["help"])}</div>' if it["help"] else ""
+            rows.append(f'<div style="padding:7px 0;border-top:1px solid var(--line)"><div class="row"><div>{escape(it["name"])}'
+                        f' <span class="muted">(만점 {it["max"]})</span></div><div>{right}</div></div>{sub}</div>')
+        blocks.append(f'<div class="card"><div class="row"><b>{escape(d["name"])}</b>'
+                      f'<span>{d["got"]:g}<span class="muted">/{d["max"]}점</span></span></div>{"".join(rows)}</div>')
+    form = (f'<form method="post" action="/score/save"><input type="hidden" name="code" value="{escape(code)}">'
+            f'<input type="hidden" name="name" value="{escape(name or "")}">' + "".join(blocks)
+            + '<button style="width:100%;padding:11px">고른 항목 저장</button></form>')
+    foot = ('<p class="muted">PER·PBR·배당수익률은 네이버 증권 값이고 '
+            + (f'{escape(fetched)}에 받았어요. ' if fetched else "") +
+            '점수 기준은 \'오일전문가 점수표\'를 그대로 썼어요. 표에 없는 경우(적자·자본잠식·배당 없음)는 0점으로 봤어요. '
+            '나머지 항목은 직접 판단해서 고르는 값이고, 투자 추천이 아니에요.</p>')
+    return page(f"{name or code} — 점수표", score_search_form() + (note or "") + head + top + form + foot)
+
+
+def score_rank(conn, q):
+    import score_card as sc
+    tab = q.get("t") if q.get("t") in SCORE_TABS else "mine"
+    names = _score_names(conn)
+    vals = value_map(conn)
+    rows = []
+    if tab == "mine":
+        allans = sc.load_all(conn)
+        for code, name in sc.evaluated(conn):
+            r = sc.compute(vals.get(code) or {}, allans.get(code, {}))
+            rows.append((r["total"], r["best"], code, names.get(code) or name or code, r))
+        rows.sort(key=lambda x: (-x[0], -x[1], x[3]))
+        cards = []
+        for k, (total, best, code, name, r) in enumerate(rows, 1):
+            g, gtext = r["grade"]
+            cards.append(
+                f'<div class="card"><div class="row"><div><span class="num">{k}</span>'
+                f'<a class="big" href="/score?code={quote(code)}">{escape(name)}</a> <span class="muted">{escape(code)}</span></div>'
+                f'<div><b class="big">{total:g}</b><span class="muted">점</span> <span class="chip">{g}등급'
+                f'{"" if r["full"] else " 잠정"}</span></div></div>'
+                f'<div class="muted">{r["n_known"]}/{sc.N_ITEMS}개 항목 반영'
+                + ("" if r["full"] else f" · 최대 {best:g}점까지 가능") + f' · {escape(gtext)}</div></div>')
+        body = (score_nav(tab) + ("".join(cards) or '<p class="muted">아직 직접 평가한 종목이 없어요. 위에서 종목을 찾아 항목을 고르고 저장하면 여기에 모여요.</p>')
+                + '<p class="muted">점수는 입력한 항목만 더한 값이에요. 못 채운 항목은 0점으로 더하지 않고 \'잠정\'으로 표시해요.</p>')
+    else:
+        for code, v in vals.items():
+            tot, miss = sc.auto_total(v)
+            rows.append((tot, miss, code, names.get(code) or code, v))
+        rows.sort(key=lambda x: (-x[0], x[1], x[4].get("per") is None or x[4]["per"] <= 0, x[4].get("per") or 0, x[3]))
+        cards = []
+        for k, (tot, miss, code, name, v) in enumerate(rows[:50], 1):
+            ap = sc.auto_points(v)
+            chips = " ".join(
+                f'<span class="chip">{label} {txt} {ap[key] if ap[key] is not None else "-"}점</span>'
+                for key, label, txt in (
+                    ("per", "PER", f'{v["per"]:.1f}' if v.get("per") is not None else "-"),
+                    ("pbr", "PBR", f'{v["pbr"]:.2f}' if v.get("pbr") is not None else "-"),
+                    ("dy", "배당", f'{v["div"]:.2f}%' if v.get("div") is not None else "-")))
+            cards.append(
+                f'<div class="card"><div class="row"><div><span class="num">{k}</span>'
+                f'<a class="big" href="/score?code={quote(code)}">{escape(name)}</a> <span class="muted">{escape(code)}</span></div>'
+                f'<div><b class="big">{tot:g}</b><span class="muted">/{sc.AUTO_MAX}점</span></div></div><div>{chips}</div></div>')
+        body = (score_nav(tab) + '<div class="card"><div class="muted">PER·PBR·배당수익률 3항목(35점)만 자동으로 계산한 순위예요. '
+                '나머지 65점은 직접 판단해야 해서 들어 있지 않아요. 점수가 같으면 PER이 낮은 순이에요. '
+                '적자·자본잠식 기업은 0점 처리돼서 아래로 가요.</div></div>'
+                + ("".join(cards) or '<p class="muted">받아 둔 PER·PBR 값이 아직 없어요. 시장·정책 수집을 한 번 돌려 주세요.</p>'))
+    return page("점수표 순위", body)
+
+
+def view_score(conn, q):
+    """/score — 종목 검색, 종목 하나의 점수, 점수 순위"""
+    if q.get("view") == "rank":
+        return score_rank(conn, q)
+    raw = (q.get("code") or q.get("q") or "").strip()
+    if not raw:
+        import score_card as sc
+        mine = sc.evaluated(conn)
+        names = _score_names(conn)
+        recent = "".join(f'<a class="chip" href="/score?code={quote(c)}">{escape(names.get(c) or n or c)}</a> ' for c, n in mine[:12])
+        intro = ('<div class="card"><b>오일전문가 점수표</b><div class="muted" style="margin-top:4px">'
+                 '종목을 넣으면 100점 만점으로 몇 점인지 계산해요. PER·PBR·배당수익률(35점)은 자동이고, '
+                 '나머지 10개 항목(65점)은 직접 골라요. 80점 초과 A · 70~80 B · 50~70 C · 50 미만 D.</div></div>')
+        return page("점수표", score_search_form() + intro + score_nav("")
+                    + (f'<h2>최근 평가한 종목</h2><div>{recent}</div>' if recent else ""))
+    # 종목 찾기: 6자리 코드면 그대로, 아니면 이름으로 찾음
+    if SCORE_CODE.fullmatch(raw):
+        code = raw.upper()
+        names = _score_names(conn)
+        name = names.get(code)
+        err = ""
+        path = _DB["path"]
+        if path and Path(path).exists():
+            try:
+                import stock_value
+                got, err = stock_value.refresh(path, code)
+                name = got or name
+            except Exception as e:
+                err = f"값을 받지 못했어요 ({str(e)[:60]})"
+        note = f'<div class="card warn">{escape(err)} 예전에 받아 둔 값이 있으면 그걸로 보여 드려요.</div>' if err else ""
+        if q.get("saved"):
+            note = '<div class="card">✔ 저장했어요.</div>' + note
+        return score_detail(conn, code, name, note)
+    names = _score_names(conn)
+    hits = [(c, n) for c, n in names.items() if raw.replace(" ", "") in (n or "").replace(" ", "")]
+    if len(hits) == 1:
+        return score_detail(conn, hits[0][0], hits[0][1], "")
+    if not hits:
+        return page("점수표", score_search_form(raw) + '<div class="card">이름으로 찾지 못했어요. 공시에 나온 종목이나 이미 평가한 종목만 이름으로 찾을 수 있어요. '
+                    '다른 종목은 <b>6자리 종목 코드</b>(예: 삼성전자 005930)로 넣어 주세요.</div>')
+    links = "".join(f'<div class="card"><a class="big" href="/score?code={quote(c)}">{escape(n)}</a> '
+                    f'<span class="muted">{escape(c)}</span></div>' for c, n in sorted(hits, key=lambda h: h[1] or "")[:30])
+    return page("점수표", score_search_form(raw) + f'<p class="muted">{len(hits)}개 종목이 맞아요. 하나를 골라 주세요.</p>' + links)
+
+
 def latest_excel(conn):
     if not has_table(conn, "runs"):
         return None
@@ -2290,6 +2487,8 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     body = view_ideas(conn, q)
                 elif url.path == "/ranking":
                     body = view_ranking(conn, q)
+                elif url.path == "/score":
+                    body = view_score(conn, q)
                 elif url.path == "/new":
                     body = view_new(conn, q)
                 elif url.path == "/stock":
@@ -2333,6 +2532,20 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 if errors:
                     qs["errs"] = json.dumps(errors, ensure_ascii=False)
                 return self._redirect("/settings?" + urlencode(qs))
+            if path == "/score/save":
+                n = min(int(self.headers.get("Content-Length") or 0), 8192)
+                form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore"),
+                                                     keep_blank_values=True).items()}
+                code = form.get("code", "")
+                if not SCORE_CODE.fullmatch(code):
+                    return self._redirect("/score")
+                import score_card as sc
+                conn = sqlite3.connect(db_path)
+                try:
+                    sc.save(conn, code, form.get("name", ""), form)
+                finally:
+                    conn.close()
+                return self._redirect("/score?" + urlencode({"code": code, "saved": 1}))
             if path in ("/calendar/add", "/calendar/del"):
                 n = min(int(self.headers.get("Content-Length") or 0), 8192)
                 form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore")).items()}
@@ -2418,6 +2631,7 @@ def serve(db_path, host="127.0.0.1", port=8766, status_path=None, child_env=None
     db_path = Path(db_path)
     status_path = status_path or db_path.parent / "status.json"
     _DATA_DIR["path"] = str(db_path.parent)
+    _DB["path"] = str(db_path)
     run_cmd = [sys.executable, str(Path(__file__).resolve().parent / "dart_server.py"), "run"]
     server = ThreadingHTTPServer((host, port), make_handler(db_path, status_path, run_cmd, child_env, get_key, save_key, settings_api))
     print(f"대시보드: http://{host}:{port}  (끄려면 Ctrl+C)", flush=True)

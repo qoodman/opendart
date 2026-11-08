@@ -72,6 +72,38 @@ def fetch(code, session=None, timeout=10):
         raise ValueError_("응답을 읽지 못함")
 
 
+def fetch_full(code, session=None, timeout=10):
+    """종목 이름까지: (이름 또는 None, {per, pbr, div, eps, bps})"""
+    s = session or requests
+    r = s.get(INTEGRATION_URL.format(code=code), headers=HEADERS, timeout=timeout)
+    if r.status_code != 200:
+        raise ValueError_(f"HTTP {r.status_code}")
+    try:
+        payload = r.json()
+    except ValueError:
+        raise ValueError_("응답을 읽지 못함")
+    return (payload.get("stockName") if isinstance(payload, dict) else None), parse(payload)
+
+
+def refresh(db_path, code, session=None):
+    """한 종목의 값을 받아서 저장 (화면에서 종목을 열 때마다 최신으로). (이름 또는 None, 실패 문구 또는 "") 를 돌려줌.
+    실패해도 예전에 받아 둔 값은 그대로 둠."""
+    conn = sqlite3.connect(db_path)
+    try:
+        ensure(conn)
+        today = dt.date.today().isoformat()
+        try:
+            name, v = fetch_full(code, session=session)
+        except Exception as e:
+            return None, f"네이버 증권에서 값을 받지 못했어요 ({e})"
+        conn.execute("INSERT OR REPLACE INTO valuation VALUES (?,?,?,?,?,?,?)",
+                     (code, v["per"], v["pbr"], v["div"], v["eps"], v["bps"], today))
+        conn.commit()
+        return name, ""
+    finally:
+        conn.close()
+
+
 def sync(db_path, log=print, sleep=0.4, session=None):
     """공시 종목들의 밸류에이션을 받아 저장. 오늘 받은 종목은 건너뜀."""
     conn = sqlite3.connect(db_path)
@@ -83,6 +115,10 @@ def sync(db_path, log=print, sleep=0.4, session=None):
                 "SELECT DISTINCT 종목코드 FROM summary WHERE 종목코드 IS NOT NULL AND 종목코드 != ''")]
         except sqlite3.OperationalError:
             return {"대상": 0, "저장": 0, "건너뜀": 0, "실패": 0}
+        try:    # 점수표로 직접 평가한 종목도 같이 받음
+            codes += [r[0] for r in conn.execute("SELECT code FROM scorecard_stock") if r[0] not in codes]
+        except sqlite3.OperationalError:
+            pass
         today = dt.date.today().isoformat()
         done = {r[0] for r in conn.execute("SELECT code FROM valuation WHERE fetched=?", (today,))}
         todo = [c for c in codes if c not in done]
