@@ -712,6 +712,23 @@ def net_trend(conn, code):
             series.append((day, cum))
         out.append(dict(who=who, total=cum, buy=a["buy"], sell=a["sell"],
                         first=series[0][0], last=series[-1][0], series=series))
+    # 공시 요약표에서 읽은 보유비율 (분석 형식 6 이상으로 다시 분석한 공시만 있음)
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(detail)")}
+        ratio_rows = conn.execute(
+            "SELECT 제출인, 제출일, MAX(직전보유비율), MAX(이번보유비율), MAX(이번보유수량) FROM detail "
+            "WHERE 종목코드=? AND 이번보유비율 IS NOT NULL GROUP BY 제출인, 접수번호 ORDER BY 제출일, 접수번호",
+            (code,)).fetchall() if "이번보유비율" in cols else []
+    except sqlite3.OperationalError:
+        ratio_rows = []
+    by_who = {}
+    for who, sub, pp, np_, nq in ratio_rows:
+        by_who.setdefault(who or "(이름 없음)", []).append((sub, pp, np_, nq))
+    for r in out:
+        hist = by_who.get(r["who"])
+        if hist:
+            r["ratios"] = [h[2] for h in hist]
+            r["hold"] = dict(date=hist[-1][0], prev=hist[-1][1], now=hist[-1][2], qty=hist[-1][3])
     out.sort(key=lambda r: (-abs(r["total"]), r["who"]))
     return out
 
@@ -728,8 +745,21 @@ def trend_block(conn, code, show=8):
     def card(r):
         cls = "up" if r["total"] > 0 else "down" if r["total"] < 0 else ""
         arrow = "▲ 늘림" if r["total"] > 0 else "▼ 줄임" if r["total"] < 0 else "변동 없음"
+        hold = ""
+        if r.get("hold"):
+            h = r["hold"]
+            if h["prev"] is None:
+                chg = ' <span class="muted">(신규 보고)</span>'
+            else:
+                d = h["now"] - h["prev"]
+                chg = (f' <span class="{"up" if d > 0 else "down" if d < 0 else ""}">'
+                       f'(직전 {h["prev"]:.2f}% → {d:+.2f}%p)</span>')
+            hold = (f'<div style="margin-top:4px">보유비율 <b>{h["now"]:.2f}%</b>{chg}'
+                    + (f' · {h["qty"]:,.0f}주' if h["qty"] else "")
+                    + f' <span class="muted">· {escape(str(h["date"]))} 공시</span></div>'
+                    + (sparkline(r["ratios"]) if len(r["ratios"]) >= 2 else ""))
         return (f'<div class="card"><div class="row"><div><b>{escape(r["who"])}</b></div>'
-                f'<div class="{cls}"><b>{r["total"]:+,.0f}주</b> {arrow}</div></div>'
+                f'<div class="{cls}"><b>{r["total"]:+,.0f}주</b> {arrow}</div></div>{hold}'
                 f'<div class="muted">매수 {r["buy"]:,.0f}주 · 매도 {r["sell"]:,.0f}주 · '
                 f'{escape(r["first"])} ~ {escape(r["last"])}</div>{net_line(r["series"])}</div>')
 
@@ -740,9 +770,10 @@ def trend_block(conn, code, show=8):
     return ('<h2>지분 변화 추이</h2>'
             f'<div class="muted" style="margin-bottom:6px">늘린 곳 <b class="up">{up}</b> · 줄인 곳 <b class="down">{down}</b>'
             + (f' · 변동 없음 {flat}' if flat else "") + '</div>' + head_cards + more
-            + '<p class="muted">공시에 나온 증감(주)을 변동일 순서로 쌓은 값이에요. 보유 주식 수나 비율이 아니라 '
+            + '<p class="muted">아래 추이 선과 순증감은 공시에 나온 증감(주)을 변동일 순서로 쌓은 값이에요. '
               '<b>이 기간 공시에 잡힌 변화량의 합</b>이고, 처음 공시 이전 보유분은 들어 있지 않아요. '
-              '같은 거래가 정정 공시로 다시 올라오면 겹쳐 셀 수 있어요.</p>')
+              '같은 거래가 정정 공시로 다시 올라오면 겹쳐 셀 수 있어요. '
+              '보유비율은 공시 요약표에 적힌 값이고, 다시 분석한 공시에만 나와요.</p>')
 
 
 def value_map(conn):

@@ -33,7 +33,7 @@ except ImportError:
 
 BASE = "https://opendart.fss.or.kr/api"
 DATE_RE = re.compile(r"(\d{4})\s*[.\-년/]\s*(\d{1,2})\s*[.\-월/]\s*(\d{1,2})")
-PARSE_VERSION = 5       # 분석 결과 형식이 바뀌면 올림 (저장된 분석 결과를 다시 만듦)
+PARSE_VERSION = 6       # 분석 결과 형식이 바뀌면 올림 (저장된 분석 결과를 다시 만듦)
 HEARTBEAT = 30          # 명령줄 버전의 ♥ 줄 간격(초)
 WARN_IDLE = 90          # 응답 없음 경고(초)
 DEAD_IDLE = 180         # 다시 시작 권장(초)
@@ -303,6 +303,53 @@ def explain_table(tb):
     return desc, rows
 
 
+HOLD_KEYS = ("직전보유수량", "직전보유비율", "이번보유수량", "이번보유비율")
+
+
+def _squash(s):
+    return re.sub(r"\s+", "", s or "")
+
+
+def parse_holding(soup):
+    """요약정보 표의 '보유주식등의 수 및 보유비율' 구역 → {직전보유수량, 직전보유비율, 이번보유수량, 이번보유비율}.
+    구역은 제목 줄(보유주식등의 수 | 보유비율), 직전 보고서 줄, 이번 보고서 줄로 되어 있고, 바로 아래에
+    '의결권의 수 및 보유비율' 구역이 같은 모양으로 이어지므로 구역을 구분해서 읽음. 못 찾으면 모두 None."""
+    out = dict.fromkeys(HOLD_KEYS)
+    for tb in soup.find_all("table"):
+        flat = _squash(tb.get_text(" "))
+        if "보유주식등의수" not in flat or "이번보고서" not in flat:
+            continue
+        section, qcol, pcol, got = None, None, None, {}
+        for row in expand_table(tb):
+            cells = [_squash(c) for c in row]
+            if not cells:
+                continue
+            if "보유주식등의수" in cells[0]:
+                section = "hold"
+            elif "의결권" in cells[0]:
+                section = "vote"
+            if section != "hold":
+                continue
+            if "보유주식등의수" in cells[1:] and any("보유비율" in c for c in cells[1:]):
+                qcol = cells.index("보유주식등의수", 1)
+                pcol = next(i for i, c in enumerate(cells) if i > 0 and "보유비율" in c)
+                continue
+            for j, c in enumerate(cells):
+                if c in ("직전보고서", "이번보고서") and j > 0:
+                    q = qcol if qcol is not None else j + 1
+                    p = pcol if pcol is not None else j + 2
+                    if q < len(row) and p < len(row):
+                        pct = num(row[p])
+                        got[c] = (num(row[q]), pct if pct is not None and 0 <= pct <= 100 else None)
+                    break
+        if "이번보고서" in got:
+            pq, pp = got.get("직전보고서", (None, None))
+            nq, np_ = got["이번보고서"]
+            out.update(직전보유수량=pq, 직전보유비율=pp, 이번보유수량=nq, 이번보유비율=np_)
+            return out
+    return out
+
+
 def parse_one(rp, cache, body_word):
     xml = read_zip(zpath(cache, rp["rcept_no"]))
     if body_word and body_word not in xml:   # 본문 필터: 파싱 전에 문자열로 먼저 거름
@@ -311,6 +358,7 @@ def parse_one(rp, cache, body_word):
     m = re.search(r"보유\s*목적[^가-힣]*([가-힣()\s]{2,30})", soup.get_text(" "))
     purpose = m.group(1).strip() if m else ""
     rows = []
+    hold = parse_holding(soup)
     for tb in soup.find_all("table"):
         head = tb.get_text(" ")
         if "변동일" not in head or "단가" not in head:
@@ -323,7 +371,7 @@ def parse_one(rp, cache, body_word):
                 제출일=_ymd(rp["rcept_dt"]), 접수번호=rp["rcept_no"], 보유목적=purpose,
                 제출인=rp["flr_nm"], 보고자=who,
                 변동일=f"{y}-{int(mo):02d}-{int(d):02d}",
-                방법=method, 종류=kind, 증감=qty, 단가=price))
+                방법=method, 종류=kind, 증감=qty, 단가=price, **hold))
     return rows
 
 
