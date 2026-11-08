@@ -2190,7 +2190,7 @@ def view_ranking(conn, q):
 
 
 # ---------------- 점수표 (오일전문가 100점 점수표) ----------------
-_DB = {"path": None}           # serve()가 채움: 점수표에서 값을 새로 받아 저장할 때 씀
+_DB = {"path": None, "get_key": None}    # serve()가 채움: 점수표에서 값을 새로 받아 저장할 때 씀 (DART 키 포함)
 SCORE_CODE = re.compile(r"[0-9A-Za-z]{6}")
 SCORE_TABS = {"mine": "내가 평가한 종목", "auto": "자동 3항목 순위 (35점 만점)"}
 
@@ -2242,9 +2242,10 @@ def _pts(p, mx):
 
 def score_detail(conn, code, name, note=""):
     import score_card as sc
+    import score_auto
     vals = value_map(conn).get(code) or {}
     answers = sc.load(conn, code)
-    r = sc.compute(vals, answers)
+    r = sc.compute(vals, answers, score_auto.load_auto(conn, code))
     g, gtext = r["grade"]
     pct = _clamp(r["total"], 0, 100)
     fetched = ""
@@ -2262,11 +2263,12 @@ def score_detail(conn, code, name, note=""):
     head = (f'<div class="row"><div><span class="big">{escape(name or code)}</span> <span class="muted">{escape(code)}</span></div>'
             f'<div>{links}</div></div>')
     if r["full"]:
-        status = f'<div class="muted">13개 항목을 모두 반영한 점수예요.</div>'
+        status = (f'<div class="muted">13개 항목을 모두 반영한 점수예요. (자동 {3 + r["n_auto"]}개 · 직접 {r["n_manual"]}개)</div>')
     else:
         gb, _ = r["grade_best"]
-        status = (f'<div class="muted">{r["n_known"]}/{sc.N_ITEMS}개 항목 기준이에요. 못 채운 {len(r["missing"])}개를 모두 '
-                  f'만점으로 받아도 최대 <b>{r["best"]:g}점 ({gb}등급)</b>이에요. 아래에서 고르고 저장하면 점수가 바뀌어요.</div>')
+        status = (f'<div class="muted">{r["n_known"]}/{sc.N_ITEMS}개 항목 기준이에요 (자동 {3 + r["n_auto"]}개 · 직접 {r["n_manual"]}개). '
+                  f'못 채운 {len(r["missing"])}개를 모두 만점으로 받아도 최대 <b>{r["best"]:g}점 ({gb}등급)</b>이에요. '
+                  f'아래에서 고르고 저장하면 점수가 바뀌어요.</div>')
     top = (f'<div class="card"><div class="row"><div><span class="big" style="font-size:30px">{r["total"]:g}</span>'
            f'<span class="muted"> / 100점</span></div>'
            f'<div><b class="big">{g}등급</b>{"" if r["full"] else " <span class=chip>잠정</span>"}'
@@ -2284,22 +2286,36 @@ def score_detail(conn, code, name, note=""):
                 if it["points"] is None:
                     sub += '<div class="warn" style="font-size:12px">값을 받지 못해 점수에 넣지 않았어요</div>'
             else:
-                opts = '<option value="">미입력</option>' + "".join(
+                first = f"자동 추정 사용 ({it['auto_text']})" if it["auto_text"] else "미입력"
+                opts = f'<option value="">{escape(first)}</option>' + "".join(
                     f'<option value="{escape(v)}"{" selected" if v == it["value"] else ""}>{escape(lbl)} ({pt}점)</option>'
                     for v, lbl, pt in it["options"])
                 right = f'<select name="{it["key"]}" style="max-width:100%">{opts}</select> {_pts(it["points"], it["max"])}점'
                 sub = f'<div class="muted" style="font-size:12px">{escape(it["help"])}</div>' if it["help"] else ""
+                if it["source"] == "자동":
+                    sub += (f'<div style="font-size:12px"><span class="chip">자동 추정 · {escape(it["auto_from"])}</span> '
+                            f'<span class="muted">{escape(it["auto_note"])}</span></div>')
+                elif it["source"] == "직접":
+                    sub += '<div style="font-size:12px"><span class="chip">직접 선택</span>'
+                    if it["auto_text"]:
+                        sub += f' <span class="muted">자동 추정은 \'{escape(it["auto_text"])}\' ({escape(it["auto_note"])})</span>'
+                    sub += '</div>'
             rows.append(f'<div style="padding:7px 0;border-top:1px solid var(--line)"><div class="row"><div>{escape(it["name"])}'
                         f' <span class="muted">(만점 {it["max"]})</span></div><div>{right}</div></div>{sub}</div>')
         blocks.append(f'<div class="card"><div class="row"><b>{escape(d["name"])}</b>'
                       f'<span>{d["got"]:g}<span class="muted">/{d["max"]}점</span></span></div>{"".join(rows)}</div>')
     form = (f'<form method="post" action="/score/save"><input type="hidden" name="code" value="{escape(code)}">'
             f'<input type="hidden" name="name" value="{escape(name or "")}">' + "".join(blocks)
-            + '<button style="width:100%;padding:11px">고른 항목 저장</button></form>')
+            + '<button style="width:100%;padding:11px">저장하고 내 순위에 넣기</button></form>'
+            + ('<form method="post" action="/score/save" style="margin-top:8px">'
+               f'<input type="hidden" name="code" value="{escape(code)}"><input type="hidden" name="remove" value="1">'
+               '<button class="ghost" style="width:100%">내 순위에서 빼기 (직접 고른 값도 지움)</button></form>'
+               if code in dict(sc.evaluated(conn)) else ""))
     foot = ('<p class="muted">PER·PBR·배당수익률은 네이버 증권 값이고 '
             + (f'{escape(fetched)}에 받았어요. ' if fetched else "") +
             '점수 기준은 \'오일전문가 점수표\'를 그대로 썼어요. 표에 없는 경우(적자·자본잠식·배당 없음)는 0점으로 봤어요. '
-            '나머지 항목은 직접 판단해서 고르는 값이고, 투자 추천이 아니에요.</p>')
+            '\'자동 추정\' 항목은 재무·공시 숫자로 계산한 추정값이라 틀릴 수 있고, 직접 고르면 그 값이 우선해요. '
+            '투자 추천이 아니에요.</p>')
     return page(f"{name or code} — 점수표", idea_tabs_row() + score_search_form() + (note or "") + head + top + form + foot)
 
 
@@ -2310,9 +2326,10 @@ def score_rank(conn, q):
     vals = value_map(conn)
     rows = []
     if tab == "mine":
-        allans = sc.load_all(conn)
+        import score_auto
+        allans, allauto = sc.load_all(conn), score_auto.load_auto_all(conn)
         for code, name in sc.evaluated(conn):
-            r = sc.compute(vals.get(code) or {}, allans.get(code, {}))
+            r = sc.compute(vals.get(code) or {}, allans.get(code, {}), allauto.get(code))
             rows.append((r["total"], r["best"], code, names.get(code) or name or code, r))
         rows.sort(key=lambda x: (-x[0], -x[1], x[3]))
         cards = []
@@ -2381,7 +2398,17 @@ def view_score(conn, q):
                 name = got or name
             except Exception as e:
                 err = f"값을 받지 못했어요 ({str(e)[:60]})"
-        note = f'<div class="card warn">{escape(err)} 예전에 받아 둔 값이 있으면 그걸로 보여 드려요.</div>' if err else ""
+        errs = [err] if err else []
+        if path and Path(path).exists():
+            try:
+                import score_auto
+                key = _DB["get_key"]() if _DB.get("get_key") else ""
+                errs += score_auto.refresh(path, code, dart_key=key,
+                                           cache_dir=str(Path(_DATA_DIR["path"] or ".") / "dart_cache"))
+            except Exception as e:
+                errs.append(f"자동 추정을 만들지 못했어요 ({str(e)[:60]})")
+        note = ('<div class="card warn">' + "<br>".join(escape(e) for e in errs)
+                + '<div class="muted">예전에 받아 둔 값이 있으면 그걸로 보여 드려요. 못 받은 항목은 직접 고를 수 있어요.</div></div>') if errs else ""
         if q.get("saved"):
             note = '<div class="card">✔ 저장했어요.</div>' + note
         return score_detail(conn, code, name, note)
@@ -2556,6 +2583,9 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 import score_card as sc
                 conn = sqlite3.connect(db_path)
                 try:
+                    if form.get("remove"):
+                        sc.remove(conn, code)
+                        return self._redirect(score_url(view="rank", st="mine"))
                     sc.save(conn, code, form.get("name", ""), form)
                 finally:
                     conn.close()
@@ -2646,6 +2676,7 @@ def serve(db_path, host="127.0.0.1", port=8766, status_path=None, child_env=None
     status_path = status_path or db_path.parent / "status.json"
     _DATA_DIR["path"] = str(db_path.parent)
     _DB["path"] = str(db_path)
+    _DB["get_key"] = get_key
     run_cmd = [sys.executable, str(Path(__file__).resolve().parent / "dart_server.py"), "run"]
     server = ThreadingHTTPServer((host, port), make_handler(db_path, status_path, run_cmd, child_env, get_key, save_key, settings_api))
     print(f"대시보드: http://{host}:{port}  (끄려면 Ctrl+C)", flush=True)

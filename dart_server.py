@@ -453,6 +453,23 @@ def run_market_policy(log=print):
         except Exception as e:
             out["flow"] = f"실패: {e}"
             log(f"순매수 실패: {e}")
+        try:    # 점수표로 평가한 종목의 자동 추정(네이버 재무·DART)도 같이 갱신
+            import score_auto
+            conn = sqlite3.connect(results_db())
+            try:
+                codes = [r[0] for r in conn.execute("SELECT code FROM scorecard_stock")]
+            except sqlite3.OperationalError:
+                codes = []
+            conn.close()
+            key = read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", "")
+            fails = 0
+            for c in codes:
+                fails += len(score_auto.refresh(str(results_db()), c, dart_key=key, cache_dir=str(data_dir() / "dart_cache")))
+            out["score_auto"] = {"대상": len(codes), "실패": fails}
+            log(f"점수표 자동 추정: 대상 {len(codes)}개 · 실패 {fails}")
+        except Exception as e:
+            out["score_auto"] = f"실패: {e}"
+            log(f"점수표 자동 추정 실패: {e}")
     if env("DART_POLICY", "1") != "0":
         try:
             import stock_policy

@@ -117,9 +117,10 @@ def auto_total(vals):
 
 
 # ---------------- 전체 계산 ----------------
-def compute(vals, answers):
-    """vals: {per, pbr, div}, answers: {키: 값} → 항목별 점수와 합계.
-    값을 모르는(미입력·데이터 없음) 항목은 0점으로 더하지 않고 '미확정'으로 두고, 최대 가능 점수를 같이 계산."""
+def compute(vals, answers, auto=None):
+    """vals: {per, pbr, div}, answers: {키: 값} (직접 고른 값), auto: {키: (값, 근거, 출처)} (자동 추정) → 항목별 점수와 합계.
+    직접 고른 값이 우선이고, 없으면 자동 추정을 쓰고, 둘 다 없으면 '미확정'(0점으로 더하지 않고 최대 가능 점수만 계산)."""
+    auto = auto or {}
     ap = auto_points(vals)
     shown = {"per": vals.get("per"), "pbr": vals.get("pbr"), "dy": vals.get("div")}
     items = {}
@@ -129,9 +130,16 @@ def compute(vals, answers):
         items[key] = dict(key=key, section=sec, name=name, max=mx, points=ap[key], auto=True, rule=rule,
                           text=("-" if v is None else f"{v:,.2f}{unit}"))
     for key, sec, name, mx, opts, help_ in MANUAL:
-        got = next((o for o in opts if o[0] == (answers or {}).get(key)), None)
+        explicit = next((o for o in opts if o[0] == (answers or {}).get(key)), None)
+        a = auto.get(key)
+        a_opt = next((o for o in opts if a and o[0] == a[0]), None)
+        got = explicit or a_opt
+        source = "직접" if explicit else "자동" if a_opt else ""
         items[key] = dict(key=key, section=sec, name=name, max=mx, points=got[2] if got else None, auto=False,
-                          help=help_, text=got[1] if got else "미입력", options=opts, value=got[0] if got else "")
+                          help=help_, text=got[1] if got else "미입력", options=opts,
+                          value=explicit[0] if explicit else "",          # 선택 칸에 보일 직접 선택값
+                          source=source, auto_text=a_opt[1] if a_opt else "", auto_note=a[1] if a_opt else "",
+                          auto_from=a[2] if a_opt else "")
     ordered = [items[k] for k in ORDER]
     known = sum(i["points"] for i in ordered if i["points"] is not None)
     missing = [i for i in ordered if i["points"] is None]
@@ -142,7 +150,9 @@ def compute(vals, answers):
         sections[sec] = dict(name=SECTIONS[sec], items=its, max=sum(i["max"] for i in its),
                              got=sum(i["points"] for i in its if i["points"] is not None))
     return dict(items=ordered, sections=sections, total=known, best=best, full=not missing, missing=missing,
-                grade=grade(known), grade_best=grade(best), n_known=N_ITEMS - len(missing))
+                grade=grade(known), grade_best=grade(best), n_known=N_ITEMS - len(missing),
+                n_auto=sum(1 for i in ordered if not i["auto"] and i["source"] == "자동"),
+                n_manual=sum(1 for i in ordered if not i["auto"] and i["source"] == "직접"))
 
 
 # ---------------- 저장 ----------------
@@ -163,10 +173,15 @@ def save(conn, code, name, answers):
             conn.execute("INSERT OR REPLACE INTO scorecard VALUES (?,?,?,?)", (code, key, v, now))
         else:
             conn.execute("DELETE FROM scorecard WHERE code=? AND item=?", (code, key))
-    if conn.execute("SELECT COUNT(*) FROM scorecard WHERE code=?", (code,)).fetchone()[0]:
-        conn.execute("INSERT OR REPLACE INTO scorecard_stock VALUES (?,?,?)", (code, (name or "")[:60], now))
-    else:
-        conn.execute("DELETE FROM scorecard_stock WHERE code=?", (code,))
+    conn.execute("INSERT OR REPLACE INTO scorecard_stock VALUES (?,?,?)", (code, (name or "")[:60], now))
+    conn.commit()
+
+
+def remove(conn, code):
+    """순위 목록에서 빼고 직접 고른 값도 지움"""
+    ensure(conn)
+    conn.execute("DELETE FROM scorecard WHERE code=?", (code,))
+    conn.execute("DELETE FROM scorecard_stock WHERE code=?", (code,))
     conn.commit()
 
 
