@@ -1499,14 +1499,10 @@ def perf_sort_form(opts, cur, hidden):
     return f'<form method="get" class="filters" style="margin:6px 0">{hid}{select("s", opts, cur)}<button>적용</button></form>'
 
 
-def view_performance(conn, q):
+def perf_compute(conn, h, ex, kind=""):
+    """성적표 건별 결과: 기관이 공시를 낸 날 종가에 샀다고 보고 h(일 또는 'now') 뒤 수익률과 코스피 대비 초과수익.
+    성적표 화면과 종목 순위가 같이 씀. [{who, code, name, sub, end, p0, p1, r, x, amt, hold}]"""
     import stock_market
-    if not has_table(conn, "summary") or not has_table(conn, "prices"):
-        return page("운용사별 성적표", '<div class="card">주가와 보고서 수집이 한 번 끝나야 볼 수 있습니다. '
-                                    '위쪽 <b>지금 수집 → 보고서만</b>을 눌러 주세요.</div>')
-    h = q.get("h") if perf_h_ok(q.get("h") or "") else "90"
-    ex = q.get("ex") if q.get("ex") in ("0", "1") else "1"
-    kind = q.get("k") if q.get("k") in PERF_KINDS else ""
     today = dt.date.today()
 
     prices = {}
@@ -1546,6 +1542,17 @@ def view_performance(conn, q):
         evs.append(dict(who=who or "(이름 없음)", code=code, name=names.get(code) or code, sub=sub,
                         end=end.isoformat(), p0=p0, p1=p1, r=r, x=r - m,
                         amt=float(amt or 0), hold=(end - start).days))
+    return evs
+
+
+def view_performance(conn, q):
+    if not has_table(conn, "summary") or not has_table(conn, "prices"):
+        return page("운용사별 성적표", '<div class="card">주가와 보고서 수집이 한 번 끝나야 볼 수 있습니다. '
+                                    '위쪽 <b>지금 수집 → 보고서만</b>을 눌러 주세요.</div>')
+    h = q.get("h") if perf_h_ok(q.get("h") or "") else "90"
+    ex = q.get("ex") if q.get("ex") in ("0", "1") else "1"
+    kind = q.get("k") if q.get("k") in PERF_KINDS else ""
+    evs = perf_compute(conn, h, ex, kind)
 
     s = q.get("s") if q.get("s") in (PERF_SORTS_DETAIL if q.get("who") else PERF_SORTS) else ""
     keep = {"s": s} if s else {}
@@ -2008,7 +2015,7 @@ def view_ideas(conn, q):
 
 
 # ---------------- 종목 순위 ----------------
-RANK_MAX = 82          # 항목별 최고점의 합 (기관 24 + 평단 15 + 목표가 15 + 수급 10 + 밸류 10 + 지분 8)
+RANK_MAX = 92          # 항목별 최고점의 합 (기관 24 + 평단 15 + 목표가 15 + 수급 10 + 밸류 10 + 지분 8 + 운용사 성적 10)
 RANK_SORTS = {"": "정렬: 종합 점수순", "up": "정렬: 목표가 상승여력순", "disc": "정렬: 기관 평단보다 싼 순",
               "amt": "정렬: 기관 매수금액순", "n": "정렬: 함께 산 기관 수순"}
 RANK_HELP = (
@@ -2017,7 +2024,8 @@ RANK_HELP = (
     "<b>증권사 목표가 상승여력</b> 최대 15점 (2곳 이상 의견이 있을 때만) · "
     "<b>최근 5거래일 순매수</b> 외국인·기관 각 +5점 (순매도면 각 -3점) · "
     "<b>PER·PBR</b> 낮을수록 최대 10점 (높으면 감점) · "
-    "<b>공시 기간 안 지분을 늘린 곳 − 줄인 곳</b> 1곳당 ±4점 (최대 ±8점)")
+    "<b>공시 기간 안 지분을 늘린 곳 − 줄인 곳</b> 1곳당 ±4점 (최대 ±8점) · "
+    "<b>산 운용사의 과거 성적</b> 90일 뒤 코스피 대비 평균 초과수익, 이 종목을 뺀 5건 이상 기록이 있는 곳만 (−5~+10점)")
 
 
 def _clamp(v, lo, hi):
@@ -2058,6 +2066,19 @@ def rank_stocks(conn, w, ex, m):
             nets.setdefault(code, {})[who] = d or 0
     except sqlite3.OperationalError:
         pass
+    # 산 운용사의 과거 성적(성적표와 같은 계산, 90일 뒤). 이 종목의 기록은 빼고 평균을 내서 자기 결과가 되먹임되지 않게 함
+    try:
+        evs = perf_compute(conn, "90", ex, "")
+    except Exception:
+        evs = []
+    tot, tot_code = {}, {}
+    for e in evs:
+        a = tot.setdefault(e["who"], [0, 0.0])
+        a[0] += 1
+        a[1] += e["x"]
+        b = tot_code.setdefault((e["who"], e["code"]), [0, 0.0])
+        b[0] += 1
+        b[1] += e["x"]
     out = []
     for r in rows:
         code = r["code"]
@@ -2100,6 +2121,17 @@ def rank_stocks(conn, w, ex, m):
             f.append(("지분 증감", _clamp((u - d) * 4, -8, 8), f"늘린 {u}곳 · 줄인 {d}곳"))
         else:
             missing.append("지분")
+        means = []
+        for who in (r["whos"] or "").split(","):
+            n_all, x_all = tot.get(who, (0, 0.0))
+            n_c, x_c = tot_code.get((who, code), (0, 0.0))
+            if n_all - n_c >= PERF_MIN_N:
+                means.append((x_all - x_c) / (n_all - n_c))
+        if means:
+            mean = sum(means) / len(means)
+            f.append(("운용사 성적", round(_clamp(mean * 100 * 0.5, -5, 10), 1), f"초과수익 평균 {mean:+.1%} ({len(means)}곳)"))
+        else:
+            missing.append("운용사 성적")
         out.append(dict(r=r, close=close, avg=avg, disc=disc, up=up, f=f, missing=missing,
                         score=round(sum(x[1] for x in f), 1)))
     return out
