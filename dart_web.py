@@ -40,6 +40,8 @@ main{max-width:980px;margin:0 auto;padding:14px 16px 40px}
 .runbar{display:flex;gap:8px;align-items:center;margin-left:auto}.runbar .runbtn{margin-left:0}
 .runbtn.alt{background:var(--chip);color:var(--fg)}.runmenu .dot2{color:var(--up)}
 form.filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+textarea{font:inherit;width:100%;margin-top:6px;padding:7px 9px;border:1px solid var(--line);border-radius:8px;
+background:var(--card);color:var(--fg)}
 input,select{font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:8px;
 background:var(--card);color:var(--fg);min-width:0}input[type=search]{flex:1 1 180px}
 button{font:inherit;padding:7px 14px;border:0;border-radius:8px;background:var(--accent);
@@ -159,7 +161,7 @@ def page(title, body, refresh=False, charts=False):
 <link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#2b5a9e">
 <link rel="icon" href="/icon-192.png"><link rel="apple-touch-icon" href="/icon-192.png">
 </head><body>
-<header><div class="hrow"><b>DART 단순투자</b>{header_actions()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/ranking">순위</a><a href="/performance">성적표</a><a href="/reports">리포트</a><a href="/market">시장</a><a href="/policy">정책</a><a href="/calendar">달력</a><a href="/new">새 공시</a>
+<header><div class="hrow"><b>DART 단순투자</b>{header_actions()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/ranking">순위</a><a href="/performance">성적표</a><a href="/reports">리포트</a><a href="/market">시장</a><a href="/policy">정책</a><a href="/radar">대비</a><a href="/calendar">달력</a><a href="/new">새 공시</a>
 <a href="/settings">설정</a>{extra}</nav>
 </header><main>{body}</main>{"<script>" + CHART_JS + "</script>" if charts else ""}</body></html>""".encode()
 
@@ -2424,6 +2426,112 @@ def view_score(conn, q):
     return page("점수표", idea_tabs_row() + score_search_form(raw) + f'<p class="muted">{len(hits)}개 종목이 맞아요. 하나를 골라 주세요.</p>' + links)
 
 
+# ---------------- 대비 레이더 (뜬금없는 외부 변수) ----------------
+RADAR_FILTERS = {"": "진행·감시 중", "done": "반영됨·해소", "all": "전체"}
+RADAR_HINTS = (
+    "외국인 자금의 국적별 순매수(영국·미국 등) · 해외 세제·연금·상속세 개편 · 국내 세제·건보료(배당·연금·코인) · "
+    "결제 주기·거래시간·공매도 같은 시장 제도 · 지수 편입·제외 심사(MSCI·FTSE) · 환율·금리 · 산업 규제")
+
+
+def _radar_form(it=None, action="/radar/add", label="추가"):
+    it = it or {}
+    v = lambda k: escape(str(it.get(k) or ""))
+    import radar as rd
+    opt = lambda items, cur: "".join(f'<option value="{escape(x)}"{" selected" if x == cur else ""}>{escape(x)}</option>' for x in items)
+    return (f'<form method="post" action="{action}" style="margin-top:8px">'
+            + (f'<input type="hidden" name="id" value="{it["id"]}">' if it.get("id") else "")
+            + f'<input type="text" name="title" value="{v("title")}" placeholder="제목 (예: 영국 연금 상속세 과세)" style="width:100%" required>'
+            f'<div class="filters" style="margin-top:6px"><select name="kind">{opt(rd.KINDS, it.get("kind"))}</select>'
+            f'<select name="direction">{opt(rd.DIRECTIONS, it.get("direction"))}</select>'
+            f'<input type="date" name="when_date" value="{v("when_date")}" title="시행·발생일 (모르면 비워 두세요)">'
+            f'<input type="text" name="when_note" value="{v("when_note")}" placeholder="날짜 메모 (예: 내년 4월부터)" style="flex:1 1 160px"></div>'
+            f'<textarea name="summary" rows="4" placeholder="무슨 일인지 (기사 요약)">{v("summary")}</textarea>'
+            f'<textarea name="impact" rows="2" placeholder="주식시장에 어떤 영향이 있을 것 같은지 (가설)" style="margin-top:6px">{v("impact")}</textarea>'
+            f'<textarea name="check_items" rows="2" placeholder="확인할 지표 (예: 영국계 월간 순매도, 환율)" style="margin-top:6px">{v("check_items")}</textarea>'
+            f'<textarea name="prep" rows="2" placeholder="대비 메모 (내가 할 일)" style="margin-top:6px">{v("prep")}</textarea>'
+            f'<input type="text" name="source" value="{v("source")}" placeholder="출처 (예: 매일경제 2026-11-06)" style="width:100%;margin-top:6px">'
+            f'<input type="text" name="source_url" value="{v("source_url")}" placeholder="기사 주소 (선택)" style="width:100%;margin-top:6px">'
+            f'<label class="set"><input type="checkbox" name="unverified" value="1"{" checked" if it and not it.get("verified", 1) else ""}> '
+            '확인 필요 (제목만 보고 적었어요)</label>'
+            f'<button style="margin-top:6px">{label}</button></form>')
+
+
+def _radar_card(it):
+    import radar as rd
+    dday = rd.dday_text(it["dday"])
+    dcls = "warn" if it["dday"] is not None and 0 <= it["dday"] <= 30 else "muted"
+    chips = (f'<span class="chip">{escape(it["kind"])}</span> '
+             f'<span class="chip {"down" if it["direction"] == "악재 우려" else "up" if it["direction"] == "호재 가능" else ""}">{escape(it["direction"])}</span> '
+             f'<span class="chip">{escape(it["status"])}</span>'
+             + ('' if it["verified"] else ' <span class="chip warn">확인 필요</span>'))
+    when = (f'<div class="{dcls}"><b>{escape(dday)}</b> · {escape(it["when_date"])}' if dday else '<div class="muted">날짜 미정')
+    when += (f' · {escape(it["when_note"])}' if it["when_note"] else "") + "</div>"
+    blocks = "".join(
+        f'<div style="margin-top:6px"><b style="font-size:13px">{label}</b><div style="white-space:pre-wrap">{escape(it[k])}</div></div>'
+        for label, k in (("무슨 일", "summary"), ("영향 가설", "impact"), ("확인할 지표", "check_items"), ("대비 메모", "prep")) if it[k])
+    src = ""
+    if it["source"] or it["source_url"]:
+        t = escape(it["source"] or "출처")
+        src = (f'<div class="muted" style="margin-top:6px">출처: '
+               + (f'<a href="{escape(it["source_url"])}">{t}</a>' if it["source_url"] else t) + "</div>")
+    status_form = ('<form method="post" action="/radar/status" class="filters" style="margin:8px 0 0">'
+                   f'<input type="hidden" name="id" value="{it["id"]}">'
+                   + select("status", {s_: s_ for s_ in rd.STATUSES}, it["status"]) + '<button class="ghost">상태 바꾸기</button></form>')
+    manage = (f'<details style="margin-top:6px"><summary class="muted">수정 · 삭제</summary>'
+              + _radar_form(it, "/radar/edit", "수정 저장")
+              + f'<form method="post" action="/radar/del" style="margin-top:6px" onsubmit="return confirm(\'이 변수를 지울까요?\')">'
+                f'<input type="hidden" name="id" value="{it["id"]}"><button class="ghost">삭제</button></form></details>')
+    return (f'<div class="card"><div class="row"><b class="big">{escape(it["title"])}</b></div>'
+            f'<div style="margin:4px 0">{chips}</div>{when}{blocks}{src}{status_form}{manage}</div>')
+
+
+def view_radar(conn, q):
+    import radar as rd
+    path = _DB["path"]
+    if path and Path(path).exists():
+        try:
+            w = sqlite3.connect(path)
+            try:
+                rd.seed(w)
+            finally:
+                w.close()
+        except sqlite3.Error:
+            pass
+    flt = q.get("f") if q.get("f") in RADAR_FILTERS else ""
+    kind = q.get("k") if q.get("k") in rd.KINDS else ""
+    items = rd.list_all(conn)
+    shown = [i for i in items
+             if (flt == "all" or (flt == "done") == (i["status"] in ("반영됨", "해소"))) and (not kind or i["kind"] == kind)]
+    upcoming = sorted((i for i in shown if i["dday"] is not None and i["dday"] >= 0), key=lambda i: i["dday"])
+    started = sorted((i for i in shown if i["dday"] is not None and i["dday"] < 0), key=lambda i: -i["dday"])
+    undated = [i for i in shown if i["dday"] is None]
+    chips = " ".join(
+        (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == flt else
+         f'<a class="chip" href="/radar?{urlencode({"f": k, **({"k": kind} if kind else {})})}">{v}</a>')
+        for k, v in RADAR_FILTERS.items())
+    kform = ('<form method="get" action="/radar" class="filters" style="margin:6px 0">'
+             + (f'<input type="hidden" name="f" value="{flt}">' if flt else "")
+             + select("k", {"": "분류 전체", **{x: x for x in rd.KINDS}}, kind) + '<button class="ghost">보기</button></form>')
+    intro = ('<div class="card"><b>대비 레이더</b><div class="muted" style="margin-top:4px">'
+             '평소 주식 화면에는 안 보이지만 수급·시장을 흔들 수 있는 \'뜬금없는\' 외부 변수를 모아 두는 곳이에요. '
+             '날짜가 있는 변수는 달력에 ★로 들어가서 하루 전 저녁에 알림이 와요.</div>'
+             '<div class="muted" style="margin-top:6px"><b>주의:</b> 영향은 \'가설\'이에요. 실제로 시장이 그렇게 움직인다는 보장이 없고, '
+             '\'확인 필요\'는 기사 제목만 보고 적은 항목이라 본문으로 내용을 채워야 해요. 투자 추천이 아니에요.</div>'
+             f'<details style="margin-top:6px"><summary class="muted">이런 변수를 찾아보세요</summary>'
+             f'<div class="muted" style="margin-top:4px">{RADAR_HINTS}</div></details></div>')
+    add = ('<details class="card"><summary>변수 직접 추가</summary>' + _radar_form() +
+           '<div class="muted" style="margin-top:6px">기사를 읽다가 \'이게 주식에 영향 주겠는데?\' 싶은 걸 적어 두세요. '
+           '날짜를 넣으면 달력에 들어가요.</div></details>')
+    def section(title, rows):
+        return (f'<h2>{title} <span class="muted" style="font-size:13px">({len(rows)})</span></h2>'
+                + "".join(_radar_card(i) for i in rows)) if rows else ""
+    body = (intro + f'<div style="margin:8px 0">{chips}</div>{kform}' + add
+            + section("날짜가 다가오는 변수", upcoming) + section("이미 시작됐거나 지난 변수", started)
+            + section("날짜 미정", undated)
+            + ("" if shown else '<p class="muted">이 조건에 맞는 변수가 없어요.</p>'))
+    return page("대비 레이더", body)
+
+
 def latest_excel(conn):
     if not has_table(conn, "runs"):
         return None
@@ -2528,6 +2636,8 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     body = view_ideas(conn, q)
                 elif url.path == "/ranking":
                     body = view_ranking(conn, q)
+                elif url.path == "/radar":
+                    body = view_radar(conn, q)
                 elif url.path == "/score":
                     return self._redirect(score_url(**{k: v for k, v in q.items() if not k.startswith("_")}))
                 elif url.path == "/new":
@@ -2573,6 +2683,26 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 if errors:
                     qs["errs"] = json.dumps(errors, ensure_ascii=False)
                 return self._redirect("/settings?" + urlencode(qs))
+            if path in ("/radar/add", "/radar/edit", "/radar/status", "/radar/del"):
+                n = min(int(self.headers.get("Content-Length") or 0), 16384)
+                form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore"),
+                                                     keep_blank_values=True).items()}
+                import radar as rd
+                conn = sqlite3.connect(db_path)
+                try:
+                    rd.ensure(conn)
+                    rid = int(form["id"]) if str(form.get("id", "")).isdigit() else None
+                    if path == "/radar/add":
+                        rd.add(conn, form)
+                    elif rid is not None and path == "/radar/edit":
+                        rd.edit(conn, rid, form)
+                    elif rid is not None and path == "/radar/status":
+                        rd.set_status(conn, rid, form.get("status", ""))
+                    elif rid is not None and path == "/radar/del":
+                        rd.delete(conn, rid)
+                finally:
+                    conn.close()
+                return self._redirect("/radar")
             if path == "/score/save":
                 n = min(int(self.headers.get("Content-Length") or 0), 8192)
                 form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore"),
