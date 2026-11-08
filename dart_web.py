@@ -159,7 +159,7 @@ def page(title, body, refresh=False, charts=False):
 <link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#2b5a9e">
 <link rel="icon" href="/icon-192.png"><link rel="apple-touch-icon" href="/icon-192.png">
 </head><body>
-<header><div class="hrow"><b>DART 단순투자</b>{header_actions()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/performance">성적표</a><a href="/reports">리포트</a><a href="/market">시장</a><a href="/policy">정책</a><a href="/calendar">달력</a><a href="/new">새 공시</a>
+<header><div class="hrow"><b>DART 단순투자</b>{header_actions()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/ranking">순위</a><a href="/performance">성적표</a><a href="/reports">리포트</a><a href="/market">시장</a><a href="/policy">정책</a><a href="/calendar">달력</a><a href="/new">새 공시</a>
 <a href="/settings">설정</a>{extra}</nav>
 </header><main>{body}</main>{"<script>" + CHART_JS + "</script>" if charts else ""}</body></html>""".encode()
 
@@ -2007,6 +2007,153 @@ def view_ideas(conn, q):
     return page("아이디어", body)
 
 
+# ---------------- 종목 순위 ----------------
+RANK_MAX = 82          # 항목별 최고점의 합 (기관 24 + 평단 15 + 목표가 15 + 수급 10 + 밸류 10 + 지분 8)
+RANK_SORTS = {"": "정렬: 종합 점수순", "up": "정렬: 목표가 상승여력순", "disc": "정렬: 기관 평단보다 싼 순",
+              "amt": "정렬: 기관 매수금액순", "n": "정렬: 함께 산 기관 수순"}
+RANK_HELP = (
+    "<b>기관이 함께 산 종목</b> 1곳당 8점 (최대 24점) · "
+    "<b>현재가가 기관 평균매수단가보다 쌀수록</b> 최대 15점 (평단보다 10% 이상 비싸면 -5점) · "
+    "<b>증권사 목표가 상승여력</b> 최대 15점 (2곳 이상 의견이 있을 때만) · "
+    "<b>최근 5거래일 순매수</b> 외국인·기관 각 +5점 (순매도면 각 -3점) · "
+    "<b>PER·PBR</b> 낮을수록 최대 10점 (높으면 감점) · "
+    "<b>공시 기간 안 지분을 늘린 곳 − 줄인 곳</b> 1곳당 ±4점 (최대 ±8점)")
+
+
+def _clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+
+def rank_stocks(conn, w, ex, m):
+    """공시에 나온 종목에 항목별 점수를 매겨 합침. 없는 데이터는 0점이고 '없음'으로 표시."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(summary)")}
+    since = (dt.date.today() - dt.timedelta(days=int(w))).isoformat()
+    conds, args = ["변동일 >= ?", "매수수량 > 0", "평균매수단가 > 0"], [since]
+    if ex == "1":
+        conds.append("제출인 NOT LIKE '%국민연금%'")
+    if m and "시장" in cols:
+        conds.append("시장 = ?")
+        args.append(m)
+    market = "MAX(시장)" if "시장" in cols else "''"
+    rows = conn.execute(
+        f"SELECT 종목코드 code, MAX(종목명) name, {market} mk, COUNT(DISTINCT 제출인) n, "
+        f"GROUP_CONCAT(DISTINCT 제출인) whos, SUM(매수수량) qty, SUM(매수금액) amt, MAX(변동일) last "
+        f"FROM summary WHERE {' AND '.join(conds)} GROUP BY 종목코드", args).fetchall()
+    closes = latest_closes(conn)
+    rows = [r for r in rows if r["code"] in closes and r["qty"]]
+    codes = [r["code"] for r in rows]
+    vals = value_map(conn)
+    try:
+        import stock_value
+        fsum = stock_value.flow_sums(conn, codes, 5)
+    except Exception:
+        fsum = {}
+    nets = {}
+    try:
+        for code, who, d in conn.execute(
+                "SELECT 종목코드, 제출인, SUM(증감) FROM detail WHERE 변동일 >= ? AND 증감 IS NOT NULL "
+                "GROUP BY 종목코드, 제출인", (since,)):
+            if ex == "1" and who and "국민연금" in who:
+                continue
+            nets.setdefault(code, {})[who] = d or 0
+    except sqlite3.OperationalError:
+        pass
+    out = []
+    for r in rows:
+        code = r["code"]
+        close = closes[code][1]
+        avg = r["amt"] / r["qty"]
+        disc = close / avg - 1
+        f, missing = [], []                         # f: (이름, 점수, 설명)
+        f.append(("기관 동시 매수", min(r["n"], 3) * 8, f'{r["n"]}곳'))
+        f.append(("평단 대비", round(_clamp(-disc * 100 * 0.5, -5, 15), 1), f"{disc:+.1%}"))
+        tgt, nb = consensus(conn, code)
+        up = None
+        if tgt and nb >= 2:
+            up = float(tgt) / float(close) - 1
+            f.append(("목표가 여력", round(_clamp(up * 100 * 0.4, 0, 15), 1), f"{up:+.0%} ({nb}곳)"))
+        else:
+            missing.append("목표가")
+        if code in fsum:
+            fo, ins = fsum[code]
+            pts = (5 if fo > 0 else -3 if fo < 0 else 0) + (5 if ins > 0 else -3 if ins < 0 else 0)
+            f.append(("수급(5일)", pts, f"외국인 {fo:+,.0f} · 기관 {ins:+,.0f}"))
+        else:
+            missing.append("수급")
+        v = vals.get(code) or {}
+        per, pbr = v.get("per"), v.get("pbr")
+        if per is not None or pbr is not None:
+            pts, txt = 0, []
+            if pbr is not None:
+                pts += 5 if 0 < pbr <= 1 else 2 if 0 < pbr <= 1.5 else -3 if pbr > 5 else 0
+                txt.append(f"PBR {pbr:.2f}")
+            if per is not None:
+                pts += 5 if 0 < per <= 10 else 2 if 0 < per <= 15 else -3 if per > 30 else 0
+                txt.append(f"PER {per:.1f}")
+            f.append(("밸류", pts, " · ".join(txt)))
+        else:
+            missing.append("PER·PBR")
+        net = nets.get(code)
+        if net:
+            u = sum(1 for x in net.values() if x > 0)
+            d = sum(1 for x in net.values() if x < 0)
+            f.append(("지분 증감", _clamp((u - d) * 4, -8, 8), f"늘린 {u}곳 · 줄인 {d}곳"))
+        else:
+            missing.append("지분")
+        out.append(dict(r=r, close=close, avg=avg, disc=disc, up=up, f=f, missing=missing,
+                        score=round(sum(x[1] for x in f), 1)))
+    return out
+
+
+def view_ranking(conn, q):
+    if not has_table(conn, "summary") or not has_table(conn, "prices"):
+        return page("종목 순위", '<div class="card">보고서(DART)와 주가 수집이 한 번 끝나야 볼 수 있습니다. '
+                              '위쪽 <b>지금 수집 → 보고서만</b>을 눌러 주세요.</div>')
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(summary)")}
+    w = q.get("w") if q.get("w") in WINDOWS else "90"
+    ex = q.get("ex") if q.get("ex") in NPS_OPTS else "1"
+    m = q.get("m") if q.get("m") in MARKET_OPTS and "시장" in cols else ""
+    srt = q.get("s") if q.get("s") in RANK_SORTS else ""
+    items = rank_stocks(conn, w, ex, m)
+    key = {"": lambda i: -i["score"], "up": lambda i: (i["up"] is None, -(i["up"] or 0)),
+           "disc": lambda i: i["disc"], "amt": lambda i: -i["r"]["amt"],
+           "n": lambda i: (-i["r"]["n"], -i["score"])}[srt]
+    items = sorted(items, key=key)
+    form = (f'<form method="get" class="filters" style="margin:8px 0">{select("w", WINDOWS, w)}'
+            + (select("m", MARKET_OPTS, m) if "시장" in cols else "")
+            + f'{select("ex", NPS_OPTS, ex)}{select("s", RANK_SORTS, srt)}<button>적용</button></form>')
+    intro = ('<div class="card"><b>좋은 종목 순위</b><div class="muted" style="margin-top:4px">'
+             '기관·개인 5% 공시와 주가, 증권사 목표가, 수급, PER·PBR을 항목별로 점수 내서 더한 순위예요. '
+             '살펴볼 후보를 추리는 용도예요.</div>'
+             '<div class="muted" style="margin-top:6px"><b>주의:</b> 점수와 항목별 비중은 제가 정한 단순 기준이고, '
+             '과거 수익률로 검증한 것이 아니에요. 점수가 높다고 오른다는 뜻이 아니고, 투자 추천이 아니에요. '
+             '공시는 매매 후 최대 5영업일 뒤에 나와요.</div>'
+             f'<details style="margin-top:6px"><summary class="muted">점수는 이렇게 계산해요</summary>'
+             f'<div class="muted" style="margin-top:4px">{RANK_HELP}. 최고 {RANK_MAX}점.</div></details></div>')
+    cards = []
+    for k, i in enumerate(items[:30], 1):
+        r = i["r"]
+        mk = f' <span class="chip">{escape(r["mk"])}</span>' if r["mk"] else ""
+        chips = " ".join(
+            f'<span class="chip {"up" if pts > 0 else "down" if pts < 0 else ""}" title="{escape(txt)}">'
+            f'{escape(name)} {pts:+g}</span>' for name, pts, txt in i["f"])
+        detail = " · ".join(f"{escape(name)} {escape(txt)}" for name, pts, txt in i["f"])
+        miss = (f'<div class="muted">데이터 없음(0점 처리): {escape(", ".join(i["missing"]))}</div>' if i["missing"] else "")
+        pct = _clamp(i["score"] / RANK_MAX * 100, 0, 100)
+        cards.append(
+            f'<div class="card"><div class="row"><div><span class="num">{k}</span>'
+            f'<a class="big" href="/stock?code={quote(r["code"])}">{escape(r["name"])}</a> '
+            f'<span class="muted">{escape(r["code"])}</span>{mk}</div>'
+            f'<div><b class="big">{i["score"]:g}</b><span class="muted">점</span></div></div>'
+            f'<div style="height:5px;background:var(--chip);border-radius:3px;margin:6px 0">'
+            f'<div style="height:5px;width:{pct:.0f}%;background:var(--accent);border-radius:3px"></div></div>'
+            f'<div>{chips}</div><div class="muted" style="margin-top:4px">{detail}</div>'
+            f'<div class="muted">기관 매수 {eok(r["amt"])} · 평단 {won(i["avg"])}원 · 종가 {won(i["close"])}원 · '
+            f'마지막 매수 {escape(r["last"])}</div>{miss}</div>')
+    body = (intro + form + ("".join(cards) or '<p class="muted">조건에 맞는 종목이 없어요. 기간을 늘려 보세요.</p>'))
+    return page("종목 순위", body)
+
+
 def latest_excel(conn):
     if not has_table(conn, "runs"):
         return None
@@ -2109,6 +2256,8 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     body = view_performance(conn, q)
                 elif url.path == "/ideas":
                     body = view_ideas(conn, q)
+                elif url.path == "/ranking":
+                    body = view_ranking(conn, q)
                 elif url.path == "/new":
                     body = view_new(conn, q)
                 elif url.path == "/stock":
