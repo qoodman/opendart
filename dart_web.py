@@ -5,7 +5,7 @@ DART 단순투자 대시보드 (폰용, 파이썬 기본 기능만 사용)
     python dart_server.py web     → http://127.0.0.1:8766
 서버에서는 Tailscale(serve)로만 공개해서 내 기기에서만 열립니다.
 """
-import os, re, sys, json, time, sqlite3, subprocess, datetime as dt
+import os, re, sys, json, time, sqlite3, subprocess, threading, datetime as dt
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -150,7 +150,11 @@ def header_actions():
     return f'<div class="runbar">{update_widget()}{run_widget()}</div>'
 
 
+_CTX = threading.local()      # 요청마다 따로: 화면 맨 위에 붙일 탭 줄 (아이디어·시장 묶음)
+
+
 def page(title, body, refresh=False, charts=False):
+    body = getattr(_CTX, "pre", "") + body
     other = _NAV["realestate"] or os.environ.get("REALESTATE_URL", "").strip()
     extra = f'<a href="{escape(other)}">부동산 ↗</a>' if other else ""
     extra += "".join(f'<a href="{escape(u)}">{escape(n)} ↗</a>' for n, u in _NAV["links"] if u != other)
@@ -161,7 +165,7 @@ def page(title, body, refresh=False, charts=False):
 <link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#2b5a9e">
 <link rel="icon" href="/icon-192.png"><link rel="apple-touch-icon" href="/icon-192.png">
 </head><body>
-<header><div class="hrow"><b>DART 단순투자</b>{header_actions()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/ranking">순위</a><a href="/performance">성적표</a><a href="/reports">리포트</a><a href="/market">시장</a><a href="/policy">정책</a><a href="/radar">대비</a><a href="/calendar">달력</a><a href="/new">새 공시</a>
+<header><div class="hrow"><b>DART 단순투자</b>{header_actions()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/reports">리포트</a><a href="/market">시장</a><a href="/new">새 공시</a>
 <a href="/settings">설정</a>{extra}</nav>
 </header><main>{body}</main>{"<script>" + CHART_JS + "</script>" if charts else ""}</body></html>""".encode()
 
@@ -1582,9 +1586,9 @@ def view_performance(conn, q):
     preset = h in PERF_HORIZONS
     chips = " ".join(
         (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == h else
-         f'<a class="chip" href="/performance?{urlencode({"h": k, "ex": ex, **({"k": kind} if kind else {}), **keep})}">{v}</a>')
+         f'<a class="chip" href="{perf_url(h=k, ex=ex, **({"k": kind} if kind else {}), **keep)}">{v}</a>')
         for k, v in PERF_HORIZONS.items())
-    custom_form = (f'<form method="get" class="filters" style="margin-top:6px"><input type="hidden" name="ex" value="{ex}">'
+    custom_form = (f'<form method="get" class="filters" style="margin-top:6px"><input type="hidden" name="t" value="perf"><input type="hidden" name="ex" value="{ex}">'
                    + (f'<input type="hidden" name="k" value="{kind}">' if kind else "")
                    + (f'<input type="hidden" name="s" value="{s}">' if s else "")
                    + f'<input type="number" name="h" min="1" max="{PERF_MAX_DAYS}" step="1" placeholder="직접 입력 (일)" '
@@ -1594,10 +1598,10 @@ def view_performance(conn, q):
                    + '</form>')
     kchips = " ".join(
         (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == kind else
-         f'<a class="chip" href="/performance?{urlencode({"h": h, "ex": ex, **({"k": k} if k else {}), **keep})}">{v}</a>')
+         f'<a class="chip" href="{perf_url(h=h, ex=ex, **({"k": k} if k else {}), **keep)}">{v}</a>')
         for k, v in PERF_KINDS.items())
     toggle = (f'<div style="margin-bottom:6px">{kchips}</div>'
-              f'<a class="chip" href="/performance?{urlencode({"h": h, "ex": "0" if ex == "1" else "1", **({"k": kind} if kind else {}), **keep})}">'
+              f'<a class="chip" href="{perf_url(h=h, ex="0" if ex == "1" else "1", **({"k": kind} if kind else {}), **keep)}">'
               + ("국민연금 포함해서 보기" if ex == "1" else "국민연금 빼고 보기") + "</a>")
     intro = ('<div class="card"><b>이 화면은 무엇인가요?</b><div class="muted" style="margin-top:4px">'
              '기관이 단순투자 공시를 낸 날(제출일)에 그 종목을 샀다고 가정하고, 그 뒤 수익률을 코스피 수익률과 비교했어요. '
@@ -1608,14 +1612,14 @@ def view_performance(conn, q):
     for i, r in enumerate(rows, 1):
         ok = r["n"] >= PERF_MIN_N
         cls = "up" if r["excess"] > 0 else "down" if r["excess"] < 0 else ""
-        wlink = "/performance?" + urlencode({"who": r["who"], "h": h, "ex": ex, **({"k": kind} if kind else {}), **keep})
+        wlink = perf_url(who=r["who"], h=h, ex=ex, **({"k": kind} if kind else {}), **keep)
         cards.append(
             f'<div class="card"><div class="row"><div><span class="num">{i}</span><a class="big" href="{wlink}">{escape(r["who"])}</a></div>'
             + ('' if ok else '<span class="chip">표본 적음</span>') + "</div>"
             f'<div>코스피 대비 평균 <b class="{cls}">{r["excess"]:+.1%}</b> · 평균 수익률 {r["avg"]:+.1%}</div>'
             f'<div class="muted">{r["n"]}건 중 {r["win"]:.0%}가 올랐어요 · 최악 {r["worst"]:+.1%} · '
             f'매수 합계 {eok(r["amt"])} · 평균 보유 {r["hold"]:.0f}일 · 최근 제출 {escape(r["last"])}</div></div>')
-    sort_form = perf_sort_form(PERF_SORTS, s, {"h": h, "ex": ex, "k": kind})
+    sort_form = perf_sort_form(PERF_SORTS, s, {"t": "perf", "h": h, "ex": ex, "k": kind})
     body = (intro + f'<div style="margin:8px 0"><span class="muted">보유 기간:</span> {chips}{custom_form}</div>'
             + f'<div style="margin-bottom:8px">{toggle}</div>' + sort_form
             + ("".join(cards) or '<p class="muted">아직 계산할 건이 없어요. 제출일부터 그 기간이 지나야 해요.</p>'))
@@ -1626,7 +1630,7 @@ def view_performance_detail(who, evs, h, ex, kind, s=""):
     """운용사(또는 개인) 한 명의 건별 결과. 제목을 누르면 여기로 옵니다."""
     keep = {"s": s} if s else {}
     back_q = {"h": h, "ex": ex, **({"k": kind} if kind else {}), **keep}
-    back = f'<a href="/performance?{urlencode(back_q)}">← 성적표로</a>'
+    back = f'<a href="{perf_url(**back_q)}">← 성적표로</a>'
     head = (f'<div class="row"><div><span class="big">{escape(who)}</span></div><div>{back}</div></div>')
     if not evs:
         return page(f"{who} — 성적표", head + f'<div class="card" style="margin-top:8px">'
@@ -1656,14 +1660,14 @@ def view_performance_detail(who, evs, h, ex, kind, s=""):
     table = ('<div style="overflow-x:auto;margin-top:8px"><table><tr><th>제출일</th><th>종목</th><th>매수금액</th>'
              f'<th>제출일 종가</th><th>{"오늘 종가" if h == "now" else perf_label(h) + " 종가"}</th><th>보유</th>'
              f'<th>수익률</th><th>코스피 대비</th></tr>{rows}</table></div>')
-    sort_form = perf_sort_form(PERF_SORTS_DETAIL, s, {"who": who, "h": h, "ex": ex, "k": kind})
+    sort_form = perf_sort_form(PERF_SORTS_DETAIL, s, {"t": "perf", "who": who, "h": h, "ex": ex, "k": kind})
     note = ('<p class="muted">제출일 종가에 샀다고 가정하고, 그 뒤 날짜 종가로 계산했어요. 과거 성적이라 앞으로도 같다는 보장은 없어요.</p>')
     return page(f"{who} — 성적표", head + summary + sort_form + table + note)
 
 
 # ---------------- 아이디어 ----------------
 IDEA_TABS = {"cheap": "기관 평단보다 싼 종목", "cluster": "여러 기관이 함께 산 종목", "super": "슈퍼개미 움직임",
-             "score": "점수표 (오일전문가)"}
+             "rank": "종목 순위", "score": "점수표 (오일전문가)", "perf": "운용사 성적표"}
 
 # 공시 제출인이 개인인지 추정: 한글 이름 2~4자. 기관 이름(운용·증권·공단 등)이나 '외 N명'은 제외
 _INST_WORDS = ("자산", "운용", "증권", "투자", "공단", "펀드", "은행", "보험", "재단", "캐피탈", "파트너스",
@@ -1867,7 +1871,7 @@ def view_investor(conn, name, days):
                  f'<span class="muted">변동일 {escape(str(r["last"]))}</span></div>'
                  f'<div>{escape(str(r["name"] or r["종목코드"]))} <span class="muted">{escape(str(r["종목코드"]))}</span> · {act}</div></div>')
     return page(f"{name} — 슈퍼개미", head + stock_tbl + "<h2>공시 기록</h2>" + (hist or '<p class="muted">기록 없음</p>')
-                + f'<p><a href="/performance?k=person">개인 투자자 성적표 보기 →</a> · <a href="/ideas?t=super">← 슈퍼개미 목록</a></p>')
+                + f'<p><a href="/ideas?t=perf&k=person">개인 투자자 성적표 보기 →</a> · <a href="/ideas?t=super">← 슈퍼개미 목록</a></p>')
 
 
 IDEA_SORTS = {"": "정렬: 기본", "amt": "정렬: 매수금액 큰 순", "n": "정렬: 기관 수 많은 순",
@@ -1892,7 +1896,27 @@ def sort_ideas(ideas, srt, tab):
     return sorted(ideas, key=key, reverse=(srt == "last"))
 
 
+def perf_url(**kw):
+    """성적표는 아이디어 탭 안에 있음"""
+    return "/ideas?" + urlencode({"t": "perf", **kw})
+
+
+MARKET_HUB = {"/market": "시장 온도", "/policy": "정책", "/radar": "대비 레이더", "/calendar": "달력"}
+
+
+def market_tabs_row(active):
+    return '<div style="margin:0 0 8px">' + " ".join(
+        (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == active else
+         f'<a class="chip" href="{k}">{v}</a>') for k, v in MARKET_HUB.items()) + '</div>'
+
+
 def view_ideas(conn, q):
+    if q.get("t") in ("rank", "perf"):
+        _CTX.pre = idea_tabs_row(q["t"])
+        try:
+            return view_ranking(conn, q) if q["t"] == "rank" else view_performance(conn, q)
+        finally:
+            _CTX.pre = ""
     if q.get("t") == "score":
         return view_score(conn, q)
     if not has_table(conn, "summary"):
@@ -1921,7 +1945,7 @@ def view_ideas(conn, q):
                 f'{select("amt", amt_opts, q.get("amt", ""))}{select("dir", dir_opts, q.get("dir", ""))}'
                 f'{select("sort", sort_opts, q.get("sort", "date"))}<button>적용</button></form>')
         body = (tabs + f'<div style="margin:8px 0">{win}</div>' + form + listing
-                + f'<p style="margin-top:10px"><a href="/performance?k=person">개인 투자자 성적표 보기 →</a></p>')
+                + f'<p style="margin-top:10px"><a href="/ideas?t=perf&k=person">개인 투자자 성적표 보기 →</a></p>')
         return page("아이디어", body)
     if not has_table(conn, "prices"):
         return page("아이디어", '<div class="card">주가 데이터가 아직 없습니다. 위쪽 <b>지금 수집 → 보고서만</b>을 '
@@ -1979,7 +2003,7 @@ def view_ideas(conn, q):
     form = (f'<form method="get" class="filters" style="margin-top:10px"><input type="hidden" name="t" value="{tab}">'
             f'{select("w", WINDOWS, w)}' + (select("m", MARKET_OPTS, m) if "시장" in cols else "")
             + f'{select("ex", NPS_OPTS, ex)}{select("s", IDEA_SORTS, srt)}<button>적용</button></form>')
-    perf_link = '<p><a href="/performance">운용사별 성적표 보기 →</a> (어느 기관의 매수가 과거에 잘 맞았는지)</p>'
+    perf_link = '<p><a href="/ideas?t=perf">운용사별 성적표 보기 →</a> (어느 기관의 매수가 과거에 잘 맞았는지)</p>'
     note = perf_link + ('<p class="muted">살펴볼 후보를 찾는 화면입니다. 공시는 매매 후 최대 5영업일 뒤에 나오고, '
             '국민연금처럼 큰 기관은 비중 조절로 사고팔 때가 많아 기본으로 뺐습니다.</p>')
     if not ideas:
@@ -2156,7 +2180,7 @@ def view_ranking(conn, q):
            "disc": lambda i: i["disc"], "amt": lambda i: -i["r"]["amt"],
            "n": lambda i: (-i["r"]["n"], -i["score"])}[srt]
     items = sorted(items, key=key)
-    form = (f'<form method="get" class="filters" style="margin:8px 0">{select("w", WINDOWS, w)}'
+    form = (f'<form method="get" class="filters" style="margin:8px 0"><input type="hidden" name="t" value="rank">{select("w", WINDOWS, w)}'
             + (select("m", MARKET_OPTS, m) if "시장" in cols else "")
             + f'{select("ex", NPS_OPTS, ex)}{select("s", RANK_SORTS, srt)}<button>적용</button></form>')
     intro = ('<div class="card"><b>좋은 종목 순위</b><div class="muted" style="margin-top:4px">'
@@ -2650,6 +2674,7 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 return self._send(200, "application/json", json.dumps(st, ensure_ascii=False).encode())
             conn = sqlite3.connect(f"file:{quote(str(db_path))}?mode=ro", uri=True) if Path(db_path).exists() else sqlite3.connect(":memory:")
             conn.row_factory = sqlite3.Row
+            _CTX.pre = market_tabs_row(url.path) if url.path in MARKET_HUB else ""
             try:
                 if url.path.startswith("/backup/") and settings_api:
                     name = url.path[len("/backup/"):]
@@ -2692,11 +2717,11 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     w = q.get("w") if q.get("w") in WINDOWS else "90"
                     body = view_investor(conn, q.get("name", ""), int(w))
                 elif url.path == "/performance":
-                    body = view_performance(conn, q)
+                    return self._redirect(perf_url(**{k: v for k, v in q.items() if not k.startswith("_")}))
                 elif url.path == "/ideas":
                     body = view_ideas(conn, q)
                 elif url.path == "/ranking":
-                    body = view_ranking(conn, q)
+                    return self._redirect("/ideas?" + urlencode({"t": "rank", **{k: v for k, v in q.items() if not k.startswith("_")}}))
                 elif url.path == "/radar":
                     body = view_radar(conn, q)
                 elif url.path == "/score":
@@ -2708,6 +2733,7 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 else:
                     body = None
             finally:
+                _CTX.pre = ""
                 conn.close()
             if body is None:
                 return self._send(404, "text/html; charset=utf-8",
