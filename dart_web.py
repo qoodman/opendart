@@ -2609,6 +2609,58 @@ def _radar_countries(conn):
     return (head + "".join(cards) + f'<div class="muted" style="margin:6px 0">{escape(rd.COMMON)}</div>' + upd)
 
 
+LONDON_IB = ("morgan stanley", "goldman sachs", "j.p. morgan", "jpmorgan", "merrill", "ubs", "barclays", "citigroup", "credit suisse",
+             "deutsche", "bnp", "hsbc", "nomura", "macquarie", "societe generale", "bank of america", "international", " plc")
+
+
+def _radar_checklist():
+    """숫자가 맞아도 해석이 틀릴 수 있다: 해석 점검 체크리스트 + 규모 점검기 (브라우저에서 바로 계산)"""
+    return (
+        '<details class="card"><summary><b>해석 점검 · 규모 점검기</b></summary>'
+        '<div class="muted" style="margin-top:6px">뉴스의 숫자가 맞아도 \'왜\'라는 해석은 틀릴 수 있어요. 이 영국 사례가 그랬어요. 변수를 적기 전에 네 가지를 먼저 물어보세요.</div>'
+        '<div style="margin-top:6px">① <b>규모</b>: 이 원인이 설명할 수 있는 금액이 관찰된 금액만큼 되나요? (아래 점검기)<br>'
+        '② <b>집계 기준</b>: 이 숫자의 \'국적·구분\'이 무엇을 뜻하나요? (등록지·펀드 거점·수탁은행이면 실제 돈의 주인과 다를 수 있어요)<br>'
+        '③ <b>대안 설명</b>: 같은 숫자를 다르게 설명할 수 있나요? (예: 연금 인출 대신 글로벌 레버리지 자금 정리)<br>'
+        '④ <b>시점</b>: 원인 사건보다 매도·매수가 먼저 시작되지 않았나요? 속도는 원인과 맞나요(완만한지 급한지)?</div>'
+        '<div style="margin-top:8px"><b style="font-size:13px">규모 점검기</b> <span class="muted">(예시는 영국 연금 사례)</span></div>'
+        '<div style="margin-top:6px">'
+        '<div style="display:flex;gap:8px;align-items:center;margin-top:4px"><span class="muted" style="flex:1 1 11em">원인 후보 금액 (조원)</span><input type="number" id="sc_cause" value="40" step="any" style="width:7.5em"></div>'
+        '<div style="display:flex;gap:8px;align-items:center;margin-top:4px"><span class="muted" style="flex:1 1 11em">한국 비중 하한 (%)</span><input type="number" id="sc_lo" value="1" step="any" style="width:7.5em"></div>'
+        '<div style="display:flex;gap:8px;align-items:center;margin-top:4px"><span class="muted" style="flex:1 1 11em">한국 비중 상한 (%)</span><input type="number" id="sc_hi" value="2" step="any" style="width:7.5em"></div>'
+        '<div style="display:flex;gap:8px;align-items:center;margin-top:4px"><span class="muted" style="flex:1 1 11em">관찰된 금액 (조원)</span><input type="number" id="sc_obs" value="97" step="any" style="width:7.5em"></div></div>'
+        '<div id="sc_out" style="margin-top:6px"></div>'
+        '<div class="muted" style="margin-top:4px">원인 후보 금액 = 원인이 움직인 돈(예: 영국 연금 인출 증가분 약 40조원). 한국 비중 = 그 돈이 한국 주식에 들어 있을 비율. '
+        '계산 결과는 \'이 원인만으로 설명되는 최대치\'이고, 작다고 그 원인이 아예 없다는 뜻은 아니에요.</div>'
+        '<script>(function(){const g=id=>parseFloat(document.getElementById(id).value);'
+        'function run(){const c=g("sc_cause"),lo=g("sc_lo"),hi=g("sc_hi"),o=g("sc_obs"),out=document.getElementById("sc_out");'
+        'if(!(c>=0&&lo>=0&&hi>=0&&o>0)){out.textContent="숫자를 넣어 주세요.";return;}'
+        'const a=c*lo/100,b=c*hi/100,ra=a/o*100,rb=b/o*100;'
+        'let v=rb<10?"이 원인만으로는 크기가 안 맞아요.":rb<50?"일부만 설명해요.":"상당 부분을 설명할 수 있어요.";'
+        'out.innerHTML="설명되는 금액 <b>"+a.toFixed(1)+" ~ "+b.toFixed(1)+"조원</b> = 관찰된 "+o+"조원의 <b>"+ra.toFixed(1)+"% ~ "+rb.toFixed(1)+"%</b> → "+v;}'
+        '["sc_cause","sc_lo","sc_hi","sc_obs"].forEach(id=>document.getElementById(id).addEventListener("input",run));run();})();</script>'
+        '</details>')
+
+
+def _radar_london_check(conn):
+    """우리 5% 공시 데이터에서 대형 IB·'International'·'plc'가 들어간 제출인 (런던 법인 경유 헤지 물량 반론을 가늠해 보는 용도)"""
+    try:
+        like = " OR ".join("LOWER(제출인) LIKE ?" for _ in LONDON_IB)
+        rows = conn.execute(
+            f"SELECT 제출인, COUNT(DISTINCT 접수번호) n, SUM(증감) net, MIN(변동일) a, MAX(변동일) b FROM detail "
+            f"WHERE {like} GROUP BY 제출인 ORDER BY n DESC LIMIT 12", [f"%{k}%" for k in LONDON_IB]).fetchall()
+    except sqlite3.OperationalError:
+        return ""
+    body = "".join(
+        f'<tr><td>{escape(str(r["제출인"]))}</td><td>{r["n"]}</td><td class="{"up" if (r["net"] or 0) > 0 else "down" if (r["net"] or 0) < 0 else ""}">'
+        f'{(r["net"] or 0):+,.0f}</td><td>{escape(str(r["a"]))} ~ {escape(str(r["b"]))}</td></tr>' for r in rows)
+    table = ('<div class="scroll"><table><tr><th>제출인</th><th>공시</th><th>순증감(주)</th><th>변동일</th></tr>' + body + '</table></div>'
+             if rows else '<p class="muted">이름에 대형 투자은행·International·plc가 들어간 제출인이 아직 없어요.</p>')
+    return ('<details class="card"><summary><b>데이터로 확인해 보기: 우리 공시에 잡힌 IB·해외 법인</b></summary>'
+            '<div class="muted" style="margin-top:6px">영국계 순매도를 \'런던 법인이 스왑 헤지로 판 물량\'이라고 보는 반론이 맞는지, '
+            '5% 공시에서 가늠해 보는 칸이에요. 이름에 대형 투자은행이나 International·plc가 들어간 제출인을 모았어요. '
+            '이 앱은 \'단순투자\' 보고서만 모아서 일부만 보여요. 이름만으로 어느 나라 법인인지는 알 수 없어서 참고용이에요.</div>' + table + '</details>')
+
+
 def view_radar(conn, q):
     import radar as rd
     path = _DB["path"]
@@ -2653,7 +2705,7 @@ def view_radar(conn, q):
     notice = ""
     if q.get("cn"):
         notice = f'<div class="card">{escape(q["cn"])}</div>'
-    body = (intro + notice + _radar_countries(conn)
+    body = (intro + notice + _radar_countries(conn) + _radar_checklist() + _radar_london_check(conn)
             + '<h2>대비 변수 목록</h2>' + f'<div style="margin:8px 0">{chips}</div>{kform}' + add
             + section("날짜가 다가오는 변수", upcoming) + section("이미 시작됐거나 지난 변수", started)
             + section("날짜 미정", undated)

@@ -20,18 +20,27 @@ DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 # 처음에 넣어 두는 항목. 기사에서 확인된 것만 verified=1, 제목만 본 것은 verified=0 (화면에 '확인 필요'로 표시)
 SEEDS = [
     dict(seed="uk_pension_iht",
-         title="영국 연금 상속세 과세 시작 → 영국계 자금 매도 압력",
-         kind="세제·연금", direction="악재 우려", status="진행 중",
-         when_date="2027-04-01", when_note="내년 4월부터 (정확한 일자는 확인 필요)",
-         summary=("영국은 연금 수령자가 사망해도 남은 연금에 세금을 안 물렸는데, 내년 4월부터 상속세를 물립니다. "
-                  "법안은 올해 3월 확정, 세부 절차는 5월 공개. 한국투자증권 염동찬 연구원은 영국계 자금이 올해 1~9월 97조원을 "
-                  "순매도했고, 그중 76조원이 6~9월 넉 달에 몰렸다고 분석했어요. 연금을 상속용으로 남기기보다 인출해 쓸 유인이 커져서 "
-                  "한국 주식 매도에도 영향을 준 것으로 해석했습니다 (영향 비중을 따로 가르기는 어렵다고 단서를 달았어요)."),
-         impact="외국인(특히 영국계) 순매도가 이어지면 지수 상단이 눌리고, 외국인 비중이 큰 대형주가 먼저 영향을 받을 수 있어요 (가설).",
-         check_items="영국계 월간 순매도 규모가 줄고 있는지 · 외국인 전체 순매수 흐름 · 원/달러 환율 · 시행 시기(4월) 전후 변동성",
-         prep="시행 전까지 매도가 이어질 수 있다는 전제로 수급 의존이 큰 종목 비중을 점검하고, 한 번에 사지 않고 나눠 접근하는 쪽을 고려.",
-         source="매일경제 2026-11-06 · 한국투자증권 염동찬 연구원 '외국인 자금 동향과 영국계 매도: 영국 상속세 개정의 나비효과'",
-         verified=1),
+         title="영국계 97조원 순매도, 이유는? (연금 상속세 vs 런던 법인 경유 레버리지 자금)",
+         kind="해외 자금 흐름", direction="불확실", status="진행 중",
+         when_date="2027-04-06", when_note="영국 연금 상속세 과세 시작 (기사는 '내년 4월', 블로그는 2027-04-06)",
+         summary=("사실: 금감원 집계에서 영국계가 올해 1~9월 약 97조원(6~9월 76조원)을 순매도했어요. 영국은 내년 4월부터 미사용 연금에도 상속세를 물립니다.\n\n"
+                  "해석 A (매일경제 기사·한국투자증권 염동찬 연구원): 연금 가입자가 연금을 남기기보다 인출해 쓸 유인이 커져 영국계 자금이 한국 주식을 판 것. "
+                  "다만 연구원도 영국계 매도에서 이 요인의 비중을 구분하기는 어렵다고 단서를 달았어요.\n\n"
+                  "해석 B (네이버 블로그 ranto28, 2026-11-07의 반론): 금감원 국적은 '투자자 등록지' 기준이라, 런던 법인(미국계 투자은행의 영국 법인 등)이 "
+                  "헤지펀드의 스왑(TRS)·레버리지 포지션을 헤지하려고 사고판 물량이 '영국계'로 잡힐 수 있어요. 그러면 97조원은 영국 노인의 연금 인출이 아니라 "
+                  "글로벌 레버리지 자금의 정리로 읽어야 해요.\n\n"
+                  "규모 점검: 영국 금융감독청(FCA) 자료로 연금 인출액은 2025/26년 약 912억 파운드로 전년(709억)보다 약 203억 파운드 늘었어요 "
+                  "(약 40조원, 환율 1파운드≈1,970원 가정). 늘어난 인출 전부에 한국 비중 1~2%를 곱해도 0.4~0.8조원이고, 전체 인출액(약 180조원)으로 계산해도 "
+                  "2~4조원이에요. 97조원을 연금 인출로 설명하기는 어려워요. (연금 인출이 늘었다는 사실과 그 원인이 세제 불안이라는 업계 설명 자체는 확인됐어요.)\n\n"
+                  "아직 모르는 것: 영국계 매도 중 런던 IB 법인 몫이 얼마인지는 공개 통계로 확인하지 못했어요. 해석 B도 입증된 것은 아니에요."),
+         impact=("연금·세제 요인이라면 시행(2027-04) 전까지 완만하게 이어지는 매도, 헤지펀드·스왑 포지션 정리라면 증거금·레버리지 한도가 바뀔 때 "
+                 "급하게 움직이고 되돌아올 수 있어요 (가설). 어느 쪽이든 외국인 순매도가 커지면 대형주·반도체처럼 외국인 비중이 큰 종목이 먼저 흔들릴 수 있어요."),
+         check_items=("영국계 월간 순매매가 얼마나 급하게 바뀌는지(레버리지 요인은 급등락, 연금 요인은 완만) · 같은 시기 미국계 순매매와 같이 움직이는지 · "
+                      "반도체 등 레버리지 거래(스왑·DMA)와 증거금 변화 보도 · 5% 공시에 잡히는 런던 소재 IB 법인 · 원/달러 환율"),
+         prep=("'영국이 팔았다 = 영국 사람들 돈'으로 단정하지 말고, 영국계 순매도 소식이 나오면 연금·세제 요인과 글로벌 레버리지 정리 요인 중 어느 쪽에 가까운지 "
+               "먼저 구분하기. 레버리지 요인이면 레버리지가 쏠린 종목의 변동성에 유의."),
+         source="매일경제 2026-11-06 · 반론: 네이버 블로그 ranto28 2026-11-07 · FCA 연금 인출 자료 2025/26 (언론 보도로 확인)",
+         source_url="https://blog.naver.com/ranto28/224467966071", verified=1),
     dict(seed="us_inflow",
          title="미국계 자금은 7월부터 순매수 (영국계 매도의 반대 신호)",
          kind="해외 자금 흐름", direction="호재 가능", status="진행 중",
@@ -103,10 +112,36 @@ def _sync_cal(conn, rid):
         conn.execute("UPDATE risk_radar SET cal_id=NULL WHERE id=?", (rid,))
 
 
+def migrate_uk(conn):
+    """예전에 넣은 영국 항목('연금 때문' 단정)을 해석 논쟁 내용으로 바꿈. 사용자가 직접 고친 항목이면 건드리지 않고 새 항목을 따로 추가."""
+    if conn.execute("SELECT 1 FROM radar_meta WHERE key='uk_interp_v2'").fetchone():
+        return
+    now = dt.date.today().isoformat()
+    seed_v2 = next(x for x in SEEDS if x["seed"] == "uk_pension_iht")
+    row = conn.execute("SELECT id, added, updated FROM risk_radar WHERE seed='uk_pension_iht'").fetchone()
+    if row and row[1] == row[2]:                         # 고친 적 없음 → 새 내용으로 교체
+        conn.execute("UPDATE risk_radar SET title=?, kind=?, direction=?, status=?, when_date=?, when_note=?, summary=?, impact=?,"
+                     " check_items=?, prep=?, source=?, source_url=?, verified=?, updated=?, added=? WHERE id=?",
+                     (seed_v2["title"], seed_v2["kind"], seed_v2["direction"], seed_v2["status"], seed_v2["when_date"],
+                      seed_v2["when_note"], seed_v2["summary"], seed_v2["impact"], seed_v2["check_items"], seed_v2["prep"],
+                      seed_v2["source"], seed_v2["source_url"], seed_v2["verified"], now, now, row[0]))
+        _sync_cal(conn, row[0])
+    elif row:                                            # 사용자가 고쳤음 → 반론 정리를 별도 항목으로
+        cur = conn.execute(
+            "INSERT INTO risk_radar (seed, title, kind, direction, status, when_date, when_note, summary, impact, check_items,"
+            " prep, source, source_url, verified, added, updated) VALUES ('uk_interp_v2',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("[해석 논쟁] " + seed_v2["title"], seed_v2["kind"], seed_v2["direction"], seed_v2["status"], "", seed_v2["when_note"],
+             seed_v2["summary"], seed_v2["impact"], seed_v2["check_items"], seed_v2["prep"], seed_v2["source"],
+             seed_v2["source_url"], seed_v2["verified"], now, now))
+    conn.execute("INSERT OR IGNORE INTO radar_meta VALUES ('uk_interp_v2', ?)", (now,))
+    conn.commit()
+
+
 def seed(conn):
     """처음 한 번만 기본 항목을 넣음 (지운 항목이 다시 생기지 않게 표시를 남김)"""
     ensure(conn)
     if conn.execute("SELECT 1 FROM radar_meta WHERE key='seeded_v1'").fetchone():
+        migrate_uk(conn)
         return 0
     now = dt.date.today().isoformat()
     n = 0
@@ -119,6 +154,7 @@ def seed(conn):
         _sync_cal(conn, cur.lastrowid)
         n += 1
     conn.execute("INSERT INTO radar_meta VALUES ('seeded_v1', ?)", (now,))
+    conn.execute("INSERT OR IGNORE INTO radar_meta VALUES ('uk_interp_v2', ?)", (now,))
     conn.commit()
     return n
 
@@ -259,11 +295,14 @@ PROFILES = {
              "비중을 바꾸면 규모가 커요 (올해 1월 7.8조·2월 8.7조 순매도, 1~9월 65조원 순매도 후 7월부터 순매수로 돌아섰다는 분석).",
         triggers="미국 금리·달러 방향 · AI·반도체 사이클 (한국 시총에서 반도체 비중이 커요) · 미국 증시 급락 시 위험자산 일괄 축소 · MSCI 등 신흥국 비중 조정",
         checks="미국계 월간 순매매(금감원) · 원/달러 환율 · 필라델피아 반도체지수 · 미 10년 금리"),
-    "영국": dict(type="단기 성향 · 비중보다 영향이 큰 나라",
-        read="보유 비중은 약 11%지만 단기 투자 성향이 강하다는 보도가 있고 매매 변동이 커요. 2025년 11월 1~24일 영국계 순매도가 외국인 전체 "
-             "순매도의 36.9%(한국거래소 집계)였고, 올해 1~9월 97조원 순매도(기사)도 영국계예요. 영국 연금 상속세(2027-04)가 겹쳐 있어요.",
-        triggers="영국 연금·상속세 개편 · 파운드·영국 금리 · 헤지펀드 포지션 청산·축소 · 영국 운용사 자산배분 변경",
-        checks="영국계 월간 순매도가 줄고 있는지 · 외국인 전체 순매매 대비 영국 비중 · 시행(2027-04) 전후 변동성"),
+    "영국": dict(type="'영국 사람 돈'이 아닐 수 있음 (등록지 기준) · 단기 성향",
+        read="보유 비중은 약 11%인데 매매 변동이 커요. 금감원 국적은 투자자 등록지 기준이라, 런던 법인(미국계 투자은행의 영국 법인 등)이 헤지펀드의 스왑·레버리지 "
+             "포지션을 헤지하려고 사고판 물량도 영국계로 잡힐 수 있다는 반론이 있어요 (블로그 2026-11-07, 공개 통계로는 검증하지 못했어요). "
+             "기사는 영국 연금 상속세(2027-04-06 시작)를 이유로 들었지만, 연금 인출 증가분 약 40조원에 한국 비중 1~2%를 곱해도 0.4~0.8조원이라 "
+             "올해 1~9월 순매도 97조원을 설명하기 어려워요. 2025년 11월 1~24일 영국계 순매도가 외국인 전체 순매도의 36.9%(한국거래소 집계)였던 것도 "
+             "짧은 호흡의 큰 매매를 시사해요.",
+        triggers="글로벌 헤지펀드 레버리지 축소·증거금 인상(미국 IB의 런던 법인 경유) · 반도체 등 레버리지가 쏠린 종목의 급락 · 영국 연금·상속세 개편 · 파운드·영국 금리",
+        checks="영국계 월간 순매매의 급변동 여부(레버리지 요인은 급하게 움직였다 되돌아오고, 연금 요인은 완만) · 미국계 순매매와 같이 움직이는지 · 5% 공시의 런던 소재 IB 법인"),
     "싱가포르": dict(type="국부펀드·아시아 운용 허브 (가설)",
         read="3위권 보유국이에요. 국부펀드·패밀리오피스·아시아 지역 운용사 자금이 섞여 있다고 보이고(가설), 2025년에는 7.2조원 순매도였어요. "
              "싱가포르 거점이 아시아 내 자산배분을 바꿀 때 한국 비중도 같이 움직일 수 있어요.",
@@ -291,7 +330,7 @@ PROFILES = {
         triggers="중국 자본통제·해외투자 쿼터 변경 · 위안화 · 한중 관계", checks="중국계 월간 순매매 · 위안/원 환율"),
 }
 COMMON = ("공통 변수: 원/달러 환율 · MSCI·FTSE 지수 정기 조정(리밸런싱) · 한국 세제·배당·밸류업 정책 · 국내 시장 변동성. "
-          "국적은 '투자자 등록 국적(펀드 거점 포함)' 기준이라 실제 돈의 주인과 다를 수 있어요.")
+          "국적은 '투자자 등록지' 기준이라 실제 돈의 주인과 다를 수 있어요 (미국 IB의 런던 법인, 룩셈부르크·아일랜드·케이맨의 펀드, 조세회피지역 법인 등).")
 
 
 def ensure_countries(conn):
