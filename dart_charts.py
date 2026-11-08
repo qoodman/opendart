@@ -136,3 +136,31 @@ def sparkline(closes, avg=None):
     return (f'<svg class="spark viz" viewBox="0 0 {W} {H}" preserveAspectRatio="none" aria-hidden="true">{avg_line}'
             f'<polyline points="{pts}" fill="none" stroke="var(--price)" stroke-width="1.8" '
             f'vector-effect="non-scaling-stroke" stroke-linejoin="round"/></svg>')
+
+
+def net_line(series):
+    """누적 순증감 선: series = [(YYYY-MM-DD, 누적주수)] 날짜순. x는 날짜 간격대로, 0 기준선(점선) 포함.
+    마지막 값이 플러스면 빨강(늘림), 마이너스면 파랑(줄임)."""
+    import datetime as _dt
+    pts = [(_dt.date.fromisoformat(d), v) for d, v in series if v is not None]
+    if len(pts) < 2:
+        return ""
+    vals = [v for _, v in pts] + [0]
+    lo, hi = min(vals), max(vals)
+    span = (hi - lo) or 1
+    d0, d1 = pts[0][0], pts[-1][0]
+    dspan = (d1 - d0).days or 1
+    W, H = 300, 44
+    x = lambda d: (d - d0).days * W / dspan          # noqa: E731
+    y = lambda v: 3 + (1 - (v - lo) / span) * (H - 6)  # noqa: E731
+    # 계단식(다음 변동일 전까지 같은 값)으로 이어서 '그 사이엔 변화 없음'을 정직하게 보여 줌
+    path = [f"{x(pts[0][0]):.1f},{y(pts[0][1]):.1f}"]
+    for (da, va), (db, vb) in zip(pts, pts[1:]):
+        path.append(f"{x(db):.1f},{y(va):.1f}")
+        path.append(f"{x(db):.1f},{y(vb):.1f}")
+    color = "var(--up)" if pts[-1][1] > 0 else "var(--down)" if pts[-1][1] < 0 else "var(--muted)"
+    return (f'<svg class="spark viz" viewBox="0 0 {W} {H}" preserveAspectRatio="none" aria-hidden="true">'
+            f'<line x1="0" x2="{W}" y1="{y(0):.1f}" y2="{y(0):.1f}" stroke="var(--muted)" stroke-width="1" '
+            f'stroke-dasharray="3 3" vector-effect="non-scaling-stroke"/>'
+            f'<polyline points="{" ".join(path)}" fill="none" stroke="{color}" stroke-width="1.8" '
+            f'vector-effect="non-scaling-stroke" stroke-linejoin="round"/></svg>')

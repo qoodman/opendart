@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 
-from dart_charts import CHART_CSS, CHART_JS, bar_list, price_chart, sparkline
+from dart_charts import CHART_CSS, CHART_JS, bar_list, net_line, price_chart, sparkline
 from research import consensus, suspicious
 
 PAGE_SIZE = 50
@@ -684,6 +684,67 @@ def flow_block(conn, code):
             f'{body}</table></details>')
 
 
+def net_trend(conn, code):
+    """종목 하나에서 제출인별 누적 순증감(주): 변동일 순으로 공시의 증감을 쌓은 값."""
+    try:
+        rows = conn.execute(
+            "SELECT 제출인, 변동일, 증감 FROM detail WHERE 종목코드=? AND 증감 IS NOT NULL AND 변동일 IS NOT NULL "
+            "ORDER BY 변동일", (code,)).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    per = {}
+    for who, day, d in rows:
+        try:
+            d = float(d)
+        except (TypeError, ValueError):
+            continue
+        a = per.setdefault(who or "(이름 없음)", {"days": {}, "buy": 0.0, "sell": 0.0})
+        a["days"][day] = a["days"].get(day, 0.0) + d
+        if d > 0:
+            a["buy"] += d
+        else:
+            a["sell"] -= d
+    out = []
+    for who, a in per.items():
+        cum, series = 0.0, []
+        for day in sorted(a["days"]):
+            cum += a["days"][day]
+            series.append((day, cum))
+        out.append(dict(who=who, total=cum, buy=a["buy"], sell=a["sell"],
+                        first=series[0][0], last=series[-1][0], series=series))
+    out.sort(key=lambda r: (-abs(r["total"]), r["who"]))
+    return out
+
+
+def trend_block(conn, code, show=8):
+    """종목 화면: 제출인별로 지분을 늘렸는지 줄였는지 (공시에 나온 증감의 누적)."""
+    items = net_trend(conn, code)
+    if not items:
+        return ""
+    up = sum(1 for r in items if r["total"] > 0)
+    down = sum(1 for r in items if r["total"] < 0)
+    flat = len(items) - up - down
+
+    def card(r):
+        cls = "up" if r["total"] > 0 else "down" if r["total"] < 0 else ""
+        arrow = "▲ 늘림" if r["total"] > 0 else "▼ 줄임" if r["total"] < 0 else "변동 없음"
+        return (f'<div class="card"><div class="row"><div><b>{escape(r["who"])}</b></div>'
+                f'<div class="{cls}"><b>{r["total"]:+,.0f}주</b> {arrow}</div></div>'
+                f'<div class="muted">매수 {r["buy"]:,.0f}주 · 매도 {r["sell"]:,.0f}주 · '
+                f'{escape(r["first"])} ~ {escape(r["last"])}</div>{net_line(r["series"])}</div>')
+
+    head_cards = "".join(card(r) for r in items[:show])
+    rest = items[show:]
+    more = (f'<details><summary class="muted">나머지 {len(rest)}곳 더 보기</summary>'
+            + "".join(card(r) for r in rest) + "</details>") if rest else ""
+    return ('<h2>지분 변화 추이</h2>'
+            f'<div class="muted" style="margin-bottom:6px">늘린 곳 <b class="up">{up}</b> · 줄인 곳 <b class="down">{down}</b>'
+            + (f' · 변동 없음 {flat}' if flat else "") + '</div>' + head_cards + more
+            + '<p class="muted">공시에 나온 증감(주)을 변동일 순서로 쌓은 값이에요. 보유 주식 수나 비율이 아니라 '
+              '<b>이 기간 공시에 잡힌 변화량의 합</b>이고, 처음 공시 이전 보유분은 들어 있지 않아요. '
+              '같은 거래가 정정 공시로 다시 올라오면 겹쳐 셀 수 있어요.</p>')
+
+
 def value_map(conn):
     """종목별 PER·PBR·배당 (stock_value.py가 받아 둔 값). 없으면 빈 dict."""
     try:
@@ -783,7 +844,8 @@ def view_stock(conn, code, q=None):
             chart = stat + price_chart([p["date"] for p in pr], [p["close"] for p in pr], buys, avg,
                                        title=f"{name} 주가와 기관 매수", target=tgt)
     reports = view_reports(conn, code, tgt, n_br, last_close)
-    body = (head + value_line(value_map(conn).get(code)) + flow_block(conn, code) + chart + reports + group_bar + '<h2 id="sum">날짜별 평균 매수단가</h2>'
+    body = (head + value_line(value_map(conn).get(code)) + flow_block(conn, code) + chart + reports
+            + trend_block(conn, code) + group_bar + '<h2 id="sum">날짜별 평균 매수단가</h2>'
             + (t1 or '<p class="muted">매수 내역 없음</p>')
             + '<h2 id="det">모든 변동 내역</h2>' + t2)
     return page(f"{name} — DART 단순투자", body, charts=bool(chart))
