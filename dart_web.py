@@ -1119,13 +1119,29 @@ def view_parse(conn, rno):
             trs.append("<tr>" + "".join(f"<td>{escape(c)}</td>" for c in cells) + f"<td>{out}</td></tr>")
         blocks.append(f'<div class="muted" style="margin-top:8px">인식한 칸: {escape(desc)}</div>'
                       f'<div class="scroll"><table>{"".join(trs)}</table></div>')
+    # 보유 현황 표(보유주식등의 수·보유비율): 변동 내역 표가 아니어서 위에서는 빠지므로 원문 그대로 따로 보여 줌
+    holds = []
+    for tb in soup.find_all("table"):
+        head = tb.get_text(" ")
+        if "변동일" in head and "단가" in head:
+            continue
+        if not re.search(r"보유\s*비율|보유\s*주식\s*등의\s*수|지분율", head):
+            continue
+        grid = [row for row in de.expand_table(tb) if any(c.strip() for c in row)]
+        if len(grid) < 2:                       # 제목만 있는 표는 건너뜀
+            continue
+        trs = "".join("<tr>" + "".join(f"<td>{escape(' '.join(c.split()))}</td>" for c in row) + "</tr>"
+                      for row in grid[:40])
+        holds.append(f'<div class="scroll"><table>{trs}</table></div>')
+    hold_html = ('<h2>보유 현황 표 (원문 그대로)</h2><p class="muted">보유주식등의 수와 보유비율이 들어 있는 표입니다. '
+                 '프로그램은 아직 이 표를 읽지 않습니다.</p>' + "".join(holds[:4])) if holds else ""
     saved = "".join(f'<tr><td>{escape(str(r["변동일"]))}</td><td>{escape(str(r["방법"]))}</td>'
                     f'<td>{won(r["증감"])}</td><td>{won(r["단가"])}</td></tr>' for r in stored)
     body = (f'<div class="row"><b>공시 {escape(rno)}</b><a href="{dart_link(rno)}">DART 원문 ↗</a></div>{note}'
             '<h2>원문 표와 읽은 값</h2><p class="muted">맨 오른쪽 칸이 프로그램이 읽은 증감·단가입니다. '
             '틀린 줄이 있으면 이 화면을 캡처해서 보내 주세요.</p>' + ("".join(blocks) or '<p class="muted">세부변동내역 표가 없습니다.</p>')
             + (f'<h2>화면에 쓰이는 값 (마지막 수집 기준)</h2><div class="scroll"><table><tr><th>변동일</th><th>방법</th>'
-               f'<th>증감</th><th>단가</th></tr>{saved}</table></div>' if saved else ""))
+               f'<th>증감</th><th>단가</th></tr>{saved}</table></div>' if saved else "") + hold_html)
     return page("표 확인", body)
 
 
