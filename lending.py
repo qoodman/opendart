@@ -86,8 +86,20 @@ def _has(k, words):
     return any(w in k for w in words)
 
 
+# 실제 응답에서 확인된 필드 이름 (2026-11-09 서버의 '연결 확인' 결과). 체결·상환 필드 이름은 아직 못 봄.
+KNOWN = {"date": "basDt", "code": "stckItmsCd", "name": "stckItmsNm", "market": "mrktClsfNm",
+         "balance_shs": "balnStckCnt", "balance_amt": "balnStckAmt"}
+
+
 def find_fields(item):
-    """한 줄의 키들에서 날짜·코드·이름·시장·체결·상환·잔고주수·잔고금액을 찾음 → {역할: 키 또는 None}"""
+    """한 줄의 키들에서 날짜·코드·이름·시장·체결·상환·잔고주수·잔고금액을 찾음 → {역할: 키 또는 None}.
+    확인된 실제 이름(KNOWN)이 다 있으면 그걸 쓰고, 아니면 이름 규칙으로 찾음 (체결·상환은 규칙으로만)."""
+    if all(v in item for v in KNOWN.values()):
+        out = dict.fromkeys(("date", "code", "name", "market", "settle", "repay", "balance_shs", "balance_amt"))
+        out.update(KNOWN)
+        rest = _guess_flows(item, set(KNOWN.values()))
+        out.update(rest)
+        return out
     keys = list(item)
     low = {k: k.lower() for k in keys}
     out = dict.fromkeys(("date", "code", "name", "market", "settle", "repay", "balance_shs", "balance_amt"))
@@ -101,14 +113,18 @@ def find_fields(item):
     bal_amt = next((k for k in keys if _has(low[k], _BAL) and _has(low[k], _AMOUNT)), None)
     bal_shs = next((k for k in keys if _has(low[k], _BAL) and _has(low[k], _SHARES) and k != bal_amt), None)
     out["balance_amt"], out["balance_shs"] = bal_amt, bal_shs
-    # 날짜·코드·이름·시장으로 쓴 칸과, 숫자가 아닌 칸은 체결·상환 후보에서 뺌 (예: srtnCd 안의 'rtn'이 상환으로 잡히던 문제)
-    used = {bal_amt, bal_shs, out["date"], out["code"], out["name"], out["market"]}
-    numeric = [k for k in keys if k not in used and num(item[k]) is not None]
-    out["repay"] = next((k for k in numeric if _has(low[k], ("rpym", "repay", "sanghwan", "redemp", "return", "rdmp"))), None)
-    used.add(out["repay"])
-    out["settle"] = next((k for k in numeric if k not in used and _has(low[k], ("cncl", "chegyeol", "exec", "cnts", "settle", "ctrt", "new", "trd", "lend"))
-                          and _has(low[k], _SHARES)), None)
+    out.update(_guess_flows(item, {bal_amt, bal_shs, out["date"], out["code"], out["name"], out["market"]}))
     return out
+
+
+def _guess_flows(item, used):
+    """체결·상환 필드를 이름 규칙으로 찾음. 이미 다른 역할로 쓴 칸과 숫자가 아닌 칸은 후보에서 뺌 (예: srtnCd 안의 'rtn'이 상환으로 잡히던 문제)"""
+    low = {k: k.lower() for k in item}
+    numeric = [k for k in item if k not in used and num(item[k]) is not None]
+    repay = next((k for k in numeric if _has(low[k], ("rpym", "repay", "sanghwan", "redemp", "return", "rdmp", "rtn", "rpmt"))), None)
+    settle = next((k for k in numeric if k != repay and _has(low[k], ("cncl", "chegyeol", "exec", "cnts", "settle", "sttl", "ctrt", "new", "trd", "lend"))
+                   and _has(low[k], _SHARES)), None)
+    return {"settle": settle, "repay": repay}
 
 
 def parse_item(item, fields=None):
