@@ -1118,6 +1118,22 @@ def cmd_market_check(args):
     return 0
 
 
+def krx_key_now():
+    return read_env_file().get("KRX_API_KEY", "") or os.environ.get("KRX_API_KEY", "")
+
+
+def save_krx_key(key, path=None):
+    """KRX Open API 인증키를 .env 에 저장. (성공 여부, 안내 문구). 공백은 지우고, 영문·숫자·-_ 만 허용."""
+    key = "".join((key or "").split())
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{16,100}", key):
+        return False, "키 형식이 맞지 않아요. KRX Open API에서 받은 키를 그대로 붙여넣어 주세요 (공백 없이 영문·숫자 16~100자)."
+    if path is None:
+        set_env_value("KRX_API_KEY", key)
+    else:
+        set_env_value("KRX_API_KEY", key, path=path)
+    return True, "KRX 키를 저장했어요."
+
+
 def cmd_web(args):
     from dart_web import serve
     # 수집을 시작할 때 .env를 새로 읽도록, .env에서 온 값은 빼고 넘김
@@ -1138,7 +1154,7 @@ def cmd_web(args):
                     realestate=env("REALESTATE_URL"), test_notify=cmd_notify_test_web,
                     update_info=update_info, check_update=check_update, start_update=start_update,
                     backup_list=backup_list, backup_busy=backup_busy, backup_start=backup_start,
-                    backup_file=backup_file)
+                    backup_file=backup_file, krx_key=krx_key_now, save_krx_key=save_krx_key)
     serve(results_db(), host=args.host, port=args.port, child_env=child_env,
           get_key=lambda: read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", ""),
           save_key=save_key, settings_api=settings_api)

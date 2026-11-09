@@ -287,6 +287,22 @@ def key_form(msg="", bad=False, current=""):
             'placeholder="API 키" style="flex:1 1 220px"><button>저장</button></form>' + note + '</div>')
 
 
+def krx_key_card(S, msg="", bad=False):
+    """설정 → KRX Open API 키 (공매도·시세 같은 KRX 데이터용). 키는 앞뒤 4자리만 보여 줌."""
+    if not S or "save_krx_key" not in S:
+        return ""
+    cur = S["krx_key"]() if "krx_key" in S else ""
+    now = (f'<div class="muted">지금 키: {escape(cur[:4])}…{escape(cur[-4:])} (저장됨)</div>' if cur
+           else '<div class="muted">아직 저장된 키가 없어요.</div>')
+    note = f'<div class="{"warn" if bad else ""}" style="margin-top:6px">{escape(msg)}</div>' if msg else ""
+    return ('<div class="card"><b>KRX Open API 키</b>' + now +
+            '<div class="muted">openapi.krx.co.kr → 마이페이지 → API 인증키 신청에서 받은 키를 붙여넣으세요. '
+            '키 승인과는 별도로 <b>서비스 이용신청</b>에서 쓸 서비스를 신청하고 승인받아야 그 서비스를 부를 수 있어요.</div>'
+            '<form method="post" action="/settings/krx-key" class="filters" style="margin:8px 0 0">'
+            '<input type="password" name="key" autocomplete="off" autocapitalize="off" spellcheck="false" '
+            'placeholder="KRX 인증키" style="flex:1 1 220px"><button>저장</button></form>' + note + '</div>')
+
+
 def setting_field(key, label, kind, help_, val, choices, err):
     e = f'<div class="warn" style="font-size:13px">{escape(err)}</div>' if err else ""
     h = f'<div class="muted">{escape(help_)}</div>' if help_ else ""
@@ -374,6 +390,7 @@ def view_settings(get_key, q, S=None):
     if q.get("saved"):
         body += run_button()
     if S:
+        body += krx_key_card(S, q.get("kn", ""), q.get("kbad") == "1")
         body += backup_box(S)
         errs = json.loads(q["errs"]) if q.get("errs") else {}
         note = ""
@@ -3068,6 +3085,11 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
             if path == "/settings/notify-test" and settings_api:
                 ok, why = settings()["test_notify"]()
                 return self._redirect("/settings?" + urlencode({"nt": ("✔ " if ok else "✖ ") + why}))
+            if path == "/settings/krx-key" and settings_api:
+                n = min(int(self.headers.get("Content-Length") or 0), 4096)
+                form = parse_qs(self.rfile.read(n).decode("utf-8", "ignore"))
+                ok, why = settings()["save_krx_key"]((form.get("key") or [""])[0])
+                return self._redirect("/settings?" + urlencode({"kn": why, **({} if ok else {"kbad": "1"})}))
             if path == "/settings/key" and save_key:
                 n = min(int(self.headers.get("Content-Length") or 0), 4096)
                 form = parse_qs(self.rfile.read(n).decode("utf-8", "ignore"))

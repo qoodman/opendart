@@ -99,6 +99,15 @@ LAW_OC, ASSEMBLY_API_KEY)를 그대로 씁니다. 이 앱 `.env`에 따로 넣�
 - 확인: `.venv/bin/python dart_server.py market-check`
 - 새 정책 소식은 ntfy로 알립니다 (첫 수집은 기준선). 설정 → 시장·정책에서 끌 수 있습니다.
 
+## KRX Open API 키
+
+한국거래소(KRX) 데이터를 쓸 때 필요한 키입니다. 발급은 openapi.krx.co.kr → 회원가입·로그인 → 마이페이지 → API 인증키 신청.
+키 승인과 별개로 **서비스 이용신청**에서 쓸 서비스를 서비스마다 신청하고 승인받아야 그 서비스를 부를 수 있습니다.
+
+- 대시보드 **설정** 맨 위 쪽의 **KRX Open API 키** 칸에 붙여넣고 저장 (화면에는 앞뒤 4자리만 보입니다).
+- 또는 서버에서 `.venv/bin/python dart_server.py set-env KRX_API_KEY` 를 실행하고 키를 입력.
+- 키는 서버 `.env`(권한 600)에만 저장되고 GitHub에는 올라가지 않습니다.
+
 ## 5. 알림
 
 부동산 앱과 같은 ntfy 주제를 쓰므로 **폰에서 따로 설정할 게 없습니다.** 새 공시가 있는 날 저녁에 이렇게 옵니다.
