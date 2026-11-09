@@ -807,16 +807,51 @@ def net_trend(conn, code):
     return out
 
 
-def _ratio_check(h, k):
-    """공시 요약표의 보유비율을 KRX 상장주식수로 다시 계산해 맞는지 확인 (상장주식수는 최신이라 조금 다를 수 있어요)"""
-    if not k or not k.get("list_shrs") or not h.get("qty"):
+def _stake(r, k, pos):
+    """한 제출인의 '전체 주식 중 몇 %'. → dict(pct, qty, shrs, src, reported, diff, est) 또는 None
+    우선순위: ① 보고서 보유수량 ÷ KRX 상장주식수 ② 공시에 적힌 보유비율 ③ 공시 증감 합(추정) ÷ 상장주식수"""
+    shrs = k["list_shrs"] if k and k.get("list_shrs") else None
+    h = r.get("hold")
+    reported = h["now"] if h and h.get("now") is not None else None
+    if h and h.get("qty") and shrs:
+        pct = h["qty"] / shrs * 100
+        return dict(pct=pct, qty=h["qty"], shrs=shrs, src="보고서 보유수량 ÷ 상장주식수", reported=reported,
+                    diff=(pct - reported) if reported is not None else None, est=False)
+    if reported is not None:
+        return dict(pct=reported, qty=h.get("qty"), shrs=shrs, src="공시 요약표에 적힌 보유비율", reported=reported, diff=None, est=False)
+    if pos and shrs and pos["remain"]:
+        return dict(pct=pos["remain"] / shrs * 100, qty=pos["remain"], shrs=shrs, src="공시 증감 합(추정) ÷ 상장주식수",
+                    reported=None, diff=None, est=True)
+    return None
+
+
+def _stake_html(r, st, h):
+    """카드 맨 위 지분율 줄: 전체 주식의 X% + 계산 근거, 공시 요약표 비율 비교, 직전 대비 변화"""
+    if not st:
         return ""
-    calc = h["qty"] / k["list_shrs"] * 100
-    diff = calc - h["now"]
-    ok_ = abs(diff) <= 0.3
-    return (f'<div class="muted" style="font-size:12px">상장주식수 {won(k["list_shrs"])}주 기준 계산 {calc:.2f}% '
-            + ("✔ 공시 값과 맞아요" if ok_ else f'<span class="warn">⚠ 공시 값과 {diff:+.2f}%p 차이 (증자·소각으로 주식수가 바뀌었거나 읽은 값이 틀렸을 수 있어요)</span>')
-            + '</div>')
+    qty = f'{won(st["qty"])}주' if st["qty"] else ""
+    base = (f'{qty} ÷ 상장주식수 {won(st["shrs"])}주' if st["shrs"] and st["qty"] else escape(st["src"]))
+    head = (f'<div style="margin-top:6px">전체 주식의 {"약 " if st["est"] else ""}<b style="font-size:17px">{st["pct"]:.2f}%</b>'
+            f'{" <span class=chip>추정</span>" if st["est"] else ""} <span class="muted">({base})</span></div>')
+    lines = []
+    if st["reported"] is not None and st["src"].startswith("보고서"):
+        if abs(st["diff"]) <= 0.3:
+            lines.append(f'공시 요약표 비율 {st["reported"]:.2f}% <b style="color:var(--accent)">✔ 계산과 맞아요</b>')
+        else:
+            lines.append(f'공시 요약표 비율 {st["reported"]:.2f}% <span class="warn">⚠ 계산과 {st["diff"]:+.2f}%p 차이 '
+                         '(증자·소각으로 주식수가 바뀌었거나 읽은 값이 틀렸을 수 있어요)</span>')
+    elif st["reported"] is not None:
+        lines.append(f'공시 요약표에 적힌 비율이에요 (상장주식수를 받으면 직접 계산해서 비교해요)')
+    if st["est"]:
+        lines.append('공시에 잡힌 증감을 쌓은 추정이에요. 처음 공시 이전 보유분은 빠져 있어서 실제와 다를 수 있어요 '
+                     '(다시 분석한 공시에는 보고서 보유수량으로 계산해요)')
+    if h and h.get("prev") is not None and h.get("now") is not None:
+        d = h["now"] - h["prev"]
+        lines.append(f'직전 보고서 {h["prev"]:.2f}% → <span class="{"up" if d > 0 else "down" if d < 0 else ""}">{d:+.2f}%p</span>'
+                     + f' · {escape(str(h["date"]))} 공시')
+    elif h and h.get("date"):
+        lines.append(f'신규 보고 · {escape(str(h["date"]))} 공시')
+    return head + "".join(f'<div class="muted" style="font-size:12px">{x}</div>' for x in lines)
 
 
 def trend_block(conn, code, show=8):
@@ -825,6 +860,9 @@ def trend_block(conn, code, show=8):
     if not items:
         return ""
     krx_k = _ext_data(conn)[0].get(code)
+    POS = pf.compute(conn)
+    stakes = {r["who"]: _stake(r, krx_k, POS.get((r["who"], code))) for r in items}
+    firm = [st["pct"] for st in stakes.values() if st and not st["est"]]       # 보고서·공시 비율로 확인된 값만
     up = sum(1 for r in items if r["total"] > 0)
     down = sum(1 for r in items if r["total"] < 0)
     flat = len(items) - up - down
@@ -832,20 +870,8 @@ def trend_block(conn, code, show=8):
     def card(r):
         cls = "up" if r["total"] > 0 else "down" if r["total"] < 0 else ""
         arrow = "▲ 늘림" if r["total"] > 0 else "▼ 줄임" if r["total"] < 0 else "변동 없음"
-        hold = ""
-        if r.get("hold"):
-            h = r["hold"]
-            if h["prev"] is None:
-                chg = ' <span class="muted">(신규 보고)</span>'
-            else:
-                d = h["now"] - h["prev"]
-                chg = (f' <span class="{"up" if d > 0 else "down" if d < 0 else ""}">'
-                       f'(직전 {h["prev"]:.2f}% → {d:+.2f}%p)</span>')
-            hold = (f'<div style="margin-top:4px">보유비율 <b>{h["now"]:.2f}%</b>{chg}'
-                    + (f' · {h["qty"]:,.0f}주' if h["qty"] else "")
-                    + f' <span class="muted">· {escape(str(h["date"]))} 공시</span></div>'
-                    + _ratio_check(h, krx_k)
-                    + (sparkline(r["ratios"]) if len(r["ratios"]) >= 2 else ""))
+        h = r.get("hold")
+        hold = _stake_html(r, stakes.get(r["who"]), h) + (sparkline(r["ratios"]) if h and len(r.get("ratios", [])) >= 2 else "")
         return (f'<div class="card"><div class="row"><div><b>{escape(r["who"])}</b></div>'
                 f'<div class="{cls}"><b>{r["total"]:+,.0f}주</b> {arrow}</div></div>{hold}'
                 f'<div class="muted">매수 {r["buy"]:,.0f}주 · 매도 {r["sell"]:,.0f}주 · '
@@ -857,7 +883,10 @@ def trend_block(conn, code, show=8):
             + "".join(card(r) for r in rest) + "</details>") if rest else ""
     return ('<h2>지분 변화 추이</h2>'
             f'<div class="muted" style="margin-bottom:6px">늘린 곳 <b class="up">{up}</b> · 줄인 곳 <b class="down">{down}</b>'
-            + (f' · 변동 없음 {flat}' if flat else "") + '</div>' + head_cards + more
+            + (f' · 변동 없음 {flat}' if flat else "") + '</div>'
+            + (f'<div style="margin-bottom:6px">공시로 확인된 보유 합계 <b>약 {sum(firm):.2f}%</b> '
+               f'<span class="muted">({len(firm)}곳 · 함께 보고한 지분은 겹칠 수 있어요)</span></div>' if len(firm) >= 2 else "")
+            + head_cards + more
             + '<p class="muted">아래 추이 선과 순증감은 공시에 나온 증감(주)을 변동일 순서로 쌓은 값이에요. '
               '<b>이 기간 공시에 잡힌 변화량의 합</b>이고, 처음 공시 이전 보유분은 들어 있지 않아요. '
               '같은 거래가 정정 공시로 다시 올라오면 겹쳐 셀 수 있어요. '
