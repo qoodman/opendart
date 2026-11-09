@@ -303,6 +303,55 @@ def krx_key_card(S, msg="", bad=False):
             'placeholder="KRX 인증키" style="flex:1 1 220px"><button>저장</button></form>' + note + '</div>')
 
 
+def ext_check_card(S):
+    if not S or "ext_check" not in S:
+        return ""
+    krx_ok = bool(S["krx_key"]()) if "krx_key" in S else False
+    dg_ok = bool(S["datagokr_key"]()) if "datagokr_key" in S else False
+    return ('<div class="card"><b>외부 데이터 연결 확인</b>'
+            '<div class="muted">KRX 시세(시가총액·상장주식수)와 주식 대차거래(대차잔고)가 서버에서 실제로 받아지는지 확인해요. '
+            '받은 응답의 필드 이름도 그대로 보여 주니, 이상하면 이 화면을 캡처해서 보내 주세요.</div>'
+            '<form method="post" action="/settings/ext-check" class="filters" style="margin:8px 0 0">'
+            f'<button name="src" value="krx"{"" if krx_ok else " disabled"}>KRX 확인</button>'
+            f'<button name="src" value="lending"{"" if dg_ok else " disabled"}>대차거래 확인</button></form>'
+            + ('' if krx_ok else '<div class="muted">KRX 키를 먼저 저장해 주세요.</div>')
+            + ('' if dg_ok else '<div class="muted">공공데이터포털 키(DATA_GO_KR_KEY)가 없어서 대차거래는 확인할 수 없어요.</div>') + '</div>')
+
+
+def view_ext_check(res):
+    """연결 확인 결과 화면"""
+    back = '<p><a href="/settings">← 설정으로</a></p>'
+    if res.get("error"):
+        return page("연결 확인", f'<div class="card warn">{escape(res["error"])}</div>' + back)
+
+    def kv(d, limit=18):
+        rows = "".join(f'<tr><td>{escape(str(k))}</td><td>{escape(str(v))}</td></tr>' for k, v in list(d.items())[:limit])
+        return f'<div class="scroll"><table>{rows}</table></div>'
+    cards = []
+    for it in res["items"]:
+        if res["src"] == "krx":
+            title = f'{it["market"]} {it["label"]} <span class="muted">{escape(it["service"])}</span>'
+            info = f'기준일 {escape(it["day"])} · {it["rows"]:,}줄' if it["ok"] else ""
+            fields = ""
+        else:
+            title = f'<span class="muted">{escape(it["op"])}</span>'
+            info = f'기준일 {escape(it["day"])} · 전체 {it["total"]:,}줄' if it["ok"] else ""
+            f = it.get("fields")
+            fields = ('<div style="margin-top:6px"><b style="font-size:13px">역할별로 찾은 필드</b>' + kv(
+                {role: f"{key or '못 찾음'}" + (f" = {it['sample'].get(key)}" if key else "") for role, key in f.items()}) + "</div>") if f else ""
+        mark = '<b style="color:var(--accent)">✔ 됩니다</b>' if it["ok"] else '<b class="warn">✖ 안 돼요</b>'
+        sample = (f'<details style="margin-top:6px"><summary class="muted">받은 첫 줄 (필드 이름 확인용)</summary>{kv(it["sample"])}</details>'
+                  if it.get("sample") else "")
+        cards.append(f'<div class="card"><div class="row"><b>{title}</b>{mark}</div>'
+                     + (f'<div class="muted">{info}</div>' if info else "")
+                     + (f'<div class="warn" style="margin-top:4px">{escape(it["note"])}</div>' if it.get("note") else "")
+                     + fields + sample + '</div>')
+    head = {"krx": "KRX Open API 연결 확인", "lending": "주식 대차거래 연결 확인"}[res["src"]]
+    return page(head, f'<h2>{head}</h2>' + "".join(cards)
+                + '<p class="muted">✖가 있으면 이유를 적어 두었어요. 대차거래는 필드 이름을 이름 규칙으로 찾기 때문에, '
+                  '\'역할별로 찾은 필드\'가 틀려 보이면 이 화면을 캡처해서 보내 주세요.</p>' + back)
+
+
 def setting_field(key, label, kind, help_, val, choices, err):
     e = f'<div class="warn" style="font-size:13px">{escape(err)}</div>' if err else ""
     h = f'<div class="muted">{escape(help_)}</div>' if help_ else ""
@@ -391,6 +440,7 @@ def view_settings(get_key, q, S=None):
         body += run_button()
     if S:
         body += krx_key_card(S, q.get("kn", ""), q.get("kbad") == "1")
+        body += ext_check_card(S)
         body += backup_box(S)
         errs = json.loads(q["errs"]) if q.get("errs") else {}
         note = ""
@@ -757,11 +807,24 @@ def net_trend(conn, code):
     return out
 
 
+def _ratio_check(h, k):
+    """공시 요약표의 보유비율을 KRX 상장주식수로 다시 계산해 맞는지 확인 (상장주식수는 최신이라 조금 다를 수 있어요)"""
+    if not k or not k.get("list_shrs") or not h.get("qty"):
+        return ""
+    calc = h["qty"] / k["list_shrs"] * 100
+    diff = calc - h["now"]
+    ok_ = abs(diff) <= 0.3
+    return (f'<div class="muted" style="font-size:12px">상장주식수 {won(k["list_shrs"])}주 기준 계산 {calc:.2f}% '
+            + ("✔ 공시 값과 맞아요" if ok_ else f'<span class="warn">⚠ 공시 값과 {diff:+.2f}%p 차이 (증자·소각으로 주식수가 바뀌었거나 읽은 값이 틀렸을 수 있어요)</span>')
+            + '</div>')
+
+
 def trend_block(conn, code, show=8):
     """종목 화면: 제출인별로 지분을 늘렸는지 줄였는지 (공시에 나온 증감의 누적)."""
     items = net_trend(conn, code)
     if not items:
         return ""
+    krx_k = _ext_data(conn)[0].get(code)
     up = sum(1 for r in items if r["total"] > 0)
     down = sum(1 for r in items if r["total"] < 0)
     flat = len(items) - up - down
@@ -781,6 +844,7 @@ def trend_block(conn, code, show=8):
             hold = (f'<div style="margin-top:4px">보유비율 <b>{h["now"]:.2f}%</b>{chg}'
                     + (f' · {h["qty"]:,.0f}주' if h["qty"] else "")
                     + f' <span class="muted">· {escape(str(h["date"]))} 공시</span></div>'
+                    + _ratio_check(h, krx_k)
                     + (sparkline(r["ratios"]) if len(r["ratios"]) >= 2 else ""))
         return (f'<div class="card"><div class="row"><div><b>{escape(r["who"])}</b></div>'
                 f'<div class="{cls}"><b>{r["total"]:+,.0f}주</b> {arrow}</div></div>{hold}'
@@ -899,7 +963,7 @@ def view_stock(conn, code, q=None):
             chart = stat + price_chart([p["date"] for p in pr], [p["close"] for p in pr], buys, avg,
                                        title=f"{name} 주가와 기관 매수", target=tgt)
     reports = view_reports(conn, code, tgt, n_br, last_close)
-    body = (head + value_line(value_map(conn).get(code)) + flow_block(conn, code) + chart + reports
+    body = (head + value_line(value_map(conn).get(code)) + flow_block(conn, code) + ext_block(conn, code) + chart + reports
             + trend_block(conn, code) + group_bar + '<h2 id="sum">날짜별 평균 매수단가</h2>'
             + (t1 or '<p class="muted">매수 내역 없음</p>')
             + '<h2 id="det">모든 변동 내역</h2>' + t2)
@@ -1834,6 +1898,78 @@ NPS_OPTS = {"1": "국민연금 제외", "0": "국민연금 포함"}
 WINDOWS = {"30": "최근 1달 매수", "90": "최근 3달 매수", "180": "최근 6달 매수", "365": "최근 1년 매수"}
 
 
+def big_won(v):
+    """원 → 1.2조 / 3,450억 / 8만 (시가총액·거래대금용)"""
+    if v is None:
+        return "-"
+    return f"{v / 1e12:,.1f}조" if v >= 1e12 else f"{v / 1e8:,.0f}억" if v >= 1e8 else f"{v / 1e4:,.0f}만"
+
+
+def _ext_data(conn):
+    """KRX 시세(시가총액·상장주식수)와 대차잔고 (없으면 빈 dict)"""
+    try:
+        import krx_api, lending
+        return krx_api.latest(conn), lending.latest(conn)
+    except Exception:
+        return {}, {}
+
+
+def lend_summary(conn, code, list_shrs=None):
+    """종목 하나의 대차잔고 요약: {date, shs, pct(상장주식수 대비), chg5, hist}. 데이터가 없으면 None"""
+    try:
+        import lending
+        hist = lending.history(conn, code, 20)
+    except Exception:
+        return None
+    if not hist or not hist[-1][1]:
+        return None
+    return dict(date=hist[-1][0], shs=hist[-1][1], pct=(hist[-1][1] / list_shrs if list_shrs else None),
+                chg5=lending.change(hist, 5), hist=hist)
+
+
+def ext_block(conn, code):
+    """종목 화면: KRX 시가총액·상장주식수·거래대금, 대차잔고와 최근 변화"""
+    krx, _ = _ext_data(conn)
+    k = krx.get(code)
+    ls = lend_summary(conn, code, k["list_shrs"] if k else None)
+    if not k and not ls:
+        return ""
+    lines = []
+    if k:
+        avg = None
+        try:
+            import krx_api
+            avg = krx_api.avg_trdval(conn, code, 10)
+        except Exception:
+            pass
+        lines.append(f'<div>시가총액 <b>{big_won(k["mktcap"])}</b> · 상장주식수 {won(k["list_shrs"])}주 · 거래대금 {big_won(k["trdval"])}'
+                     + (f' <span class="muted">(10일 평균 {big_won(avg)})</span>' if avg else "")
+                     + f' <span class="muted">· KRX {escape(k["bas_dd"])}</span></div>')
+    if ls:
+        chg = (f' · 5거래일 <b class="{"up" if ls["chg5"] > 0 else "down" if ls["chg5"] < 0 else ""}">{ls["chg5"]:+.1%}</b>'
+               if ls["chg5"] is not None else "")
+        lines.append(f'<div>대차잔고 <b>{won(ls["shs"])}주</b>'
+                     + (f' (상장주식수의 {ls["pct"]:.2%})' if ls["pct"] else "") + chg
+                     + f' <span class="muted">· {escape(ls["date"])} 기준</span></div>'
+                     + (sparkline([h[1] for h in ls["hist"]]) if len(ls["hist"]) >= 2 else ""))
+        lines.append('<div class="muted" style="font-size:12px">대차잔고는 빌려 간 주식 수예요. 공매도를 하려면 먼저 빌려야 해서 '
+                     '참고하지만, 공매도 잔고와 같은 숫자는 아니에요.</div>')
+    return '<div class="card" style="margin-top:8px">' + "".join(lines) + '</div>'
+
+
+def _ext_line(i):
+    """아이디어 카드 한 줄: 시가총액, 기관 매수금액의 시총 비중, 대차잔고"""
+    k, ls = i.get("krx"), i.get("lend")
+    parts = []
+    if k and k.get("mktcap"):
+        r = i["r"]
+        parts.append(f'시총 {big_won(k["mktcap"])} · 기관 매수 {eok(r["amt"])}은 시총의 {r["amt"] / k["mktcap"]:.2%}')
+    if ls:
+        parts.append(f'대차잔고 {won(ls["shs"])}주' + (f' ({ls["pct"]:.2%})' if ls["pct"] else "")
+                     + (f' · 5일 {ls["chg5"]:+.0%}' if ls["chg5"] is not None else ""))
+    return f'<div class="muted">{" · ".join(parts)}</div>' if parts else ""
+
+
 def money(v):
     """부호가 붙은 금액: +2.3억 / −3,000만 / +850원"""
     if v is None:
@@ -1984,7 +2120,8 @@ def view_investor(conn, name, days):
 IDEA_SORTS = {"": "정렬: 기본", "amt": "정렬: 매수금액 큰 순", "n": "정렬: 기관 수 많은 순",
               "disc": "정렬: 평단 대비 많이 싼 순", "gain": "정렬: 평단 대비 많이 오른 순",
               "last": "정렬: 최근 매수일순", "name": "정렬: 이름순",
-              "pbr": "정렬: PBR 낮은 순", "rgain": "정렬: 실현 차익 큰 순", "remain": "정렬: 남은 잔량 많은 순"}
+              "pbr": "정렬: PBR 낮은 순", "rgain": "정렬: 실현 차익 큰 순", "remain": "정렬: 남은 잔량 많은 순",
+              "lend": "정렬: 대차잔고 많이 늘어난 순 (5일)"}
 
 
 def sort_ideas(ideas, srt, tab):
@@ -2001,6 +2138,7 @@ def sort_ideas(ideas, srt, tab):
         "pbr": lambda i: (i["v"].get("pbr") is None, i["v"].get("pbr") or 0),
         "rgain": lambda i: -((i.get("pos") or {}).get("realized") or 0),
         "remain": lambda i: -((i.get("pos") or {}).get("remain") or 0),
+        "lend": lambda i: (((i.get("lend") or {}).get("chg5")) is None, -(((i.get("lend") or {}).get("chg5")) or 0)),
     }[srt]
     return sorted(ideas, key=key, reverse=(srt == "last"))
 
@@ -2099,6 +2237,10 @@ def view_ideas(conn, q):
         code = i["r"]["code"]
         i["pl"] = [POS[(w_, code)] for w_ in (i["r"]["whos"] or "").split(",") if (w_, code) in POS]
         i["pos"] = pf.summarize(i["pl"]) if i["pl"] else None
+    KRX, LEND = _ext_data(conn)
+    for i in ideas:
+        i["krx"] = KRX.get(i["r"]["code"])
+        i["lend"] = lend_summary(conn, i["r"]["code"], i["krx"]["list_shrs"] if i["krx"] else None) if LEND else None
     if sold == "none":
         ideas = [i for i in ideas if i["pos"] and i["pos"]["none_sold"]]
     elif sold == "some":
@@ -2165,7 +2307,7 @@ def view_ideas(conn, q):
                if i["v"].get("pbr") is not None and i["v"].get("per") is not None else "")
             + (f'<div class="muted">최근 5일 외국인 {_sg(fsum[r["code"]][0])}주 · 기관 {_sg(fsum[r["code"]][1])}주</div>'
                if r["code"] in fsum else "")
-            + _pos_block(i) + f'{sparkline(pr, i["avg"])}</div>')
+            + _ext_line(i) + _pos_block(i) + f'{sparkline(pr, i["avg"])}</div>')
     body = (tabs + form + note + f"<h2>{chart_title}</h2>" + chart
             + '<div class="legend"><span><i class="ln" style="background:var(--price)"></i>최근 120거래일 종가</span>'
               '<span><i class="dash"></i>기관 평균매수단가</span></div>' + "".join(cards))
@@ -3085,6 +3227,17 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
             if path == "/settings/notify-test" and settings_api:
                 ok, why = settings()["test_notify"]()
                 return self._redirect("/settings?" + urlencode({"nt": ("✔ " if ok else "✖ ") + why}))
+            if path == "/settings/ext-check" and settings_api:
+                n = min(int(self.headers.get("Content-Length") or 0), 4096)
+                form = parse_qs(self.rfile.read(n).decode("utf-8", "ignore"))
+                src = (form.get("src") or [""])[0]
+                if src not in ("krx", "lending"):
+                    return self._redirect("/settings")
+                try:
+                    res = settings()["ext_check"](src)
+                except Exception as e:
+                    res = {"src": src, "error": f"확인 중 오류: {type(e).__name__}: {str(e)[:120]}"}
+                return self._send(200, "text/html; charset=utf-8", view_ext_check(res))
             if path == "/settings/krx-key" and settings_api:
                 n = min(int(self.headers.get("Content-Length") or 0), 4096)
                 form = parse_qs(self.rfile.read(n).decode("utf-8", "ignore"))

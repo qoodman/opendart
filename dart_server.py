@@ -470,6 +470,20 @@ def run_market_policy(log=print):
         except Exception as e:
             out["score_auto"] = f"실패: {e}"
             log(f"점수표 자동 추정 실패: {e}")
+    if env("DART_KRX", "1") != "0" and krx_key_now():                 # KRX 시세·시가총액·상장주식수
+        try:
+            import krx_api
+            out["krx"] = krx_api.sync(results_db(), krx_key_now(), log=log)
+        except Exception as e:
+            out["krx"] = f"실패: {e}"
+            log(f"KRX 시세 실패: {e}")
+    if env("DART_LENDING", "1") != "0" and env_shared("DATA_GO_KR_KEY"):   # 주식 대차거래(대차잔고)
+        try:
+            import lending
+            out["lending"] = lending.sync(results_db(), env_shared("DATA_GO_KR_KEY"), log=log)
+        except Exception as e:
+            out["lending"] = f"실패: {e}"
+            log(f"대차거래 실패: {e}")
     if env("DART_POLICY", "1") != "0":
         try:
             import stock_policy
@@ -1134,6 +1148,21 @@ def save_krx_key(key, path=None):
     return True, "KRX 키를 저장했어요."
 
 
+def ext_check(src):
+    """설정 → 연결 확인: 'krx' 또는 'lending'. 키와 서비스가 실제로 되는지, 받은 응답 모양 그대로 돌려줌."""
+    if src == "krx":
+        key = krx_key_now()
+        if not key:
+            return {"src": "krx", "error": "KRX 키가 아직 없어요. 설정에서 먼저 저장해 주세요."}
+        import krx_api
+        return {"src": "krx", "items": krx_api.check(key)}
+    key = env_shared("DATA_GO_KR_KEY")
+    if not key:
+        return {"src": "lending", "error": "공공데이터포털 키(DATA_GO_KR_KEY)가 없어요. 서버 .env나 부동산 앱 .env에 넣어 주세요."}
+    import lending
+    return {"src": "lending", "items": lending.check(key)}
+
+
 def cmd_web(args):
     from dart_web import serve
     # 수집을 시작할 때 .env를 새로 읽도록, .env에서 온 값은 빼고 넘김
@@ -1154,7 +1183,8 @@ def cmd_web(args):
                     realestate=env("REALESTATE_URL"), test_notify=cmd_notify_test_web,
                     update_info=update_info, check_update=check_update, start_update=start_update,
                     backup_list=backup_list, backup_busy=backup_busy, backup_start=backup_start,
-                    backup_file=backup_file, krx_key=krx_key_now, save_krx_key=save_krx_key)
+                    backup_file=backup_file, krx_key=krx_key_now, save_krx_key=save_krx_key,
+                    ext_check=ext_check, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
     serve(results_db(), host=args.host, port=args.port, child_env=child_env,
           get_key=lambda: read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", ""),
           save_key=save_key, settings_api=settings_api)
