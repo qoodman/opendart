@@ -3021,7 +3021,8 @@ def _short_form(it=None, action="/shorts/add", label="추가"):
             f'<input type="text" name="target" value="{v("target")}" placeholder="대상 기업" style="flex:1 1 160px"></div>'
             f'<textarea name="claims" rows="4" placeholder="보고서의 주장 (요약)">{v("claims")}</textarea>'
             f'<textarea name="response" rows="2" placeholder="회사 반응·반박" style="margin-top:6px">{v("response")}</textarea>'
-            f'<textarea name="reaction" rows="2" placeholder="주가 반응" style="margin-top:6px">{v("reaction")}</textarea>'
+            f'<input type="text" name="price_move" value="{v("price_move")}" placeholder="주가 변화 한 줄 (예: 당일 -18%, 이후 -30%)" style="width:100%;margin-top:6px">'
+            f'<textarea name="reaction" rows="2" placeholder="주가 반응 자세히 (보고 전후 가격·날짜)" style="margin-top:6px">{v("reaction")}</textarea>'
             f'<textarea name="korea_link" rows="2" placeholder="한국 주식과의 연결 (가설)" style="margin-top:6px">{v("korea_link")}</textarea>'
             f'<input type="text" name="source" value="{v("source")}" placeholder="출처" style="width:100%;margin-top:6px">'
             f'<input type="text" name="source_url" value="{v("source_url")}" placeholder="원문·기사 주소 (선택)" style="width:100%;margin-top:6px">'
@@ -3033,6 +3034,7 @@ def _short_form(it=None, action="/shorts/add", label="추가"):
 def _short_card(it):
     import shortreports as sr
     chips = (f'<span class="chip">{escape(it["region"])}</span> <span class="chip">{escape(it["status"])}</span>'
+             + (f' <span class="chip down">{escape(it["price_move"])}</span>' if it.get("price_move") else '')
              + ('' if it["verified"] else ' <span class="chip warn">확인 필요</span>'))
     who = " · ".join(x for x in (escape(it["firm"]), escape(it["target"]), escape(it["report_date"])) if x)
     blocks = "".join(
@@ -3080,7 +3082,7 @@ def view_shorts(conn, q):
              '주장 · 회사 반응 · 주가 반응을 나눠 적었어요.</div>'
              '<div class="muted" style="margin-top:6px"><b>주의:</b> 숏셀러는 주가가 내려야 돈을 버는 쪽이라 보고서는 \'이해관계 있는 쪽의 주장\'이에요. '
              '사실로 확정된 게 아니고, 틀린 경우도 많아요. 여기 내용은 언론 보도 요약이라 원문을 직접 확인한 게 아니에요 '
-             '(\'확인 필요\'는 더 불확실). 원문을 꼭 읽어 보세요. 투자 추천이 아니에요.</div>'
+             '(\'확인 필요\'는 더 불확실). 빨간 칩의 주가 변화도 보도에서 가져온 숫자예요(당일 등락률 위주, 이후 흐름은 다른 요인이 섞여요). 원문을 꼭 읽어 보세요. 투자 추천이 아니에요.</div>'
              '<div class="muted" style="margin-top:6px">한국 상장사를 직접 겨냥한 외국 숏 리포트는 찾지 못해서 한국 항목은 얇아요. '
              '새 보고서가 나오면 아래에서 직접 추가해 주세요.</div></div>')
     add = ('<details class="card"><summary>보고서 직접 추가</summary>' + _short_form() + '</details>')

@@ -81,14 +81,67 @@ SEEDS = [
 ]
 
 
+for _s in SEEDS:
+    _s.setdefault("price_move", "")
+
+# 가격 정보 보강 (v2): 기존 항목 중 사용자가 안 고친 것만 덮어쓰고, 새 항목은 추가
+UPDATES = {
+    "culper_nvda_2026": dict(
+        price_move="보고 당일 +3% · 공개 후 약 -20% (확인 필요)",
+        reaction=("보고서가 나온 2026-05-13 당일 엔비디아 주가는 오히려 약 3% 올랐고 시장은 크게 신경 쓰지 않았다고 해요. "
+                  "6개월 뒤인 2026-11-10 보도에서는 컬퍼가 숏 포지션을 공개한 뒤 약 20% 내렸다고 하고, 11-09 하루 -4.27%였다는 보도도 있어요. "
+                  "다만 이 하락이 보고서 때문이라고 단정할 수 없어요 — 같은 시기 젠슨 황 CEO와 중국계 인물의 관계 논란·이사회 조사 보도가 겹쳤어요 "
+                  "(컬퍼가 몇 달 전 이 관계를 지적했다고 알려졌어요). 컬퍼가 숏을 얼마나 아직 갖고 있는지는 공개되지 않았어요."),
+        source="Seoul Economic Daily 2026-11-10 · Fox Business · 24/7 Wall St. 등 보도 요약, 컬퍼 원문 PDF 주소는 검색에서만 확인 (내용 미확인)"),
+}
+NEW_SEEDS = [
+    dict(seed="hunterbrook_csg_2026", region="기타", firm="Hunterbrook", target="CSG (체코 방산업체, 암스테르담 상장)",
+         report_date="2026-05-04", title="Hunterbrook의 CSG 보고서 — 상장 후 하루 최대 낙폭",
+         status="회사가 반박",
+         claims="CSG의 사업 모델에 의문을 제기하는 보고서를 냈어요 (세부 주장은 확인 필요).",
+         response="CSG는 보고서가 부정확하고 선택적이라며 반박했어요.",
+         reaction="보도 당일 주가가 기록적으로 하루 18% 떨어졌다고 해요 (Bloomberg 헤드라인).",
+         price_move="당일 -18%", korea_link="", source="Bloomberg 2026-05-04 (헤드라인·요약만 확인)", source_url="", verified=0),
+    dict(seed="jr_gildan_2026", region="미국", firm="Jehoshaphat Research", target="길단 액티브웨어 (GIL, 캐나다·뉴욕 상장)",
+         report_date="2026-06-16", title="Jehoshaphat Research의 길단 보고서 — 매출 당겨오기 주장",
+         status="조사·소송 중",
+         claims="티셔츠 제조사 길단이 고객에게 과다 주문을 유도해 매출을 부풀렸고, 약 5억달러 매출을 앞당겨 잡았다고 주장했어요.",
+         response="회사 반응은 확인하지 못했어요 (주주 집단소송 모집 공고가 나왔어요 — 소송 결과가 아니라 소송을 하려는 변호사 공고예요).",
+         reaction="당일 종가 70.39달러로 약 18.75% 하락했어요.",
+         price_move="당일 -19% (종가 $70.39)", korea_link="", source="The Globe and Mail · GlobeNewswire 2026-11-10 공고, 원문 미확인", source_url="", verified=1),
+    dict(seed="spruce_resideo_2026", region="미국", firm="Spruce Point Capital", target="레지데오 (REZI)",
+         report_date="2026-01", title="Spruce Point의 레지데오 보고서 — '강한 매도' 의견",
+         status="이슈 진행 중",
+         claims="레지데오에 강한 매도 의견을 내고 장기적으로 25~50% 하락 여지가 있다고 추정했어요.",
+         response="회사 반응은 확인하지 못했어요.", reaction="당일 약 4% 하락에 그쳤어요.",
+         price_move="당일 -4%", korea_link="", source="요약 보도 (원문 미확인)", source_url="", verified=0),
+    dict(seed="wolfpack_flotek", region="미국", firm="Wolfpack Research", target="플로텍 인더스트리즈 (FTK)",
+         report_date="", title="Wolfpack Research의 플로텍 보고서 — 4억달러 계약 해지 주장",
+         status="정리됨",
+         claims="4억달러 계약이 해지됐는데 회사가 공시하지 않았다고 주장했어요.",
+         response="회사 반응은 확인하지 못했어요.", reaction="보도 당일 약 21% 하락했어요 (날짜는 확인 못 함 — 예전 사례일 수 있어요).",
+         price_move="당일 -21%", korea_link="", source="Investing.com 보도 요약", source_url="", verified=0),
+    dict(seed="blueorca_hesai", region="중국", firm="Blue Orca Capital", target="헤사이 그룹 (HSAI, 나스닥 상장 중국 라이다 업체)",
+         report_date="", title="Blue Orca Capital의 헤사이 보고서 — 투자자 오도 주장",
+         status="회사가 반박",
+         claims="헤사이가 투자자를 오도했다고 주장했어요 (세부 주장은 확인 필요).",
+         response="회사 반응은 확인하지 못했어요.", reaction="보도 당일 주가가 7% 넘게 내려 마감했어요 (날짜 확인 필요, 2025년 초로 보임).",
+         price_move="당일 -7%", korea_link="", source="벤징가 코리아 보도 요약, 원문 미확인", source_url="", verified=0),
+]
+for _s in NEW_SEEDS:
+    _s.setdefault("price_move", "")
+
+
 def ensure(conn):
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS short_reports (
         id INTEGER PRIMARY KEY AUTOINCREMENT, seed TEXT, region TEXT, firm TEXT, target TEXT, report_date TEXT, title TEXT,
         status TEXT, claims TEXT, response TEXT, reaction TEXT, korea_link TEXT, source TEXT, source_url TEXT,
-        verified INTEGER DEFAULT 1, added TEXT, updated TEXT);
+        verified INTEGER DEFAULT 1, added TEXT, updated TEXT, price_move TEXT);
     CREATE TABLE IF NOT EXISTS short_meta (key TEXT PRIMARY KEY, value TEXT);
     """)
+    if "price_move" not in [r[1] for r in conn.execute("PRAGMA table_info(short_reports)")]:
+        conn.execute("ALTER TABLE short_reports ADD COLUMN price_move TEXT")
 
 
 def _clip(s, n):
@@ -96,25 +149,40 @@ def _clip(s, n):
 
 
 COLS = ("seed", "region", "firm", "target", "report_date", "title", "status", "claims", "response", "reaction", "korea_link",
-        "source", "source_url", "verified")
+        "source", "source_url", "verified", "price_move")
+
+
+def _insert_seed(conn, s, now):
+    conn.execute("INSERT INTO short_reports (%s, added, updated) VALUES (%s)" % (", ".join(COLS), ",".join("?" * (len(COLS) + 2))),
+                 [s[c] for c in COLS] + [now, now])
 
 
 def seed(conn):
-    """처음 한 번만 기본 항목을 넣음 (지운 항목이 다시 생기지 않게 표시를 남김)"""
+    """기본 항목을 넣음. v1: 처음 한 번 / v2: 주가 정보 보강 + 새 항목 (지운 항목은 다시 안 생기고, 사용자가 고친 항목은 덮어쓰지 않음)"""
     ensure(conn)
-    if conn.execute("SELECT 1 FROM short_meta WHERE key='seeded_v1'").fetchone():
-        return 0
     now = dt.date.today().isoformat()
-    for s in SEEDS:
-        conn.execute("INSERT INTO short_reports (%s, added, updated) VALUES (%s)" % (", ".join(COLS), ",".join("?" * (len(COLS) + 2))),
-                     [s[c] for c in COLS] + [now, now])
-    conn.execute("INSERT INTO short_meta VALUES ('seeded_v1', ?)", (now,))
+    n = 0
+    if not conn.execute("SELECT 1 FROM short_meta WHERE key='seeded_v1'").fetchone():
+        for s in SEEDS:
+            _insert_seed(conn, s, now)
+            n += 1
+        conn.execute("INSERT INTO short_meta VALUES ('seeded_v1', ?)", (now,))
+    if not conn.execute("SELECT 1 FROM short_meta WHERE key='seeded_v2'").fetchone():
+        for key, upd in UPDATES.items():
+            row = conn.execute("SELECT id, added, updated FROM short_reports WHERE seed=?", (key,)).fetchone()
+            if row and row[1] == row[2]:                      # 고친 적 없음
+                sets = ", ".join(f"{k}=?" for k in upd)
+                conn.execute(f"UPDATE short_reports SET {sets}, updated=?, added=? WHERE id=?", list(upd.values()) + [now, now, row[0]])
+        for s in NEW_SEEDS:
+            _insert_seed(conn, s, now)
+            n += 1
+        conn.execute("INSERT INTO short_meta VALUES ('seeded_v2', ?)", (now,))
     conn.commit()
-    return len(SEEDS)
+    return n
 
 
 FIELDS = [("firm", 80), ("target", 100), ("title", 120), ("claims", 1500), ("response", 800), ("reaction", 500),
-          ("korea_link", 500), ("source", 200), ("source_url", 300)]
+          ("korea_link", 500), ("source", 200), ("source_url", 300), ("price_move", 60)]
 
 
 def _valid_date(d):
@@ -145,9 +213,9 @@ def add(conn, form):
     now = dt.date.today().isoformat()
     cur = conn.execute(
         "INSERT INTO short_reports (region, firm, target, report_date, title, status, claims, response, reaction, korea_link,"
-        " source, source_url, verified, added, updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " source, source_url, verified, price_move, added, updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (c["region"], c["firm"], c["target"], c["report_date"], c["title"], c["status"], c["claims"], c["response"],
-         c["reaction"], c["korea_link"], c["source"], c["source_url"], c["verified"], now, now))
+         c["reaction"], c["korea_link"], c["source"], c["source_url"], c["verified"], c["price_move"], now, now))
     conn.commit()
     return cur.lastrowid
 
@@ -159,9 +227,9 @@ def edit(conn, rid, form):
         return False
     conn.execute(
         "UPDATE short_reports SET region=?, firm=?, target=?, report_date=?, title=?, status=?, claims=?, response=?, reaction=?,"
-        " korea_link=?, source=?, source_url=?, verified=?, updated=? WHERE id=?",
+        " korea_link=?, source=?, source_url=?, verified=?, price_move=?, updated=? WHERE id=?",
         (c["region"], c["firm"], c["target"], c["report_date"], c["title"], c["status"], c["claims"], c["response"], c["reaction"],
-         c["korea_link"], c["source"], c["source_url"], c["verified"], dt.date.today().isoformat(), rid))
+         c["korea_link"], c["source"], c["source_url"], c["verified"], c["price_move"], dt.date.today().isoformat(), rid))
     conn.commit()
     return True
 
@@ -183,7 +251,7 @@ def list_all(conn):
     """[{…}] 보고일 최신순 (날짜 없는 것은 뒤). 읽기 전용 연결에서도 호출 가능 (표가 없으면 [])"""
     try:
         cur = conn.execute("SELECT id, seed, region, firm, target, report_date, title, status, claims, response, reaction,"
-                           " korea_link, source, source_url, verified, added, updated FROM short_reports")
+                           " korea_link, source, source_url, verified, added, updated, price_move FROM short_reports")
     except sqlite3.OperationalError:
         return []
     keys = [d[0] for d in cur.description]
