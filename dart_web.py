@@ -2178,7 +2178,7 @@ def perf_url(**kw):
     return "/ideas?" + urlencode({"t": "perf", **kw})
 
 
-MARKET_HUB = {"/market": "시장 온도", "/policy": "정책", "/radar": "대비 레이더", "/calendar": "달력"}
+MARKET_HUB = {"/market": "시장 온도", "/policy": "정책", "/radar": "대비 레이더", "/shorts": "공매도 리포트", "/calendar": "달력"}
 
 
 REPORT_HUB = {"/": "보고서", "/new": "새 공시", "/reports": "증권사 리포트"}
@@ -3006,6 +3006,89 @@ def view_radar(conn, q):
     return page("대비 레이더", body)
 
 
+def _short_form(it=None, action="/shorts/add", label="추가"):
+    import shortreports as sr
+    it = it or {}
+    v = lambda k: escape(str(it.get(k) or ""))
+    opt = lambda items, cur: "".join(f'<option value="{escape(x)}"{" selected" if x == cur else ""}>{escape(x)}</option>' for x in items)
+    return (f'<form method="post" action="{action}" style="margin-top:8px">'
+            + (f'<input type="hidden" name="id" value="{it["id"]}">' if it.get("id") else "")
+            + f'<input type="text" name="title" value="{v("title")}" placeholder="제목 (예: 컬퍼 리서치의 ○○ 보고서)" style="width:100%" required>'
+            f'<div class="filters" style="margin-top:6px"><select name="region">{opt(sr.REGIONS, it.get("region"))}</select>'
+            f'<select name="status">{opt(sr.STATUSES, it.get("status"))}</select>'
+            f'<input type="date" name="report_date" value="{v("report_date")}" title="보고서 나온 날 (모르면 비워 두세요)"></div>'
+            f'<div class="filters" style="margin-top:6px"><input type="text" name="firm" value="{v("firm")}" placeholder="공매도 투자자 (예: Culper Research)" style="flex:1 1 160px">'
+            f'<input type="text" name="target" value="{v("target")}" placeholder="대상 기업" style="flex:1 1 160px"></div>'
+            f'<textarea name="claims" rows="4" placeholder="보고서의 주장 (요약)">{v("claims")}</textarea>'
+            f'<textarea name="response" rows="2" placeholder="회사 반응·반박" style="margin-top:6px">{v("response")}</textarea>'
+            f'<textarea name="reaction" rows="2" placeholder="주가 반응" style="margin-top:6px">{v("reaction")}</textarea>'
+            f'<textarea name="korea_link" rows="2" placeholder="한국 주식과의 연결 (가설)" style="margin-top:6px">{v("korea_link")}</textarea>'
+            f'<input type="text" name="source" value="{v("source")}" placeholder="출처" style="width:100%;margin-top:6px">'
+            f'<input type="text" name="source_url" value="{v("source_url")}" placeholder="원문·기사 주소 (선택)" style="width:100%;margin-top:6px">'
+            f'<label class="set"><input type="checkbox" name="unverified" value="1"{" checked" if it and not it.get("verified", 1) else ""}> '
+            '확인 필요 (기사 요약만 보고 적었어요)</label>'
+            f'<button style="margin-top:6px">{label}</button></form>')
+
+
+def _short_card(it):
+    import shortreports as sr
+    chips = (f'<span class="chip">{escape(it["region"])}</span> <span class="chip">{escape(it["status"])}</span>'
+             + ('' if it["verified"] else ' <span class="chip warn">확인 필요</span>'))
+    who = " · ".join(x for x in (escape(it["firm"]), escape(it["target"]), escape(it["report_date"])) if x)
+    blocks = "".join(
+        f'<div style="margin-top:6px"><b style="font-size:13px">{label}</b><div style="white-space:pre-wrap">{escape(it[k])}</div></div>'
+        for label, k in (("보고서 주장", "claims"), ("회사 반응", "response"), ("주가 반응", "reaction"), ("한국 주식과의 연결 (가설)", "korea_link"))
+        if it[k])
+    src = ""
+    if it["source"] or it["source_url"]:
+        t = escape(it["source"] or "출처")
+        src = (f'<div class="muted" style="margin-top:6px">출처: '
+               + (f'<a href="{escape(it["source_url"])}">{t}</a>' if it["source_url"] else t) + "</div>")
+    status_form = ('<form method="post" action="/shorts/status" class="filters" style="margin:8px 0 0">'
+                   f'<input type="hidden" name="id" value="{it["id"]}">'
+                   + select("status", {s_: s_ for s_ in sr.STATUSES}, it["status"]) + '<button class="ghost">상태 바꾸기</button></form>')
+    manage = ('<details style="margin-top:6px"><summary class="muted">수정 · 삭제</summary>'
+              + _short_form(it, "/shorts/edit", "수정 저장")
+              + f'<form method="post" action="/shorts/del" style="margin-top:6px" onsubmit="return confirm(\'이 항목을 지울까요?\')">'
+                f'<input type="hidden" name="id" value="{it["id"]}"><button class="ghost">삭제</button></form></details>')
+    return (f'<div class="card"><b class="big">{escape(it["title"])}</b>'
+            f'<div style="margin:4px 0">{chips}</div><div class="muted">{who}</div>{blocks}{src}{status_form}{manage}</div>')
+
+
+def view_shorts(conn, q):
+    import shortreports as sr
+    path = _DB["path"]
+    if path and Path(path).exists():
+        try:
+            w = sqlite3.connect(path)
+            try:
+                sr.seed(w)
+            finally:
+                w.close()
+        except sqlite3.Error:
+            pass
+    reg = q.get("r") if q.get("r") in sr.REGIONS else ""
+    items = sr.list_all(conn)
+    counts = {r_: sum(1 for i in items if i["region"] == r_) for r_ in sr.REGIONS}
+    shown = [i for i in items if not reg or i["region"] == reg]
+    chips = " ".join(
+        (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{label}</b>' if k == reg else
+         f'<a class="chip" href="/shorts{("?r=" + quote(k)) if k else ""}">{label}</a>')
+        for k, label in [("", f"전체 {len(items)}")] + [(r_, f"{r_} {counts[r_]}") for r_ in sr.REGIONS])
+    intro = ('<div class="card"><b>공매도 리포트</b><div class="muted" style="margin-top:4px">'
+             '공매도 투자자(숏셀러)가 \'이 회사는 이상하다\'며 낸 조사 보고서를 나라별로 요약해 둔 곳이에요. '
+             '주장 · 회사 반응 · 주가 반응을 나눠 적었어요.</div>'
+             '<div class="muted" style="margin-top:6px"><b>주의:</b> 숏셀러는 주가가 내려야 돈을 버는 쪽이라 보고서는 \'이해관계 있는 쪽의 주장\'이에요. '
+             '사실로 확정된 게 아니고, 틀린 경우도 많아요. 여기 내용은 언론 보도 요약이라 원문을 직접 확인한 게 아니에요 '
+             '(\'확인 필요\'는 더 불확실). 원문을 꼭 읽어 보세요. 투자 추천이 아니에요.</div>'
+             '<div class="muted" style="margin-top:6px">한국 상장사를 직접 겨냥한 외국 숏 리포트는 찾지 못해서 한국 항목은 얇아요. '
+             '새 보고서가 나오면 아래에서 직접 추가해 주세요.</div></div>')
+    add = ('<details class="card"><summary>보고서 직접 추가</summary>' + _short_form() + '</details>')
+    body = (intro + f'<div style="margin:8px 0">{chips}</div>' + add + "".join(_short_card(i) for i in shown)
+            + ("" if shown else '<p class="muted">이 나라 항목이 아직 없어요.</p>'))
+    return page("공매도 리포트", body)
+
+
 GURU_INFO = {
     "lynch": dict(
         title="피터 린치 방법",
@@ -3227,6 +3310,8 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     return self._redirect("/ideas?" + urlencode({"t": "rank", **{k: v for k, v in q.items() if not k.startswith("_")}}))
                 elif url.path == "/radar":
                     body = view_radar(conn, q)
+                elif url.path == "/shorts":
+                    body = view_shorts(conn, q)
                 elif url.path == "/score":
                     return self._redirect(score_url(**{k: v for k, v in q.items() if not k.startswith("_")}))
                 elif url.path == "/new":
@@ -3307,6 +3392,26 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 finally:
                     conn.close()
                 return self._redirect("/radar")
+            if path in ("/shorts/add", "/shorts/edit", "/shorts/status", "/shorts/del"):
+                n = min(int(self.headers.get("Content-Length") or 0), 16384)
+                form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore"),
+                                                     keep_blank_values=True).items()}
+                import shortreports as sr
+                conn = sqlite3.connect(db_path)
+                try:
+                    sr.ensure(conn)
+                    rid = int(form["id"]) if str(form.get("id", "")).isdigit() else None
+                    if path == "/shorts/add":
+                        sr.add(conn, form)
+                    elif rid is not None and path == "/shorts/edit":
+                        sr.edit(conn, rid, form)
+                    elif rid is not None and path == "/shorts/status":
+                        sr.set_status(conn, rid, form.get("status", ""))
+                    elif rid is not None and path == "/shorts/del":
+                        sr.delete(conn, rid)
+                finally:
+                    conn.close()
+                return self._redirect("/shorts")
             if path == "/score/save":
                 n = min(int(self.headers.get("Content-Length") or 0), 8192)
                 form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore"),
