@@ -453,6 +453,13 @@ def run_market_policy(log=print):
         except Exception as e:
             out["flow"] = f"실패: {e}"
             log(f"순매수 실패: {e}")
+        if env("DART_GURU", "1") != "0":          # 피터 린치·워렌 버핏 탭에 쓰는 연간 재무 (주 1회만 새로 받음)
+            try:
+                import guru
+                out["guru"] = guru.sync(results_db(), log=log)
+            except Exception as e:
+                out["guru"] = f"실패: {e}"
+                log(f"연간 재무 실패: {e}")
         try:    # 점수표로 평가한 종목의 자동 추정(네이버 재무·DART)도 같이 갱신
             import score_auto
             conn = sqlite3.connect(results_db())

@@ -1778,8 +1778,9 @@ def view_performance_detail(who, evs, h, ex, kind, s=""):
 
 # ---------------- 아이디어 ----------------
 IDEA_TABS = {"cheap": "기관 평단보다 싼 종목", "cluster": "여러 기관이 함께 산 종목", "super": "슈퍼개미 움직임",
-             "rank": "종목 순위", "score": "점수표 (오일전문가)", "perf": "운용사 성적표"}
-IDEA_GROUPS = [["cheap", "cluster", "super"], ["rank", "score", "perf"]]     # 위쪽 메뉴의 '아이디어' / '분석'
+             "rank": "종목 순위", "score": "점수표 (오일전문가)", "perf": "운용사 성적표",
+             "lynch": "피터 린치", "buffett": "워렌 버핏"}
+IDEA_GROUPS = [["cheap", "cluster", "super", "lynch", "buffett"], ["rank", "score", "perf"]]     # 위쪽 메뉴의 '아이디어' / '분석'
 
 
 def idea_group_tabs(active):
@@ -2194,6 +2195,12 @@ def hub_tabs_row(path):
 
 
 def view_ideas(conn, q):
+    if q.get("t") in ("lynch", "buffett"):
+        _CTX.pre = idea_tabs_row(q["t"])
+        try:
+            return view_guru(conn, q)
+        finally:
+            _CTX.pre = ""
     if q.get("t") in ("rank", "perf"):
         _CTX.pre = idea_tabs_row(q["t"])
         try:
@@ -2997,6 +3004,120 @@ def view_radar(conn, q):
             + section("날짜 미정", undated)
             + ("" if shown else '<p class="muted">이 조건에 맞는 변수가 없어요.</p>'))
     return page("대비 레이더", body)
+
+
+GURU_INFO = {
+    "lynch": dict(
+        title="피터 린치 방법",
+        idea="이해할 수 있는 기업을 골라, 이익이 얼마나 빨리 크는지에 비해 주가가 싼지(PEG)를 봐요. 종목을 6가지 유형으로 나눠서 유형마다 다르게 접근해요.",
+        how=["유형 분류: 급성장(이익 연 20%↑) · 우량(10~20%) · 저성장(~10%) · 경기순환(이익이 크게 오르내림) · 턴어라운드(적자에서 회복) · 자산주(PBR 낮음)",
+             "PEG = PER ÷ 이익 성장률(EPS 3년 연평균, 50%까지만 인정). 1 아래면 매력적, 2 위면 비싸다고 봐요",
+             "점수(100): PEG 35 · 성장률 20 · 부채비율 15 · 이익이 꾸준히 흑자 10 · ROE 10 · PER 상식 선 10"],
+        miss="린치가 가장 중요하게 본 것은 숫자로 못 봐요: 내가 이해하는 사업인지, 제품·서비스가 눈에 보이는지, 아직 월가가 주목하지 않은 종목인지, 재고·현금 흐름 같은 세부 항목.",
+        sorts={"": "정렬: 린치 점수순", "peg": "정렬: PEG 낮은 순", "growth": "정렬: 이익 성장률 높은 순"}),
+    "buffett": dict(
+        title="워렌 버핏 방법",
+        idea="오래 가는 경쟁 우위가 있는 좋은 기업을, 합리적인 가격에 사요. 그런 기업의 흔적은 높은 ROE와 영업이익률, 낮은 부채, 꾸준히 느는 이익이에요.",
+        how=["점수(100): ROE 25 · 부채비율 15 · 이익이 꾸준하고 늘어남 15 · 영업이익률 15 · 가격(PER) 15 · 이익 성장 15",
+             "ROE 평균 15%↑이고 가장 낮은 해도 12%↑, 영업이익률 평균 15%↑, 이익이 꾸준히 흑자면 '해자 후보' 표시",
+             "확정된 최근 3개 연도만 봐요 (버핏은 10년 이상 봐요)"],
+        miss="버핏은 사업을 이해하는지(능력 범위), 경쟁 우위가 왜 오래가는지, 경영진의 정직함과 자본 배분 능력을 가장 중요하게 봐요. 모두 숫자로 못 봐요. 금융업은 부채비율이 구조상 높아서 이 방식에 불리해요.",
+        sorts={"": "정렬: 버핏 점수순", "roe": "정렬: ROE 높은 순", "per": "정렬: PER 낮은 순"}),
+}
+GURU_PASS = 60
+
+
+def view_guru(conn, q):
+    """아이디어 → 피터 린치 / 워렌 버핏: 기관이 산 종목을 두 사람의 방법을 단순한 숫자로 옮겨 점수 냄"""
+    import guru
+    kind = q["t"]
+    info = GURU_INFO[kind]
+    if not has_table(conn, "summary"):
+        return page(info["title"], '<div class="card">보고서(DART) 수집이 한 번 끝나야 볼 수 있습니다.</div>')
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(summary)")}
+    w = q.get("w") if q.get("w") in WINDOWS else "365"
+    ex = q.get("ex") if q.get("ex") in NPS_OPTS else "1"
+    m = q.get("m") if q.get("m") in MARKET_OPTS and "시장" in cols else ""
+    flt = "pass" if q.get("f") == "pass" else ""
+    srt = q.get("s") if q.get("s") in info["sorts"] else ""
+    conds, args = ["변동일 >= ?", "매수수량 > 0", "평균매수단가 > 0"], [(dt.date.today() - dt.timedelta(days=int(w))).isoformat()]
+    if ex == "1":
+        conds.append("제출인 NOT LIKE '%국민연금%'")
+    if m:
+        conds.append("시장 = ?")
+        args.append(m)
+    market = "MAX(시장)" if "시장" in cols else "''"
+    rows = conn.execute(f"SELECT 종목코드 code, MAX(종목명) name, {market} mk, COUNT(DISTINCT 제출인) n, SUM(매수금액) amt "
+                        f"FROM summary WHERE {' AND '.join(conds)} GROUP BY 종목코드", args).fetchall()
+    fin, vals = guru.load_all(conn), value_map(conn)
+    cards, no_data = [], 0
+    for r in rows:
+        ys = fin.get(r["code"])
+        v = vals.get(r["code"]) or {}
+        per, pbr = v.get("per"), v.get("pbr")
+        res = guru.lynch(ys, per, pbr) if kind == "lynch" and ys else guru.buffett(ys, per, pbr) if ys else None
+        if not res or not res["ok"]:
+            no_data += 1
+            continue
+        act = guru.actual(ys, 3)
+        res.update(code=r["code"], name=r["name"], mk=r["mk"], n=r["n"], amt=r["amt"], per=per, pbr=pbr, act=act)
+        cards.append(res)
+    if flt:
+        cards = [c for c in cards if c["score"] >= GURU_PASS]
+    key = {"": lambda c: -c["score"],
+           "peg": lambda c: (c.get("peg") is None, c.get("peg") or 0),
+           "growth": lambda c: (c.get("growth") is None, -(c.get("growth") or 0)),
+           "roe": lambda c: -(sum(y["roe"] for y in c["act"] if y.get("roe") is not None) / max(1, sum(1 for y in c["act"] if y.get("roe") is not None))),
+           "per": lambda c: (not c["per"] or c["per"] <= 0, c["per"] or 0)}[srt]
+    cards.sort(key=key)
+    form = (f'<form method="get" class="filters" style="margin:8px 0"><input type="hidden" name="t" value="{kind}">'
+            f'{select("w", WINDOWS, w)}' + (select("m", MARKET_OPTS, m) if "시장" in cols else "") + f'{select("ex", NPS_OPTS, ex)}'
+            f'{select("f", {"": "점수 전체", "pass": f"{GURU_PASS}점 이상만"}, flt)}{select("s", info["sorts"], srt)}<button>적용</button></form>')
+    how = "".join(f"<li>{escape(x)}</li>" for x in info["how"])
+    intro = (f'<div class="card"><b>{info["title"]}</b><div class="muted" style="margin-top:4px">{escape(info["idea"])}</div>'
+             f'<details style="margin-top:6px"><summary class="muted">숫자로 어떻게 옮겼나</summary>'
+             f'<ul class="muted" style="margin:6px 0 0;padding-left:18px">{how}</ul></details>'
+             f'<details style="margin-top:4px"><summary class="muted">숫자로 못 보는 것</summary>'
+             f'<div class="muted" style="margin-top:4px">{escape(info["miss"])}</div></details>'
+             '<div class="muted" style="margin-top:6px"><b>주의:</b> 두 사람이 공개적으로 강조한 원칙을 재무 숫자 몇 개로 줄인 단순 점수예요. '
+             '점수 구간은 제가 정한 기준이고 실제 두 사람의 판단과 달라요. 최근 3개 연도 자료라 장기 평가에는 모자라요. 투자 추천이 아니에요.</div></div>')
+    if not fin:
+        return page(info["title"], intro + form + '<div class="card">연간 재무 자료가 아직 없어요. <b>지금 수집 → 시장·정책만</b>을 한 번 돌려 주세요 (재무는 주 1회 갱신).</div>')
+    out = []
+    for i, c in enumerate(cards[:30], 1):
+        chips = " ".join(f'<span class="chip {"up" if p == mx else "down" if p == 0 else ""}" title="{escape(txt)}">{escape(nm.split(" (")[0])} {p}/{mx}</span>'
+                         for nm, p, mx, txt in c["items"])
+        detail = "".join(f'<div style="margin-top:3px"><b>{escape(nm)}</b> {p}/{mx}점 <span class="muted">— {escape(txt)}</span></div>' for nm, p, mx, txt in c["items"])
+        last = c["act"][-1]
+        if kind == "lynch":
+            g = f'{c["growth"]:+.0%}' if c["growth"] is not None else "-"
+            peg = f'{c["peg"]:.2f}' if c["peg"] else "-"
+            fwd = (f' · 예상(컨센서스) 성장 {c["fwd_growth"]:+.0%}' + (f' → PEG {c["peg_fwd"]:.2f}' if c["peg_fwd"] else "")) if c["fwd_growth"] is not None else ""
+            head = (f'<span class="chip">{escape(c["category"])}</span> ' + " ".join(f'<span class="chip warn">{escape(t)}</span>' for t in c["tags"]))
+            numbers = (f'PER {c["per"]:.1f}배' if c["per"] else "PER -") + f' · 이익 성장률 {g} · <b>PEG {peg}</b>{fwd}'
+            hint = f'<div class="muted" style="font-size:12px;margin-top:3px">{escape(guru.LYNCH_HINT[c["category"]])}</div>'
+        else:
+            roes = [y["roe"] for y in c["act"] if y.get("roe") is not None]
+            opms = [y["opm"] for y in c["act"] if y.get("opm") is not None]
+            head = '<span class="chip" style="background:var(--accent);color:var(--bg)">해자 후보</span>' if c["moat"] else ""
+            numbers = ((f'ROE 평균 {sum(roes) / len(roes):.1f}%' if roes else "ROE -")
+                       + (f' · 영업이익률 평균 {sum(opms) / len(opms):.1f}%' if opms else "")
+                       + (f' · 부채비율 {last["debt"]:.0f}%' if last.get("debt") is not None else "")
+                       + (f' · PER {c["per"]:.1f}배' if c["per"] else ""))
+            hint = ""
+        mk = f' <span class="chip">{escape(c["mk"])}</span>' if c["mk"] else ""
+        out.append(
+            f'<div class="card"><div class="row"><div><span class="num">{i}</span>'
+            f'<a class="big" href="/stock?code={quote(c["code"])}">{escape(c["name"])}</a> <span class="muted">{escape(c["code"])}</span>{mk}</div>'
+            f'<div><b class="big">{c["score"]}</b><span class="muted">/100</span></div></div>'
+            f'<div style="height:5px;background:var(--chip);border-radius:3px;margin:6px 0"><div style="height:5px;width:{c["score"]}%;background:var(--accent);border-radius:3px"></div></div>'
+            f'<div>{head}</div><div style="margin-top:4px">{numbers}</div>{hint}<div style="margin-top:4px">{chips}</div>'
+            f'<details style="margin-top:4px"><summary class="muted">점수 근거</summary>{detail}'
+            f'<div class="muted" style="font-size:12px;margin-top:4px">기준 연도 {escape(c["act"][0]["period"][:4])}~{escape(last["period"][:4])} · '
+            f'기관 매수 {c["n"]}곳 · <a href="{score_url(code=c["code"])}">점수표로 평가하기 →</a></div></details></div>')
+    note = (f'<p class="muted">{len(rows)}개 종목 중 재무 자료로 계산된 {len(rows) - no_data}개' + (f' (자료 부족 {no_data}개 제외)' if no_data else "")
+            + f'에서 {len(cards)}개' + (f' ({GURU_PASS}점 이상)' if flt else "") + f' — 위 {min(len(cards), 30)}개를 보여 줘요.</p>')
+    return page(info["title"], intro + form + note + ("".join(out) or '<p class="muted">조건에 맞는 종목이 없어요. 기간을 늘리거나 점수 필터를 풀어 보세요.</p>'))
 
 
 def latest_excel(conn):
