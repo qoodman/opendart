@@ -32,17 +32,28 @@ def save(conn, cards, today=None):
     return n
 
 
-def load(conn, codes=None):
-    """{code: [(날짜, 평균)…]} 오래된 것부터"""
+def load(conn, codes=None, keys=None):
+    """{code: [(날짜, 평균)…]} 오래된 것부터. keys(방법 이름들)를 주면 그 방법들 점수만 평균냄"""
+    cols = ", ".join(keys) if keys else "avg"
+    keys = list(keys) if keys else None
     try:
-        rows = conn.execute("SELECT code, d, avg FROM score_hist ORDER BY code, d").fetchall()
+        rows = conn.execute(f"SELECT code, d, {cols} FROM score_hist ORDER BY code, d").fetchall()
     except sqlite3.OperationalError:
         return {}
     want = set(codes) if codes is not None else None
     out = {}
-    for code, d, a in rows:
-        if want is None or code in want:
-            out.setdefault(code, []).append((d, a))
+    for row in rows:
+        code, d = row[0], row[1]
+        if want is not None and code not in want:
+            continue
+        if keys:
+            vals = [v for v in row[2:] if v is not None]
+            if not vals:
+                continue
+            a = sum(vals) / len(vals)
+        else:
+            a = row[2]
+        out.setdefault(code, []).append((d, a))
     return out
 
 

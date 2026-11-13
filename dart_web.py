@@ -1070,7 +1070,7 @@ def view_reports(conn, code, tgt, n_br, close):
             f'{trs}</table></div><p><a href="/reports?q={quote(code)}&d=180">이 종목 리포트 모두 보기 →</a></p>')
 
 
-REPORT_PERIODS = {"7": "최근 1주", "30": "최근 1달", "90": "최근 3달", "180": "최근 6달"}
+REPORT_PERIODS = {"7": "최근 1주", "30": "최근 1달", "90": "최근 3달", "180": "최근 6달", "365": "최근 1년"}
 REPORT_SRC = {"": "출처 전체", "hk": "한경컨센서스", "nv": "네이버 증권"}
 REPORT_ONLY = {"": "모든 종목", "dart": "기관 단순투자 종목만"}
 # 상승여력(목표가 ÷ 최근 종가 − 1) 구간: 최소와 최대를 따로 골라 '50% 이상 · 80% 이하'처럼
@@ -3321,7 +3321,7 @@ def view_guru(conn, q):
     return page(info["title"], intro + form + note + ("".join(out) or '<p class="muted">조건에 맞는 종목이 없어요. 기간을 늘리거나 점수 필터를 풀어 보세요.</p>'))
 
 
-REPORT_DAYS = 90
+REPORT_DAYS = 365
 
 
 def report_map(conn, codes, days=REPORT_DAYS):
@@ -3353,7 +3353,7 @@ def short_hits(conn, name):
 
 
 def report_box(conn, code, name, reps, close=None):
-    """아이디어 카드 안의 '이 기업에 리포트가 있나' 칸: 증권사 리포트(최근 90일) + 공매도 리포트"""
+    """아이디어 카드 안의 '이 기업에 리포트가 있나' 칸: 증권사 리포트(최근 1년) + 공매도 리포트"""
     rs = reps.get(code) or []
     if rs:
         brokers = len({r["broker"] for r in rs})
@@ -3368,10 +3368,10 @@ def report_box(conn, code, name, reps, close=None):
             t = f'<a href="{escape(r["link"])}">{t}</a>' if r["link"].startswith(("http://", "https://")) else t
             lines += (f'<div class="muted" style="font-size:12px">{escape(r["date"])} · {escape(r["broker"] or "")} · {t}'
                       + (f' · {escape(r["opinion"])}' if r["opinion"] else "") + (f' · 목표 {won(r["target"])}원' if r["target"] else "") + '</div>')
-        more = f'<a href="/reports?{urlencode({"q": code, "d": "90"})}">리포트 모두 보기 →</a>' if len(rs) > 2 else ""
+        more = f'<a href="/reports?{urlencode({"q": code, "d": str(REPORT_DAYS)})}">리포트 모두 보기 →</a>' if len(rs) > 2 else ""
         body = head + lines + (f'<div style="font-size:12px">{more}</div>' if more else "")
     else:
-        body = '<span class="muted">증권사 리포트: 최근 90일 없음 (다루는 증권사가 없거나 아직 수집 전)</span>'
+        body = '<span class="muted">증권사 리포트: 최근 1년 없음 (다루는 증권사가 없거나 아직 수집 전)</span>'
     sh = short_hits(conn, name)
     if sh:
         body += ('<div style="margin-top:3px"><span class="chip warn">공매도 리포트 %d건</span> ' % len(sh)
@@ -3491,6 +3491,24 @@ def stock_scores_block(conn, code, name):
             '<div class="muted" style="font-size:12px;margin-top:6px">단순화한 점수예요 (마법공식·모멘텀은 기관이 산 종목 목록 안 상대 순위). 이름을 누르면 그 방법 설명과 순위가 나와요. 투자 추천이 아니에요.</div></div>')
 
 
+def parse_methods(v):
+    """'lynch.buffett' → 고른 방법 목록 (순서 유지). 비었거나 이상하면 전부"""
+    on = [k for k, _ in OVERALL_METHODS if k in (v or "").split(".")]
+    return on or [k for k, _ in OVERALL_METHODS]
+
+
+def restat(c, on):
+    """고른 방법(on)만으로 평균·통과 수·가치/추세 엇갈림을 다시 계산"""
+    sc = {k: v for k, v in c["sc"].items() if k in on}
+    c["sc"] = sc
+    c["avg"] = sum(sc.values()) / len(sc) if sc else 0
+    vv = [sc[k] for k in VALUE_KEYS if k in sc]
+    c["value"] = sum(vv) / len(vv) if vv else None
+    c["trend"] = sc.get("momentum")
+    c["passed"] = sum(1 for x in sc.values() if x >= GURU_PASS)
+    c["split"] = abs(c["value"] - c["trend"]) if c["value"] is not None and c["trend"] is not None else 0
+
+
 def view_overall(conn, q):
     """아이디어 → 종합: 기관이 산 종목마다 여섯 가지 방법의 점수를 한 줄로 모아 보여 줌"""
     import guru
@@ -3515,11 +3533,17 @@ def view_overall(conn, q):
     closes = latest_closes(conn) if has_table(conn, "prices") else {}
     cards = overall_cards(conn, rows)
     fin, hist = guru.load_all(conn), momentum.load_all(conn)
+    on = parse_methods(q.get("u"))
+    all_on = len(on) == len(OVERALL_METHODS)
+    if not all_on:
+        for c in cards:
+            restat(c, on)
+        cards = [c for c in cards if c["sc"]]
     key = {"": lambda c: (-c["avg"], -c["passed"]), "pass": lambda c: (-c["passed"], -c["avg"]),
            "split": lambda c: -c["split"], "value": lambda c: (c["value"] is None, -(c["value"] or 0)),
            "trend": lambda c: (c["trend"] is None, -(c["trend"] or 0))}.get(srt, lambda c: (-c["avg"], -c["passed"]))
     import scorehist
-    shist = scorehist.load(conn, [c["code"] for c in cards])
+    shist = scorehist.load(conn, [c["code"] for c in cards], None if all_on else on)
     for c in cards:
         ch = scorehist.change(shist.get(c["code"], []), 7)
         c["chg"] = ch[0] if ch else None
@@ -3530,12 +3554,21 @@ def view_overall(conn, q):
     if rp:
         cards = [c for c in cards if c["code"] in reps]
     cards.sort(key=key)
-    form = ('<form method="get" class="filters" style="margin:8px 0"><input type="hidden" name="t" value="overall">'
+    form = ('<form method="get" class="filters" style="margin:8px 0"><input type="hidden" name="t" value="overall"><input type="hidden" name="u" value="{".".join(on)}">'
             f'{select("w", WINDOWS, w)}' + (select("m", MARKET_OPTS, m) if "시장" in cols else "") + f'{select("ex", NPS_OPTS, ex)}'
             + select("rp", {"": "리포트 전체", "has": f"증권사 리포트 있는 종목만 (최근 {REPORT_DAYS}일)"}, rp)
             + select("s", {"": "정렬: 평균 점수순", "pass": "정렬: 60점 넘은 방법 많은 순", "value": "정렬: 가치·품질 평균순",
                            "trend": "정렬: 모멘텀(추세)순", "split": "정렬: 가치와 추세가 엇갈리는 순",
                            "up": "정렬: 7일간 점수 오른 순", "down": "정렬: 7일간 점수 내린 순"}, srt) + '<button>적용</button></form>')
+    base = {k: v for k, v in {"t": "overall", "w": w, "m": m, "ex": ex, "s": srt, "rp": rp}.items() if v}
+
+    def toggle(k):
+        nxt = [x for x, _ in OVERALL_METHODS if (x in on) != (x == k)]
+        return "/ideas?" + urlencode({**base, **({"u": ".".join(nxt)} if nxt and len(nxt) < len(OVERALL_METHODS) else {})})
+    picker = ('<div style="margin:8px 0"><div class="muted" style="font-size:12px;margin-bottom:4px">볼 방법 고르기 (누르면 켜고 끔 · 평균·통과·정렬이 고른 방법만으로 다시 계산돼요)</div>'
+              + " ".join((f'<a class="chip" style="background:var(--accent);color:var(--bg)" href="{toggle(k)}">✓ {lab}</a>' if k in on else
+                          f'<a class="chip" href="{toggle(k)}">{lab}</a>') for k, lab in OVERALL_METHODS)
+              + (f' <a class="chip" href="/ideas?{urlencode(base)}">전부 켜기</a>' if not all_on else "") + '</div>')
     intro = ('<div class="card"><b>종합</b><div class="muted" style="margin-top:4px">기관이 산 종목마다 린치 · 버핏 · 그레이엄 · 마법공식 · F-스코어 · 모멘텀 점수를 한 줄에 모았어요. '
              '여러 방법이 함께 높은 종목은 어느 한 가지 기준의 착시일 가능성이 낮고, 방법끼리 엇갈리면 이유를 따져 볼 신호예요.</div>'
              '<details style="margin-top:6px"><summary class="muted">보는 법</summary><ul class="muted" style="margin:6px 0 0;padding-left:18px">'
@@ -3546,12 +3579,12 @@ def view_overall(conn, q):
              '<li>각 점수의 기준과 한계는 같은 아이디어 안의 각 방법 탭에 적혀 있어요. 마법공식·모멘텀 점수는 이 목록 안 상대 순위라서 종목 수가 달라지면 바뀌어요</li></ul></details>'
              '<div class="muted" style="margin-top:6px"><b>주의:</b> 단순화한 점수들의 평균이라 \'좋은 종목\'의 증명이 아니에요. 사업을 이해하는지·경영진·경쟁 우위 같은 정성 요소는 하나도 안 들어가요. 투자 추천이 아니에요.</div></div>')
     if not fin and not hist:
-        return page("종합", intro + form + '<div class="card">재무·종가 자료가 아직 없어요. <b>지금 수집 → 시장·정책만</b>을 한 번 돌려 주세요.</div>')
+        return page("종합", intro + picker + form + '<div class="card">재무·종가 자료가 아직 없어요. <b>지금 수집 → 시장·정책만</b>을 한 번 돌려 주세요.</div>')
     out = []
     for i, c in enumerate(cards[:40], 1):
         chips = " ".join(
             (f'<span class="chip {"up" if c["sc"][k] >= GURU_PASS else ""}">{lab} {c["sc"][k]}</span>' if k in c["sc"] else f'<span class="chip muted">{lab} -</span>')
-            for k, lab in OVERALL_METHODS)
+            for k, lab in OVERALL_METHODS if k in on)
         tags = ""
         if c["split"] >= 50:
             tags = (f'<span class="chip warn">엇갈림: 가치·품질 {c["value"]:.0f} vs 추세 {c["trend"]:.0f}</span> ')
@@ -3570,7 +3603,7 @@ def view_overall(conn, q):
             f'<div class="muted" style="font-size:12px;margin-top:4px">'
             f'<a href="{score_url(code=c["code"])}">점수표로 평가하기 →</a></div></div>')
     note = f'<p class="muted">{len(rows)}개 종목 중 점수가 하나라도 계산된 {len(cards)}개 — 위 {min(len(cards), 40)}개를 보여 줘요.</p>'
-    return page("종합", intro + form + note + ("".join(out) or '<p class="muted">조건에 맞는 종목이 없어요. 기간을 늘려 보세요.</p>'))
+    return page("종합", intro + picker + form + note + ("".join(out) or '<p class="muted">조건에 맞는 종목이 없어요. 기간을 늘려 보세요.</p>'))
 
 
 def latest_excel(conn):

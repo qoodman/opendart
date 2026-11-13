@@ -147,22 +147,33 @@ def sync_all(db_path, debug_dir=None, log=print, use_hk=True, use_nv=True, first
     """켜진 출처를 모두 받음. {출처: 새 건수 또는 '실패: …'}"""
     conn = sqlite3.connect(db_path)
     ensure_table(conn)
+    conn.execute("CREATE TABLE IF NOT EXISTS research_meta (key TEXT PRIMARY KEY, value TEXT)")
+    # 최근 1년치 리포트를 보려고, 처음 한 번만 1년 전까지 거슬러 채움 (두 출처가 모두 성공했을 때만 완료로 기록)
+    backfill = not conn.execute("SELECT 1 FROM research_meta WHERE key='year_backfill'").fetchone() and not first_days
+    conn.commit()
     conn.close()
     out = {}
     if use_hk:
         try:
             import hk_consensus
-            out["hk"] = hk_consensus.sync(db_path, debug_dir=debug_dir, log=log, first_days=first_days or 180)
+            out["hk"] = hk_consensus.sync(db_path, debug_dir=debug_dir, log=log, first_days=first_days or 180,
+                                            backfill_days=365 if backfill else None)
         except Exception as e:
             out["hk"] = f"실패: {str(e)[:200]}"
             log(f"[리포트] 한경컨센서스 실패: {e}")
     if use_nv:
         try:
             import naver_research
-            out["nv"] = naver_research.sync(db_path, debug_dir=debug_dir, log=log, first_days=first_days or 30)
+            out["nv"] = naver_research.sync(db_path, debug_dir=debug_dir, log=log, first_days=first_days or (365 if backfill else 30))
         except Exception as e:
             out["nv"] = f"실패: {str(e)[:200]}"
             log(f"[리포트] 네이버 증권 실패: {e}")
+    if backfill and all(isinstance(out.get(k), int) for k, on in (("hk", use_hk), ("nv", use_nv)) if on):
+        conn = sqlite3.connect(db_path)
+        conn.execute("INSERT OR REPLACE INTO research_meta VALUES ('year_backfill', ?)", (dt.date.today().isoformat(),))
+        conn.commit()
+        conn.close()
+        log("[리포트] 최근 1년치 채우기를 마쳤습니다")
     try:
         conn = sqlite3.connect(db_path)
         n = reconcile(conn, log)

@@ -109,7 +109,7 @@ def fetch_page(session, sdate, edate, page):
     return decode(r.content)
 
 
-def sync(db_path, debug_dir=None, first_days=180, log=print, stop=None, session=None):
+def sync(db_path, debug_dir=None, first_days=180, log=print, stop=None, session=None, backfill_days=None):
     """새 리포트를 받아 reports 표(출처 hk)에 저장. 새로 저장한 건수를 돌려줌."""
     import research
     session = session or requests.Session()
@@ -119,6 +119,8 @@ def sync(db_path, debug_dir=None, first_days=180, log=print, stop=None, session=
         last = research.last_date(conn, "hk")
         today = dt.date.today()
         since = (dt.date.fromisoformat(last) - dt.timedelta(days=3)) if last else today - dt.timedelta(days=first_days)
+        if backfill_days:                      # 한 번만: 과거 기간을 다시 채움 (이미 있는 건 건너뜀)
+            since = min(since, today - dt.timedelta(days=backfill_days))
         sdate, edate = since.isoformat(), today.isoformat()
         log(f"[리포트] 한경컨센서스 {sdate}~{edate} 기업 리포트 받는 중")
         added, page, prev_first = 0, 1, None
