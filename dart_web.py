@@ -992,7 +992,7 @@ def view_stock(conn, code, q=None):
             chart = stat + price_chart([p["date"] for p in pr], [p["close"] for p in pr], buys, avg,
                                        title=f"{name} 주가와 기관 매수", target=tgt)
     reports = view_reports(conn, code, tgt, n_br, last_close)
-    body = (head + value_line(value_map(conn).get(code)) + flow_block(conn, code) + ext_block(conn, code) + chart + reports
+    body = (head + value_line(value_map(conn).get(code)) + stock_scores_block(conn, code, name) + flow_block(conn, code) + ext_block(conn, code) + chart + reports
             + trend_block(conn, code) + group_bar + '<h2 id="sum">날짜별 평균 매수단가</h2>'
             + (t1 or '<p class="muted">매수 내역 없음</p>')
             + '<h2 id="det">모든 변동 내역</h2>' + t2)
@@ -3383,29 +3383,11 @@ OVERALL_METHODS = [("lynch", "린치"), ("buffett", "버핏"), ("graham", "그�
 VALUE_KEYS = ("lynch", "buffett", "graham", "magic", "fscore")
 
 
-def view_overall(conn, q):
-    """아이디어 → 종합: 기관이 산 종목마다 여섯 가지 방법의 점수를 한 줄로 모아 보여 줌"""
+def overall_cards(conn, rows):
+    """rows: [{code, name, mk, n}] → 종목마다 여섯 방법 점수(sc)·평균(avg)·통과 수(passed)·가치/추세 엇갈림(split)을 계산한 카드 목록"""
     import guru
     import momentum
-    if not has_table(conn, "summary"):
-        return page("종합", '<div class="card">보고서(DART) 수집이 한 번 끝나야 볼 수 있습니다.</div>')
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(summary)")}
-    w = q.get("w") if q.get("w") in WINDOWS else "365"
-    ex = q.get("ex") if q.get("ex") in NPS_OPTS else "1"
-    m = q.get("m") if q.get("m") in MARKET_OPTS and "시장" in cols else ""
-    srt = q.get("s") if q.get("s") in ("", "pass", "split", "value", "trend") else ""
-    rp = "has" if q.get("rp") == "has" else ""
-    conds, args = ["변동일 >= ?", "매수수량 > 0", "평균매수단가 > 0"], [(dt.date.today() - dt.timedelta(days=int(w))).isoformat()]
-    if ex == "1":
-        conds.append("제출인 NOT LIKE '%국민연금%'")
-    if m:
-        conds.append("시장 = ?")
-        args.append(m)
-    market = "MAX(시장)" if "시장" in cols else "''"
-    rows = conn.execute(f"SELECT 종목코드 code, MAX(종목명) name, {market} mk, COUNT(DISTINCT 제출인) n "
-                        f"FROM summary WHERE {' AND '.join(conds)} GROUP BY 종목코드", args).fetchall()
     fin, vals, hist = guru.load_all(conn), value_map(conn), momentum.load_all(conn)
-    closes = latest_closes(conn) if has_table(conn, "prices") else {}
     cards = []
     for r in rows:
         ys, v = fin.get(r["code"]), vals.get(r["code"]) or {}
@@ -3441,6 +3423,65 @@ def view_overall(conn, q):
         c["trend"] = sc.get("momentum")
         c["passed"] = sum(1 for x in sc.values() if x >= GURU_PASS)
         c["split"] = (abs(c["value"] - c["trend"]) if c["value"] is not None and c["trend"] is not None else 0)
+    return cards
+
+
+def stock_scores_block(conn, code, name):
+    """종목 화면: 여섯 가지 투자 방법 점수를 한 칸에 모아 보여 줌 (종합 탭과 같은 기준: 최근 1년 매수·국민연금 제외 목록 안에서 비교)"""
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(summary)")}
+        market = "MAX(시장)" if "시장" in cols else "''"
+        since = (dt.date.today() - dt.timedelta(days=365)).isoformat()
+        rows = [dict(r) for r in conn.execute(
+            f"SELECT 종목코드 code, MAX(종목명) name, {market} mk, COUNT(DISTINCT 제출인) n FROM summary "
+            "WHERE 변동일 >= ? AND 매수수량 > 0 AND 평균매수단가 > 0 AND 제출인 NOT LIKE '%국민연금%' GROUP BY 종목코드", (since,))]
+        if not any(r["code"] == code for r in rows):
+            rows.append(dict(code=code, name=name, mk="", n=0))
+        card = next((c for c in overall_cards(conn, rows) if c["code"] == code), None)
+    except Exception:
+        return ""
+    if not card or not card["sc"]:
+        return ""
+    lines = ""
+    for k, lab in OVERALL_METHODS:
+        v = card["sc"].get(k)
+        bar = (f'<div style="flex:1;height:6px;background:var(--chip);border-radius:3px"><div style="height:6px;width:{v}%;background:var(--accent);border-radius:3px"></div></div>'
+               if v is not None else '<div class="muted" style="flex:1;font-size:12px">자료 부족</div>')
+        lines += (f'<div style="display:flex;align-items:center;gap:8px;margin-top:4px"><a href="/ideas?t={k}" style="width:70px">{lab}</a>{bar}'
+                  f'<b style="width:30px;text-align:right" class="{"up" if v is not None and v >= GURU_PASS else ""}">{"-" if v is None else v}</b></div>')
+    tag = ""
+    if card["split"] >= 50:
+        tag = f' <span class="chip warn">엇갈림: 가치·품질 {card["value"]:.0f} vs 추세 {card["trend"]:.0f}</span>'
+    return ('<div class="card"><div class="row"><b>투자 방법별 점수</b>'
+            f'<div><b class="big">{card["avg"]:.0f}</b><span class="muted">/100 평균 · 통과 {card["passed"]}/{len(card["sc"])}</span></div></div>'
+            f'{tag}{lines}'
+            '<div class="muted" style="font-size:12px;margin-top:6px">단순화한 점수예요 (마법공식·모멘텀은 기관이 산 종목 목록 안 상대 순위). 이름을 누르면 그 방법 설명과 순위가 나와요. 투자 추천이 아니에요.</div></div>')
+
+
+def view_overall(conn, q):
+    """아이디어 → 종합: 기관이 산 종목마다 여섯 가지 방법의 점수를 한 줄로 모아 보여 줌"""
+    import guru
+    import momentum
+    if not has_table(conn, "summary"):
+        return page("종합", '<div class="card">보고서(DART) 수집이 한 번 끝나야 볼 수 있습니다.</div>')
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(summary)")}
+    w = q.get("w") if q.get("w") in WINDOWS else "365"
+    ex = q.get("ex") if q.get("ex") in NPS_OPTS else "1"
+    m = q.get("m") if q.get("m") in MARKET_OPTS and "시장" in cols else ""
+    srt = q.get("s") if q.get("s") in ("", "pass", "split", "value", "trend") else ""
+    rp = "has" if q.get("rp") == "has" else ""
+    conds, args = ["변동일 >= ?", "매수수량 > 0", "평균매수단가 > 0"], [(dt.date.today() - dt.timedelta(days=int(w))).isoformat()]
+    if ex == "1":
+        conds.append("제출인 NOT LIKE '%국민연금%'")
+    if m:
+        conds.append("시장 = ?")
+        args.append(m)
+    market = "MAX(시장)" if "시장" in cols else "''"
+    rows = conn.execute(f"SELECT 종목코드 code, MAX(종목명) name, {market} mk, COUNT(DISTINCT 제출인) n "
+                        f"FROM summary WHERE {' AND '.join(conds)} GROUP BY 종목코드", args).fetchall()
+    closes = latest_closes(conn) if has_table(conn, "prices") else {}
+    cards = overall_cards(conn, rows)
+    fin, hist = guru.load_all(conn), momentum.load_all(conn)
     key = {"": lambda c: (-c["avg"], -c["passed"]), "pass": lambda c: (-c["passed"], -c["avg"]),
            "split": lambda c: -c["split"], "value": lambda c: (c["value"] is None, -(c["value"] or 0)),
            "trend": lambda c: (c["trend"] is None, -(c["trend"] or 0))}[srt]
