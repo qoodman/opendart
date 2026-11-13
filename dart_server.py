@@ -460,6 +460,13 @@ def run_market_policy(log=print):
             except Exception as e:
                 out["guru"] = f"실패: {e}"
                 log(f"연간 재무 실패: {e}")
+        if env("DART_SHORTS", "1") != "0":        # 공매도 리포트 탭: 뉴스에서 숏셀러 보고서 기사 후보를 하루 한 번 찾음
+            try:
+                import shortauto
+                out["shorts"] = shortauto.sync(results_db(), log=log)
+            except Exception as e:
+                out["shorts"] = f"실패: {e}"
+                log(f"공매도 리포트 수집 실패: {e}")
         if env("DART_MOMENTUM", "1") != "0":      # 모멘텀 탭에 쓰는 일별 종가 이력 (이틀에 한 번 새로 받음)
             try:
                 import momentum

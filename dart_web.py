@@ -3044,6 +3044,7 @@ def _short_card(it):
     import shortreports as sr
     chips = (f'<span class="chip">{escape(it["region"])}</span> <span class="chip">{escape(it["status"])}</span>'
              + (f' <span class="chip down">{escape(it["price_move"])}</span>' if it.get("price_move") else '')
+             + (' <span class="chip">자동 수집 후보</span>' if str(it.get("seed") or "").startswith("auto:") else '')
              + ('' if it["verified"] else ' <span class="chip warn">확인 필요</span>'))
     who = " · ".join(x for x in (escape(it["firm"]), escape(it["target"]), escape(it["report_date"])) if x)
     blocks = "".join(
@@ -3086,6 +3087,14 @@ def view_shorts(conn, q):
         (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{label}</b>' if k == reg else
          f'<a class="chip" href="/shorts{("?r=" + quote(k)) if k else ""}">{label}</a>')
         for k, label in [("", f"전체 {len(items)}")] + [(r_, f"{r_} {counts[r_]}") for r_ in sr.REGIONS])
+    try:
+        import shortauto
+        last, n_auto = shortauto.status(conn)
+    except Exception:
+        last, n_auto = "", 0
+    auto_line = ('<div class="muted" style="margin-top:6px"><b>자동 수집:</b> 수집할 때(하루 한 번) 뉴스 검색에서 숏셀러 보고서 기사를 찾아 후보로 올려요. '
+                 '올라오는 건 기사 제목·링크·날짜뿐이고 \'자동 수집 후보\'·\'확인 필요\'가 붙어요. 관련 없으면 삭제하세요 (지운 기사는 다시 안 올라와요). '
+                 + (f'마지막 확인 {escape(last)} · 후보 {n_auto}개.' if last else '아직 한 번도 확인하지 못했어요 (지금 수집 → 시장·정책만).') + '</div>')
     intro = ('<div class="card"><b>공매도 리포트</b><div class="muted" style="margin-top:4px">'
              '공매도 투자자(숏셀러)가 \'이 회사는 이상하다\'며 낸 조사 보고서를 나라별로 요약해 둔 곳이에요. '
              '주장 · 회사 반응 · 주가 반응을 나눠 적었어요.</div>'
@@ -3093,7 +3102,7 @@ def view_shorts(conn, q):
              '사실로 확정된 게 아니고, 틀린 경우도 많아요. 여기 내용은 언론 보도 요약이라 원문을 직접 확인한 게 아니에요 '
              '(\'확인 필요\'는 더 불확실). 빨간 칩의 주가 변화도 보도에서 가져온 숫자예요(당일 등락률 위주, 이후 흐름은 다른 요인이 섞여요). 원문을 꼭 읽어 보세요. 투자 추천이 아니에요.</div>'
              '<div class="muted" style="margin-top:6px">한국 상장사를 직접 겨냥한 외국 숏 리포트는 찾지 못해서 한국 항목은 얇아요. '
-             '새 보고서가 나오면 아래에서 직접 추가해 주세요.</div></div>')
+             '새 보고서가 나오면 아래에서 직접 추가해 주세요.</div>' + auto_line + '</div>')
     add = ('<details class="card"><summary>보고서 직접 추가</summary>' + _short_form() + '</details>')
     body = (intro + f'<div style="margin:8px 0">{chips}</div>' + add + "".join(_short_card(i) for i in shown)
             + ("" if shown else '<p class="muted">이 나라 항목이 아직 없어요.</p>'))
