@@ -913,6 +913,64 @@ def value_line(v):
             '<span>(네이버 증권 기준, 참고용)</span></div>')
 
 
+DERIV_LEARN = [
+    ("선물이 뭐예요?", "정해진 날(만기)에 정해진 가격으로 사고팔기로 미리 약속하는 거래예요. 코스피200 선물은 '코스피200 지수'를 사고파는 약속이라, 주식을 직접 안 사도 시장 전체가 오르내리는 쪽에 베팅하거나 내 주식이 떨어질 때를 대비(헤지)할 수 있어요. 적은 돈(증거금)으로 큰 금액을 거래해서 손익이 크게 커져요."),
+    ("옵션은 뭐예요?", "정해진 날에 정해진 가격으로 '살 권리(콜)' 또는 '팔 권리(풋)'를 사고파는 거래예요. 권리를 산 사람은 손해가 낸 돈(프리미엄)까지로 제한되고, 권리를 판 사람은 손실이 훨씬 커질 수 있어요. 개인이 옵션을 팔다가 크게 잃는 경우가 많아서 초보에게 가장 위험한 쪽으로 알려져 있어요."),
+    ("베이시스는 뭐예요?", "선물 가격 − 현물(지수) 가격이에요. 선물이 비싸면(플러스) 시장이 상승을 기대하는 쪽, 싸면(마이너스) 하락에 대비하는 쪽으로 읽어요. 만기가 다가오면 0에 가까워지고, 배당·금리 영향도 있어서 숫자 하나보다 '변하는 방향'이 더 중요해요."),
+    ("외국인 선물 순매수는 왜 봐요?", "외국인은 현물보다 선물을 먼저, 크게 움직이는 경우가 많다고 해요. 그래서 외국인이 선물을 며칠 계속 사면 상승 쪽, 계속 팔면 하락 쪽 신호로 참고해요. 다만 선물을 팔면서 현물을 사는 차익거래·헤지일 수도 있어서, 현물 순매수와 같이 봐야 해요 (이 화면에도 같이 나와요)."),
+    ("만기일·쿼드러플 위칭은 뭐예요?", "코스피200 선물·옵션은 매월 둘째 목요일이 만기예요. 3·6·9·12월은 지수 선물·옵션과 개별주식 선물·옵션이 한꺼번에 만기라서 '쿼드러플 위칭'이라고 불러요. 만기 직전에는 프로그램 매매가 몰려 장 막판에 주가가 크게 흔들릴 수 있어요. 달력에 자동으로 표시해 둬요 (공휴일이면 앞당겨질 수 있어요)."),
+    ("채권 가격과 금리는 반대예요", "이미 발행된 채권은 금리가 오르면 값이 내려가고, 금리가 내리면 값이 올라가요. 새 채권이 더 높은 금리를 주면 예전 채권은 덜 매력적이라서 그래요. 그래서 '금리 상승 = 채권 값 하락'이에요."),
+    ("국고채 금리는 주식에 왜 중요해요?", "국고채는 가장 안전한 투자의 기준 금리예요. 안전한 채권이 높은 이자를 주면 위험한 주식에 돈을 둘 이유가 줄어요(주식 가치 평가에도 더 큰 할인율을 적용해요). 특히 먼 미래에 돈을 버는 성장주가 금리 상승에 약하다고 알려져 있어요."),
+    ("장단기 금리차가 마이너스(역전)면?", "보통은 오래 빌려줄수록(10년) 이자를 더 받아서 10년 금리가 3년보다 높아요. 반대로 10년이 더 낮으면 '앞으로 경기가 나빠져서 금리가 내려갈 것'이라고 시장이 본다는 뜻이라, 경기 침체 신호로 자주 인용돼요. 틀릴 때도 많아요."),
+    ("한미 금리차는요?", "미국 금리가 한국보다 많이 높으면 달러 자산을 가진 쪽이 유리해서, 원화가 약해지고 외국인이 한국 자산을 팔 압력이 생길 수 있다고 해요(가설). 환율·외국인 순매수와 같이 보세요."),
+    ("회사채 스프레드·풋/콜 비율·VKOSPI는요?", "회사채 신용 스프레드(회사채 − 국채 금리)는 경제에 위기감이 퍼질 때 벌어지는 신호이고, 풋/콜 비율과 VKOSPI(변동성지수)는 시장의 공포 정도를 보는 지표예요. 이 화면은 아직 이 자료를 못 받아서 '준비 중'으로 두었어요 (공개 자료원 확인이 필요해요)."),
+]
+
+
+def deriv_spark(points):
+    return sparkline(points[-120:]) if points and len(points) >= 2 else ""
+
+
+def view_derivs(conn, q):
+    import deriv_bond as dvb
+    tab = "learn" if q.get("t") == "learn" else "signals"
+    tabs = '<div style="margin:0 0 8px">' + " ".join(
+        (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == tab else
+         f'<a class="chip" href="/derivs{("?t=" + k) if k != "signals" else ""}">{v}</a>')
+        for k, v in (("signals", "신호판"), ("learn", "배우기 (쉬운 설명)"))) + '</div>'
+    if tab == "learn":
+        body = ('<div class="card"><b>선물·옵션·채권, 주식 투자자가 알아야 할 것</b><div class="muted" style="margin-top:4px">'
+                '용어를 쉬운 말로 풀었어요. 직접 거래하라는 뜻이 아니에요 — 선물·옵션은 원금 이상 잃을 수 있어서 이 화면은 시장 분위기를 읽는 용도예요.</div></div>'
+                + "".join(f'<details class="card"><summary><b>{escape(t)}</b></summary><div style="margin-top:6px">{escape(x)}</div></details>' for t, x in DERIV_LEARN))
+        return page("선물·채권 배우기", tabs + body)
+    sigs = dvb.signals(conn)
+    tot, n, text = dvb.regime(sigs)
+    cards = ""
+    for sg in sigs:
+        chip = ("" if sg["signal"] is None else
+                f'<span class="chip {"up" if sg["signal"] > 0 else "down" if sg["signal"] < 0 else ""}">{"우호" if sg["signal"] > 0 else "부담" if sg["signal"] < 0 else "중립"}</span>')
+        if not sg["value"] and sg["note"]:
+            cards += f'<div class="card"><b>{escape(sg["label"])}</b><div class="muted" style="margin-top:4px">{escape(sg["note"])}</div></div>'
+            continue
+        cards += (f'<div class="card"><div class="row"><b>{escape(sg["label"])}</b><div><b class="big">{escape(sg["value"])}</b></div></div>'
+                  f'<div style="margin:4px 0">{chip} <span class="muted">{escape(sg["change"])}</span></div>'
+                  + (f'<div>{escape(sg["reason"])}</div>' if sg["reason"] else "") + deriv_spark(sg["points"])
+                  + (f'<div class="muted" style="font-size:12px;margin-top:4px">{escape(sg["note"])}</div>' if sg["note"] else "")
+                  + (f'<div class="muted" style="font-size:12px">기준 {escape(sg.get("date", ""))}</div>' if sg.get("date") else "") + '</div>')
+    ex = dvb.expiries(dt.date.today(), 3)
+    exp = ('<div class="card"><b>다음 선물·옵션 만기일</b>' + "".join(
+        f'<div style="margin-top:4px">{d.isoformat()} <b>D-{(d - dt.date.today()).days}</b>'
+        + (' <span class="chip warn">쿼드러플 위칭</span>' if quad else "") + '</div>' for d, quad in ex)
+        + '<div class="muted" style="font-size:12px;margin-top:4px">매월 둘째 목요일 (공휴일이면 앞당겨질 수 있어요, 확인 필요). 달력에도 들어가요.</div></div>')
+    pending = ('<div class="card"><b>아직 못 받는 지표</b><div class="muted" style="margin-top:4px">옵션 풋/콜 비율 · 변동성지수(VKOSPI) · 회사채 신용 스프레드 — '
+               '공개 자료원을 아직 못 찾았어요. KRX Open API의 파생상품 서비스를 이용신청해서 승인되면 연결할 수 있어요.</div></div>')
+    head = (f'<div class="card"><b>선물·채권 신호판</b><div style="margin-top:4px">지금 신호: <b>{text}</b> '
+            f'<span class="muted">(신호 {n}개 합 {tot:+d})</span></div>'
+            '<div class="muted" style="margin-top:6px"><b>주의:</b> 신호는 \'가설\'이에요. 선물·채권 숫자가 주식의 앞날을 보장하지 않고, 기준값은 제가 정한 단순한 값이에요. 투자 추천이 아니에요. '
+            '용어가 낯설면 위쪽 <a href="/derivs?t=learn">배우기</a>를 먼저 보세요.</div></div>')
+    return page("선물·채권", tabs + head + cards + exp + pending)
+
+
 def view_stock(conn, code, q=None):
     q = q or {}
     if not code or not has_table(conn, "detail"):
@@ -2179,7 +2237,7 @@ def perf_url(**kw):
     return "/ideas?" + urlencode({"t": "perf", **kw})
 
 
-MARKET_HUB = {"/market": "시장 온도", "/policy": "정책", "/radar": "대비 레이더", "/shorts": "공매도 리포트", "/calendar": "달력"}
+MARKET_HUB = {"/market": "시장 온도", "/policy": "정책", "/radar": "대비 레이더", "/shorts": "공매도 리포트", "/derivs": "선물·채권", "/calendar": "달력"}
 
 
 REPORT_HUB = {"/": "보고서", "/new": "새 공시", "/reports": "증권사 리포트"}
@@ -3715,6 +3773,8 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     body = view_radar(conn, q)
                 elif url.path == "/shorts":
                     body = view_shorts(conn, q)
+                elif url.path == "/derivs":
+                    body = view_derivs(conn, q)
                 elif url.path == "/score":
                     return self._redirect(score_url(**{k: v for k, v in q.items() if not k.startswith("_")}))
                 elif url.path == "/new":

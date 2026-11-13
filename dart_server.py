@@ -467,6 +467,13 @@ def run_market_policy(log=print):
             except Exception as e:
                 out["shorts"] = f"실패: {e}"
                 log(f"공매도 리포트 수집 실패: {e}")
+        if env("DART_DERIV", "1") != "0":         # 시장 → 선물·채권 탭: 선물 시세·투자자 순매수·국채 금리 (네이버)
+            try:
+                import deriv_bond
+                out["deriv"] = deriv_bond.sync(results_db(), log=log)
+            except Exception as e:
+                out["deriv"] = f"실패: {e}"
+                log(f"선물·채권 실패: {e}")
         if env("DART_MOMENTUM", "1") != "0":      # 모멘텀 탭에 쓰는 일별 종가 이력 (이틀에 한 번 새로 받음)
             try:
                 import momentum
