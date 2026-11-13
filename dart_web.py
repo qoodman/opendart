@@ -3426,6 +3426,27 @@ def overall_cards(conn, rows):
     return cards
 
 
+def snapshot_scores(db_path, log=print, today=None):
+    """종합 점수를 오늘 날짜로 저장 (수집 때 실행). 기관이 최근 1년 안에 산 종목(국민연금 제외) 기준"""
+    import scorehist
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        if not has_table(conn, "summary"):
+            return {"저장": 0}
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(summary)")}
+        market = "MAX(시장)" if "시장" in cols else "''"
+        since = ((today or dt.date.today()) - dt.timedelta(days=365)).isoformat()
+        rows = [dict(r) for r in conn.execute(
+            f"SELECT 종목코드 code, MAX(종목명) name, {market} mk, COUNT(DISTINCT 제출인) n FROM summary "
+            "WHERE 변동일 >= ? AND 매수수량 > 0 AND 평균매수단가 > 0 AND 제출인 NOT LIKE '%국민연금%' GROUP BY 종목코드", (since,))]
+        n = scorehist.save(conn, overall_cards(conn, rows), today)
+        log(f"종합 점수 기록: {n}개 종목")
+        return {"저장": n}
+    finally:
+        conn.close()
+
+
 def stock_scores_block(conn, code, name):
     """종목 화면: 여섯 가지 투자 방법 점수를 한 칸에 모아 보여 줌 (종합 탭과 같은 기준: 최근 1년 매수·국민연금 제외 목록 안에서 비교)"""
     try:
@@ -3452,9 +3473,21 @@ def stock_scores_block(conn, code, name):
     tag = ""
     if card["split"] >= 50:
         tag = f' <span class="chip warn">엇갈림: 가치·품질 {card["value"]:.0f} vs 추세 {card["trend"]:.0f}</span>'
+    hist_line = ""
+    try:
+        import scorehist
+        ser = scorehist.load(conn, [code]).get(code, [])
+        ch = scorehist.change(ser, 7)
+        if ch:
+            hist_line = (f'<div style="margin-top:6px">7일 전보다 <b class="{"up" if ch[0] > 0 else "down" if ch[0] < 0 else ""}">{ch[0]:+.1f}점</b> '
+                         f'<span class="muted">(기준 {escape(ch[1])})</span></div>')
+        if len(ser) >= 2:
+            hist_line += sparkline([v for _, v in ser[-90:]])
+    except Exception:
+        pass
     return ('<div class="card"><div class="row"><b>투자 방법별 점수</b>'
             f'<div><b class="big">{card["avg"]:.0f}</b><span class="muted">/100 평균 · 통과 {card["passed"]}/{len(card["sc"])}</span></div></div>'
-            f'{tag}{lines}'
+            f'{tag}{lines}{hist_line}'
             '<div class="muted" style="font-size:12px;margin-top:6px">단순화한 점수예요 (마법공식·모멘텀은 기관이 산 종목 목록 안 상대 순위). 이름을 누르면 그 방법 설명과 순위가 나와요. 투자 추천이 아니에요.</div></div>')
 
 
@@ -3468,7 +3501,7 @@ def view_overall(conn, q):
     w = q.get("w") if q.get("w") in WINDOWS else "365"
     ex = q.get("ex") if q.get("ex") in NPS_OPTS else "1"
     m = q.get("m") if q.get("m") in MARKET_OPTS and "시장" in cols else ""
-    srt = q.get("s") if q.get("s") in ("", "pass", "split", "value", "trend") else ""
+    srt = q.get("s") if q.get("s") in ("", "pass", "split", "value", "trend", "up", "down") else ""
     rp = "has" if q.get("rp") == "has" else ""
     conds, args = ["변동일 >= ?", "매수수량 > 0", "평균매수단가 > 0"], [(dt.date.today() - dt.timedelta(days=int(w))).isoformat()]
     if ex == "1":
@@ -3484,7 +3517,15 @@ def view_overall(conn, q):
     fin, hist = guru.load_all(conn), momentum.load_all(conn)
     key = {"": lambda c: (-c["avg"], -c["passed"]), "pass": lambda c: (-c["passed"], -c["avg"]),
            "split": lambda c: -c["split"], "value": lambda c: (c["value"] is None, -(c["value"] or 0)),
-           "trend": lambda c: (c["trend"] is None, -(c["trend"] or 0))}[srt]
+           "trend": lambda c: (c["trend"] is None, -(c["trend"] or 0))}.get(srt, lambda c: (-c["avg"], -c["passed"]))
+    import scorehist
+    shist = scorehist.load(conn, [c["code"] for c in cards])
+    for c in cards:
+        ch = scorehist.change(shist.get(c["code"], []), 7)
+        c["chg"] = ch[0] if ch else None
+    key_chg = {"up": lambda c: (c["chg"] is None, -(c["chg"] or 0)), "down": lambda c: (c["chg"] is None, c["chg"] or 0)}
+    if srt in key_chg:
+        key = key_chg[srt]
     reps = report_map(conn, [c["code"] for c in cards])
     if rp:
         cards = [c for c in cards if c["code"] in reps]
@@ -3493,7 +3534,8 @@ def view_overall(conn, q):
             f'{select("w", WINDOWS, w)}' + (select("m", MARKET_OPTS, m) if "시장" in cols else "") + f'{select("ex", NPS_OPTS, ex)}'
             + select("rp", {"": "리포트 전체", "has": f"증권사 리포트 있는 종목만 (최근 {REPORT_DAYS}일)"}, rp)
             + select("s", {"": "정렬: 평균 점수순", "pass": "정렬: 60점 넘은 방법 많은 순", "value": "정렬: 가치·품질 평균순",
-                           "trend": "정렬: 모멘텀(추세)순", "split": "정렬: 가치와 추세가 엇갈리는 순"}, srt) + '<button>적용</button></form>')
+                           "trend": "정렬: 모멘텀(추세)순", "split": "정렬: 가치와 추세가 엇갈리는 순",
+                           "up": "정렬: 7일간 점수 오른 순", "down": "정렬: 7일간 점수 내린 순"}, srt) + '<button>적용</button></form>')
     intro = ('<div class="card"><b>종합</b><div class="muted" style="margin-top:4px">기관이 산 종목마다 린치 · 버핏 · 그레이엄 · 마법공식 · F-스코어 · 모멘텀 점수를 한 줄에 모았어요. '
              '여러 방법이 함께 높은 종목은 어느 한 가지 기준의 착시일 가능성이 낮고, 방법끼리 엇갈리면 이유를 따져 볼 신호예요.</div>'
              '<details style="margin-top:6px"><summary class="muted">보는 법</summary><ul class="muted" style="margin:6px 0 0;padding-left:18px">'
@@ -3514,6 +3556,8 @@ def view_overall(conn, q):
         if c["split"] >= 50:
             tags = (f'<span class="chip warn">엇갈림: 가치·품질 {c["value"]:.0f} vs 추세 {c["trend"]:.0f}</span> ')
         mk = f' <span class="chip">{escape(c["mk"])}</span>' if c["mk"] else ""
+        if c.get("chg") is not None:
+            tags += f'<span class="chip {"up" if c["chg"] > 0 else "down" if c["chg"] < 0 else ""}">7일 {c["chg"]:+.1f}점</span> '
         val = (f'PER {c["per"]:.1f}배' if c["per"] else "PER -") + (f' · PBR {c["pbr"]:.2f}배' if c["pbr"] else "")
         out.append(
             f'<div class="card"><div class="row"><div><span class="num">{i}</span>'

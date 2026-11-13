@@ -474,6 +474,12 @@ def run_market_policy(log=print):
             except Exception as e:
                 out["momentum"] = f"실패: {e}"
                 log(f"종가 이력 실패: {e}")
+        try:    # 종합 점수를 하루 한 줄씩 기록 (점수가 오르내리는지 보려고)
+            import dart_web
+            out["score_hist"] = dart_web.snapshot_scores(results_db(), log=log)
+        except Exception as e:
+            out["score_hist"] = f"실패: {e}"
+            log(f"종합 점수 기록 실패: {e}")
         try:    # 점수표로 평가한 종목의 자동 추정(네이버 재무·DART)도 같이 갱신
             import score_auto
             conn = sqlite3.connect(results_db())
