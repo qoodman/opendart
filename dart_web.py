@@ -2196,6 +2196,8 @@ def hub_tabs_row(path):
 
 
 def view_ideas(conn, q):
+    if q.get("t") not in IDEA_TABS:         # 위쪽 '아이디어'를 누르면 종합부터
+        q = {**q, "t": "overall"}
     if q.get("t") == "overall":
         _CTX.pre = idea_tabs_row("overall")
         try:
