@@ -3166,6 +3166,7 @@ def view_guru(conn, q):
     ex = q.get("ex") if q.get("ex") in NPS_OPTS else "1"
     m = q.get("m") if q.get("m") in MARKET_OPTS and "시장" in cols else ""
     flt = "pass" if q.get("f") == "pass" else ""
+    rp = "has" if q.get("rp") == "has" else ""
     srt = q.get("s") if q.get("s") in info["sorts"] else ""
     conds, args = ["변동일 >= ?", "매수수량 > 0", "평균매수단가 > 0"], [(dt.date.today() - dt.timedelta(days=int(w))).isoformat()]
     if ex == "1":
@@ -3227,10 +3228,15 @@ def view_guru(conn, q):
            "high": lambda c: (c.get("m", {}).get("high_ratio") is None, -(c.get("m", {}).get("high_ratio") or 0))}[srt]
     if kind == "magic" and not srt:
         key = lambda c: c["rank_all"]
+    reps = report_map(conn, [c["code"] for c in cards])
+    if rp:
+        cards = [c for c in cards if c["code"] in reps]
+    closes = latest_closes(conn) if has_table(conn, "prices") else {}
     cards.sort(key=key)
     form = (f'<form method="get" class="filters" style="margin:8px 0"><input type="hidden" name="t" value="{kind}">'
             f'{select("w", WINDOWS, w)}' + (select("m", MARKET_OPTS, m) if "시장" in cols else "") + f'{select("ex", NPS_OPTS, ex)}'
-            f'{select("f", {"": "점수 전체", "pass": f"{GURU_PASS}점 이상만"}, flt)}{select("s", info["sorts"], srt)}<button>적용</button></form>')
+            f'{select("f", {"": "점수 전체", "pass": f"{GURU_PASS}점 이상만"}, flt)}{select("s", info["sorts"], srt)}'
+            + select("rp", {"": "리포트 전체", "has": f"증권사 리포트 있는 종목만"}, rp) + '<button>적용</button></form>')
     how = "".join(f"<li>{escape(x)}</li>" for x in info["how"])
     intro = (f'<div class="card"><b>{info["title"]}</b><div class="muted" style="margin-top:4px">{escape(info["idea"])}</div>'
              f'<details style="margin-top:6px"><summary class="muted">숫자로 어떻게 옮겼나</summary>'
@@ -3295,12 +3301,71 @@ def view_guru(conn, q):
             f'<div><b class="big">{c["score"]}</b><span class="muted">/100</span></div></div>'
             f'<div style="height:5px;background:var(--chip);border-radius:3px;margin:6px 0"><div style="height:5px;width:{c["score"]}%;background:var(--accent);border-radius:3px"></div></div>'
             f'<div>{head}</div><div style="margin-top:4px">{numbers}</div>{hint}<div style="margin-top:4px">{chips}</div>'
+            + report_box(conn, c["code"], c["name"], reps, closes.get(c["code"], (None, None))[1]) +
             f'<details style="margin-top:4px"><summary class="muted">점수 근거</summary>{detail}'
             f'<div class="muted" style="font-size:12px;margin-top:4px">기준 연도 {escape(c["act"][0]["period"][:4])}~{escape(last["period"][:4])} · '
             f'기관 매수 {c["n"]}곳 · <a href="{score_url(code=c["code"])}">점수표로 평가하기 →</a></div></details></div>')
     note = (f'<p class="muted">{len(rows)}개 종목 중 자료로 계산된 {len(rows) - no_data}개' + (f' (자료 부족 {no_data}개 제외)' if no_data else "")
             + f'에서 {len(cards)}개' + (f' ({GURU_PASS}점 이상)' if flt else "") + f' — 위 {min(len(cards), 30)}개를 보여 줘요.</p>')
     return page(info["title"], intro + form + note + ("".join(out) or '<p class="muted">조건에 맞는 종목이 없어요. 기간을 늘리거나 점수 필터를 풀어 보세요.</p>'))
+
+
+REPORT_DAYS = 90
+
+
+def report_map(conn, codes, days=REPORT_DAYS):
+    """{종목코드: [최근 days일 증권사 리포트 dict (최신순)]} — 표가 없으면 {}"""
+    if not codes or not has_table(conn, "reports"):
+        return {}
+    since = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+    out = {}
+    for i in range(0, len(codes), 500):
+        part = codes[i:i + 500]
+        cur = conn.execute("SELECT code, date, broker, title, opinion, target, pdf, url FROM reports "
+                           f"WHERE date >= ? AND code IN ({','.join('?' * len(part))}) ORDER BY date DESC, rowid DESC", [since] + part)
+        for code, d, broker, title, opinion, target, pdf, url in cur:
+            out.setdefault(code, []).append(dict(date=d, broker=broker, title=title, opinion=opinion, target=target, link=pdf or url or ""))
+    return out
+
+
+def short_hits(conn, name):
+    """종목 이름이 대상 기업·제목에 들어 있는 공매도 리포트 [(id, 제목, 날짜)] (이름이 너무 짧으면 안 찾음)"""
+    name = (name or "").strip()
+    if len(name) < 2:
+        return []
+    try:
+        import shortreports as sr
+        return [(r["id"], r["title"], r["report_date"]) for r in sr.list_all(conn)
+                if name in (r["target"] or "") or name in (r["title"] or "")]
+    except Exception:
+        return []
+
+
+def report_box(conn, code, name, reps, close=None):
+    """아이디어 카드 안의 '이 기업에 리포트가 있나' 칸: 증권사 리포트(최근 90일) + 공매도 리포트"""
+    rs = reps.get(code) or []
+    if rs:
+        brokers = len({r["broker"] for r in rs})
+        tgt, nb = consensus(conn, code)
+        head = (f'<span class="chip" style="background:var(--accent);color:var(--bg)">증권사 리포트 {len(rs)}건</span> '
+                f'<span class="muted">최근 {REPORT_DAYS}일 · {brokers}곳</span>')
+        if tgt:
+            head += f' · 목표가 평균 <b>{won(tgt)}원</b>' + (f' {upside(tgt, close)}' if close else "")
+        lines = ""
+        for r in rs[:2]:
+            t = escape((r["title"] or "")[:40])
+            t = f'<a href="{escape(r["link"])}">{t}</a>' if r["link"].startswith(("http://", "https://")) else t
+            lines += (f'<div class="muted" style="font-size:12px">{escape(r["date"])} · {escape(r["broker"] or "")} · {t}'
+                      + (f' · {escape(r["opinion"])}' if r["opinion"] else "") + (f' · 목표 {won(r["target"])}원' if r["target"] else "") + '</div>')
+        more = f'<a href="/reports?{urlencode({"q": code, "d": "90"})}">리포트 모두 보기 →</a>' if len(rs) > 2 else ""
+        body = head + lines + (f'<div style="font-size:12px">{more}</div>' if more else "")
+    else:
+        body = '<span class="muted">증권사 리포트: 최근 90일 없음 (다루는 증권사가 없거나 아직 수집 전)</span>'
+    sh = short_hits(conn, name)
+    if sh:
+        body += ('<div style="margin-top:3px"><span class="chip warn">공매도 리포트 %d건</span> ' % len(sh)
+                 + " · ".join(f'<a href="/shorts">{escape(t[:30])}</a>' for _, t, _ in sh[:2]) + '</div>')
+    return f'<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--chip)">{body}</div>'
 
 
 OVERALL_METHODS = [("lynch", "린치"), ("buffett", "버핏"), ("graham", "그레이엄"), ("magic", "마법공식"), ("fscore", "F"), ("momentum", "모멘텀")]
@@ -3318,6 +3383,7 @@ def view_overall(conn, q):
     ex = q.get("ex") if q.get("ex") in NPS_OPTS else "1"
     m = q.get("m") if q.get("m") in MARKET_OPTS and "시장" in cols else ""
     srt = q.get("s") if q.get("s") in ("", "pass", "split", "value", "trend") else ""
+    rp = "has" if q.get("rp") == "has" else ""
     conds, args = ["변동일 >= ?", "매수수량 > 0", "평균매수단가 > 0"], [(dt.date.today() - dt.timedelta(days=int(w))).isoformat()]
     if ex == "1":
         conds.append("제출인 NOT LIKE '%국민연금%'")
@@ -3328,6 +3394,7 @@ def view_overall(conn, q):
     rows = conn.execute(f"SELECT 종목코드 code, MAX(종목명) name, {market} mk, COUNT(DISTINCT 제출인) n "
                         f"FROM summary WHERE {' AND '.join(conds)} GROUP BY 종목코드", args).fetchall()
     fin, vals, hist = guru.load_all(conn), value_map(conn), momentum.load_all(conn)
+    closes = latest_closes(conn) if has_table(conn, "prices") else {}
     cards = []
     for r in rows:
         ys, v = fin.get(r["code"]), vals.get(r["code"]) or {}
@@ -3366,9 +3433,13 @@ def view_overall(conn, q):
     key = {"": lambda c: (-c["avg"], -c["passed"]), "pass": lambda c: (-c["passed"], -c["avg"]),
            "split": lambda c: -c["split"], "value": lambda c: (c["value"] is None, -(c["value"] or 0)),
            "trend": lambda c: (c["trend"] is None, -(c["trend"] or 0))}[srt]
+    reps = report_map(conn, [c["code"] for c in cards])
+    if rp:
+        cards = [c for c in cards if c["code"] in reps]
     cards.sort(key=key)
     form = ('<form method="get" class="filters" style="margin:8px 0"><input type="hidden" name="t" value="overall">'
             f'{select("w", WINDOWS, w)}' + (select("m", MARKET_OPTS, m) if "시장" in cols else "") + f'{select("ex", NPS_OPTS, ex)}'
+            + select("rp", {"": "리포트 전체", "has": f"증권사 리포트 있는 종목만 (최근 {REPORT_DAYS}일)"}, rp)
             + select("s", {"": "정렬: 평균 점수순", "pass": "정렬: 60점 넘은 방법 많은 순", "value": "정렬: 가치·품질 평균순",
                            "trend": "정렬: 모멘텀(추세)순", "split": "정렬: 가치와 추세가 엇갈리는 순"}, srt) + '<button>적용</button></form>')
     intro = ('<div class="card"><b>종합</b><div class="muted" style="margin-top:4px">기관이 산 종목마다 린치 · 버핏 · 그레이엄 · 마법공식 · F-스코어 · 모멘텀 점수를 한 줄에 모았어요. '
@@ -3399,6 +3470,7 @@ def view_overall(conn, q):
             f'<div style="height:5px;background:var(--chip);border-radius:3px;margin:6px 0"><div style="height:5px;width:{c["avg"]:.0f}%;background:var(--accent);border-radius:3px"></div></div>'
             f'<div>{tags}<span class="chip">통과 {c["passed"]}/{len(c["sc"])}</span> <span class="muted">{val} · 기관 {c["n"]}곳</span></div>'
             f'<div style="margin-top:6px">{chips}</div>'
+            + report_box(conn, c["code"], c["name"], reps, closes.get(c["code"], (None, None))[1]) +
             f'<div class="muted" style="font-size:12px;margin-top:4px">'
             f'<a href="{score_url(code=c["code"])}">점수표로 평가하기 →</a></div></div>')
     note = f'<p class="muted">{len(rows)}개 종목 중 점수가 하나라도 계산된 {len(cards)}개 — 위 {min(len(cards), 40)}개를 보여 줘요.</p>'
