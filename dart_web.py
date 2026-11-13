@@ -1777,11 +1777,11 @@ def view_performance_detail(who, evs, h, ex, kind, s=""):
 
 
 # ---------------- 아이디어 ----------------
-IDEA_TABS = {"cheap": "기관 평단보다 싼 종목", "cluster": "여러 기관이 함께 산 종목", "super": "슈퍼개미 움직임",
+IDEA_TABS = {"overall": "종합", "cheap": "기관 평단보다 싼 종목", "cluster": "여러 기관이 함께 산 종목", "super": "슈퍼개미 움직임",
              "rank": "종목 순위", "score": "점수표 (오일전문가)", "perf": "운용사 성적표",
              "lynch": "피터 린치", "buffett": "워렌 버핏",
              "graham": "벤저민 그레이엄", "magic": "마법공식", "fscore": "F-스코어", "momentum": "모멘텀"}
-IDEA_GROUPS = [["cheap", "cluster", "super", "lynch", "buffett", "graham", "magic", "fscore", "momentum"], ["rank", "score", "perf"]]     # 위쪽 메뉴의 '아이디어' / '분석'
+IDEA_GROUPS = [["overall", "cheap", "cluster", "super", "lynch", "buffett", "graham", "magic", "fscore", "momentum"], ["rank", "score", "perf"]]     # 위쪽 메뉴의 '아이디어' / '분석'
 
 
 def idea_group_tabs(active):
@@ -2196,6 +2196,12 @@ def hub_tabs_row(path):
 
 
 def view_ideas(conn, q):
+    if q.get("t") == "overall":
+        _CTX.pre = idea_tabs_row("overall")
+        try:
+            return view_overall(conn, q)
+        finally:
+            _CTX.pre = ""
     if q.get("t") in GURU_INFO:
         _CTX.pre = idea_tabs_row(q["t"])
         try:
@@ -3295,6 +3301,108 @@ def view_guru(conn, q):
     note = (f'<p class="muted">{len(rows)}개 종목 중 자료로 계산된 {len(rows) - no_data}개' + (f' (자료 부족 {no_data}개 제외)' if no_data else "")
             + f'에서 {len(cards)}개' + (f' ({GURU_PASS}점 이상)' if flt else "") + f' — 위 {min(len(cards), 30)}개를 보여 줘요.</p>')
     return page(info["title"], intro + form + note + ("".join(out) or '<p class="muted">조건에 맞는 종목이 없어요. 기간을 늘리거나 점수 필터를 풀어 보세요.</p>'))
+
+
+OVERALL_METHODS = [("lynch", "린치"), ("buffett", "버핏"), ("graham", "그레이엄"), ("magic", "마법공식"), ("fscore", "F"), ("momentum", "모멘텀")]
+VALUE_KEYS = ("lynch", "buffett", "graham", "magic", "fscore")
+
+
+def view_overall(conn, q):
+    """아이디어 → 종합: 기관이 산 종목마다 여섯 가지 방법의 점수를 한 줄로 모아 보여 줌"""
+    import guru
+    import momentum
+    if not has_table(conn, "summary"):
+        return page("종합", '<div class="card">보고서(DART) 수집이 한 번 끝나야 볼 수 있습니다.</div>')
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(summary)")}
+    w = q.get("w") if q.get("w") in WINDOWS else "365"
+    ex = q.get("ex") if q.get("ex") in NPS_OPTS else "1"
+    m = q.get("m") if q.get("m") in MARKET_OPTS and "시장" in cols else ""
+    srt = q.get("s") if q.get("s") in ("", "pass", "split", "value", "trend") else ""
+    conds, args = ["변동일 >= ?", "매수수량 > 0", "평균매수단가 > 0"], [(dt.date.today() - dt.timedelta(days=int(w))).isoformat()]
+    if ex == "1":
+        conds.append("제출인 NOT LIKE '%국민연금%'")
+    if m:
+        conds.append("시장 = ?")
+        args.append(m)
+    market = "MAX(시장)" if "시장" in cols else "''"
+    rows = conn.execute(f"SELECT 종목코드 code, MAX(종목명) name, {market} mk, COUNT(DISTINCT 제출인) n "
+                        f"FROM summary WHERE {' AND '.join(conds)} GROUP BY 종목코드", args).fetchall()
+    fin, vals, hist = guru.load_all(conn), value_map(conn), momentum.load_all(conn)
+    cards = []
+    for r in rows:
+        ys, v = fin.get(r["code"]), vals.get(r["code"]) or {}
+        per, pbr = v.get("per"), v.get("pbr")
+        sc, extra = {}, {}
+        if ys:
+            for key, fn in (("lynch", guru.lynch), ("buffett", guru.buffett), ("graham", guru.graham), ("fscore", guru.fscore)):
+                res = fn(ys, per, pbr)
+                if res["ok"]:
+                    sc[key] = res["score"]
+            mi = guru.magic_inputs(ys, per)
+            if mi:
+                extra["magic"] = dict(ey=mi[0], roe_last=mi[1])
+        mm = momentum.metrics(hist.get(r["code"]))
+        if mm["ok"]:
+            extra["momentum"] = dict(m=mm)
+        if sc or extra:
+            cards.append(dict(code=r["code"], name=r["name"], mk=r["mk"], n=r["n"], sc=sc, extra=extra, per=per, pbr=pbr))
+    mg = [dict(c["extra"]["magic"]) for c in cards if "magic" in c["extra"]]
+    guru.magic_rank(mg)
+    it = iter(mg)
+    mo = [c["extra"]["momentum"] for c in cards if "momentum" in c["extra"]]
+    momentum.score_all(mo)
+    for c in cards:
+        if "magic" in c["extra"]:
+            c["sc"]["magic"] = next(it)["score"]
+        if "momentum" in c["extra"]:
+            c["sc"]["momentum"] = c["extra"]["momentum"]["score"]
+        sc = c["sc"]
+        c["avg"] = sum(sc.values()) / len(sc) if sc else 0
+        vv = [sc[k] for k in VALUE_KEYS if k in sc]
+        c["value"] = sum(vv) / len(vv) if vv else None
+        c["trend"] = sc.get("momentum")
+        c["passed"] = sum(1 for x in sc.values() if x >= GURU_PASS)
+        c["split"] = (abs(c["value"] - c["trend"]) if c["value"] is not None and c["trend"] is not None else 0)
+    key = {"": lambda c: (-c["avg"], -c["passed"]), "pass": lambda c: (-c["passed"], -c["avg"]),
+           "split": lambda c: -c["split"], "value": lambda c: (c["value"] is None, -(c["value"] or 0)),
+           "trend": lambda c: (c["trend"] is None, -(c["trend"] or 0))}[srt]
+    cards.sort(key=key)
+    form = ('<form method="get" class="filters" style="margin:8px 0"><input type="hidden" name="t" value="overall">'
+            f'{select("w", WINDOWS, w)}' + (select("m", MARKET_OPTS, m) if "시장" in cols else "") + f'{select("ex", NPS_OPTS, ex)}'
+            + select("s", {"": "정렬: 평균 점수순", "pass": "정렬: 60점 넘은 방법 많은 순", "value": "정렬: 가치·품질 평균순",
+                           "trend": "정렬: 모멘텀(추세)순", "split": "정렬: 가치와 추세가 엇갈리는 순"}, srt) + '<button>적용</button></form>')
+    intro = ('<div class="card"><b>종합</b><div class="muted" style="margin-top:4px">기관이 산 종목마다 린치 · 버핏 · 그레이엄 · 마법공식 · F-스코어 · 모멘텀 점수를 한 줄에 모았어요. '
+             '여러 방법이 함께 높은 종목은 어느 한 가지 기준의 착시일 가능성이 낮고, 방법끼리 엇갈리면 이유를 따져 볼 신호예요.</div>'
+             '<details style="margin-top:6px"><summary class="muted">보는 법</summary><ul class="muted" style="margin:6px 0 0;padding-left:18px">'
+             '<li>평균 점수: 계산된 방법들의 점수 평균 (자료가 모자라 계산 못 한 방법은 빼고 평균)</li>'
+             f'<li>통과: {GURU_PASS}점 넘은 방법 수 / 계산된 방법 수</li>'
+             '<li>가치·품질 = 린치·버핏·그레이엄·마법공식·F-스코어 평균, 추세 = 모멘텀. 둘이 50점 넘게 벌어지면 \'엇갈림\' 표시 — '
+             '예: 싸고 좋은데 가격은 내리는 중(바닥 가능성? 아직 악재일 가능성?), 또는 비싼데 오르는 중</li>'
+             '<li>각 점수의 기준과 한계는 같은 아이디어 안의 각 방법 탭에 적혀 있어요. 마법공식·모멘텀 점수는 이 목록 안 상대 순위라서 종목 수가 달라지면 바뀌어요</li></ul></details>'
+             '<div class="muted" style="margin-top:6px"><b>주의:</b> 단순화한 점수들의 평균이라 \'좋은 종목\'의 증명이 아니에요. 사업을 이해하는지·경영진·경쟁 우위 같은 정성 요소는 하나도 안 들어가요. 투자 추천이 아니에요.</div></div>')
+    if not fin and not hist:
+        return page("종합", intro + form + '<div class="card">재무·종가 자료가 아직 없어요. <b>지금 수집 → 시장·정책만</b>을 한 번 돌려 주세요.</div>')
+    out = []
+    for i, c in enumerate(cards[:40], 1):
+        chips = " ".join(
+            (f'<span class="chip {"up" if c["sc"][k] >= GURU_PASS else ""}">{lab} {c["sc"][k]}</span>' if k in c["sc"] else f'<span class="chip muted">{lab} -</span>')
+            for k, lab in OVERALL_METHODS)
+        tags = ""
+        if c["split"] >= 50:
+            tags = (f'<span class="chip warn">엇갈림: 가치·품질 {c["value"]:.0f} vs 추세 {c["trend"]:.0f}</span> ')
+        mk = f' <span class="chip">{escape(c["mk"])}</span>' if c["mk"] else ""
+        val = (f'PER {c["per"]:.1f}배' if c["per"] else "PER -") + (f' · PBR {c["pbr"]:.2f}배' if c["pbr"] else "")
+        out.append(
+            f'<div class="card"><div class="row"><div><span class="num">{i}</span>'
+            f'<a class="big" href="/stock?code={quote(c["code"])}">{escape(c["name"])}</a> <span class="muted">{escape(c["code"])}</span>{mk}</div>'
+            f'<div><b class="big">{c["avg"]:.0f}</b><span class="muted">/100 평균</span></div></div>'
+            f'<div style="height:5px;background:var(--chip);border-radius:3px;margin:6px 0"><div style="height:5px;width:{c["avg"]:.0f}%;background:var(--accent);border-radius:3px"></div></div>'
+            f'<div>{tags}<span class="chip">통과 {c["passed"]}/{len(c["sc"])}</span> <span class="muted">{val} · 기관 {c["n"]}곳</span></div>'
+            f'<div style="margin-top:6px">{chips}</div>'
+            f'<div class="muted" style="font-size:12px;margin-top:4px">'
+            f'<a href="{score_url(code=c["code"])}">점수표로 평가하기 →</a></div></div>')
+    note = f'<p class="muted">{len(rows)}개 종목 중 점수가 하나라도 계산된 {len(cards)}개 — 위 {min(len(cards), 40)}개를 보여 줘요.</p>'
+    return page("종합", intro + form + note + ("".join(out) or '<p class="muted">조건에 맞는 종목이 없어요. 기간을 늘려 보세요.</p>'))
 
 
 def latest_excel(conn):
