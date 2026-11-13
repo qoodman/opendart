@@ -460,6 +460,13 @@ def run_market_policy(log=print):
             except Exception as e:
                 out["guru"] = f"실패: {e}"
                 log(f"연간 재무 실패: {e}")
+        if env("DART_MOMENTUM", "1") != "0":      # 모멘텀 탭에 쓰는 일별 종가 이력 (이틀에 한 번 새로 받음)
+            try:
+                import momentum
+                out["momentum"] = momentum.sync(results_db(), log=log)
+            except Exception as e:
+                out["momentum"] = f"실패: {e}"
+                log(f"종가 이력 실패: {e}")
         try:    # 점수표로 평가한 종목의 자동 추정(네이버 재무·DART)도 같이 갱신
             import score_auto
             conn = sqlite3.connect(results_db())

@@ -1780,8 +1780,8 @@ def view_performance_detail(who, evs, h, ex, kind, s=""):
 IDEA_TABS = {"cheap": "기관 평단보다 싼 종목", "cluster": "여러 기관이 함께 산 종목", "super": "슈퍼개미 움직임",
              "rank": "종목 순위", "score": "점수표 (오일전문가)", "perf": "운용사 성적표",
              "lynch": "피터 린치", "buffett": "워렌 버핏",
-             "graham": "벤저민 그레이엄", "magic": "마법공식", "fscore": "F-스코어"}
-IDEA_GROUPS = [["cheap", "cluster", "super", "lynch", "buffett", "graham", "magic", "fscore"], ["rank", "score", "perf"]]     # 위쪽 메뉴의 '아이디어' / '분석'
+             "graham": "벤저민 그레이엄", "magic": "마법공식", "fscore": "F-스코어", "momentum": "모멘텀"}
+IDEA_GROUPS = [["cheap", "cluster", "super", "lynch", "buffett", "graham", "magic", "fscore", "momentum"], ["rank", "score", "perf"]]     # 위쪽 메뉴의 '아이디어' / '분석'
 
 
 def idea_group_tabs(active):
@@ -3136,6 +3136,15 @@ GURU_INFO.update({
         miss="영업현금흐름, 유동비율, 자산회전율은 자료가 없어서 빠졌어요. 항목 일부는 비슷한 숫자로 대신했어요(ROA→순이익·ROE, 매출총이익률→영업이익률). 가격(싼지)은 안 봐서 '싼 종목 중에서' 쓰는 필터예요.",
         sorts={"": "정렬: F 점수순", "roe": "정렬: ROE 높은 순"}),
 })
+GURU_INFO["momentum"] = dict(
+    title="모멘텀 (현대 요인 투자)",
+    idea="'최근 오른 종목이 한동안 더 오르는 경향'(Jegadeesh·Titman 1993, Carhart 1997)을 점수로 옮겼어요. 학술 연구가 가장 많은 요인이지만 시기에 따라 크게 틀어져요.",
+    how=["12-1 수익률 40점: 12개월 전 → 1개월 전 수익률 (최근 1개월은 단기 반전 때문에 일부러 뺌). 지금 목록 안에서의 상대 순위",
+         "6-1 수익률 20점: 6개월 전 → 1개월 전, 같은 방식",
+         "52주 고점 근처 20점 (George·Hwang 2004): 현재가가 1년 최고가의 90% 이상이면 만점",
+         "200일 평균선 위 20점: 추세가 살아 있는지"],
+    miss="기업 가치는 전혀 안 봐요 — 오르는 이유가 실적인지 거품인지 몰라요. 급반등장(2009·2020)에서 모멘텀 종목이 크게 무너진 적이 있고, 매매 비용·세금을 빼면 남는 게 줄어요. 점수는 이 목록 안에서의 상대 순위라 종목 수가 바뀌면 달라져요.",
+    sorts={"": "정렬: 모멘텀 점수순", "r12": "정렬: 12-1 수익률 높은 순", "high": "정렬: 52주 고점에 가까운 순"})
 GURU_PASS = 60
 
 
@@ -3162,11 +3171,24 @@ def view_guru(conn, q):
     rows = conn.execute(f"SELECT 종목코드 code, MAX(종목명) name, {market} mk, COUNT(DISTINCT 제출인) n, SUM(매수금액) amt "
                         f"FROM summary WHERE {' AND '.join(conds)} GROUP BY 종목코드", args).fetchall()
     fin, vals = guru.load_all(conn), value_map(conn)
+    if kind == "momentum":
+        import momentum
+        fin = {c: [1] for c in momentum.load_all(conn)}          # 재무 대신 종가 이력이 있는지만 확인
+        hist = momentum.load_all(conn)
     cards, no_data = [], 0
     for r in rows:
         ys = fin.get(r["code"])
         v = vals.get(r["code"]) or {}
         per, pbr = v.get("per"), v.get("pbr")
+        if kind == "momentum":
+            mm = momentum.metrics(hist.get(r["code"]))
+            if not mm["ok"]:
+                no_data += 1
+                continue
+            res = dict(ok=True, score=0, items=[], m=mm)
+            res.update(code=r["code"], name=r["name"], mk=r["mk"], n=r["n"], amt=r["amt"], per=per, pbr=pbr, act=[dict(period=mm["last_date"] or "")])
+            cards.append(res)
+            continue
         res = (guru.lynch(ys, per, pbr) if kind == "lynch" else guru.buffett(ys, per, pbr) if kind == "buffett"
                else guru.graham(ys, per, pbr) if kind == "graham" else guru.fscore(ys, per, pbr) if kind == "fscore"
                else dict(ok=True, score=0, items=[])) if ys else None
@@ -3184,6 +3206,8 @@ def view_guru(conn, q):
         cards.append(res)
     if kind == "magic":
         guru.magic_rank(cards)
+    if kind == "momentum":
+        momentum.score_all(cards)
     if flt:
         cards = [c for c in cards if c["score"] >= GURU_PASS]
     key = {"": lambda c: -c["score"],
@@ -3192,7 +3216,9 @@ def view_guru(conn, q):
            "roe": lambda c: -(sum(y["roe"] for y in c["act"] if y.get("roe") is not None) / max(1, sum(1 for y in c["act"] if y.get("roe") is not None))),
            "per": lambda c: (not c["per"] or c["per"] <= 0, c["per"] or 0),
            "pbr": lambda c: (not c["pbr"] or c["pbr"] <= 0, c["pbr"] or 0),
-           "ey": lambda c: -c.get("ey", 0)}[srt]
+           "ey": lambda c: -c.get("ey", 0),
+           "r12": lambda c: (c.get("m", {}).get("r12_1") is None, -(c.get("m", {}).get("r12_1") or 0)),
+           "high": lambda c: (c.get("m", {}).get("high_ratio") is None, -(c.get("m", {}).get("high_ratio") or 0))}[srt]
     if kind == "magic" and not srt:
         key = lambda c: c["rank_all"]
     cards.sort(key=key)
@@ -3206,9 +3232,9 @@ def view_guru(conn, q):
              f'<details style="margin-top:4px"><summary class="muted">숫자로 못 보는 것</summary>'
              f'<div class="muted" style="margin-top:4px">{escape(info["miss"])}</div></details>'
              '<div class="muted" style="margin-top:6px"><b>주의:</b> 이 방법의 원칙을 재무 숫자 몇 개로 줄인 단순 점수예요. '
-             '점수 구간은 제가 정한 기준이고 실제 투자자·연구자의 판단과 달라요. 최근 3개 연도 자료라 장기 평가에는 모자라요. 투자 추천이 아니에요.</div></div>')
+             '점수 구간은 제가 정한 기준이고 실제 투자자·연구자의 판단과 달라요. 재무 방식은 최근 3개 연도, 모멘텀은 최근 1년 가격만 봐서 장기 평가에는 모자라요. 투자 추천이 아니에요.</div></div>')
     if not fin:
-        return page(info["title"], intro + form + '<div class="card">연간 재무 자료가 아직 없어요. <b>지금 수집 → 시장·정책만</b>을 한 번 돌려 주세요 (재무는 주 1회 갱신).</div>')
+        return page(info["title"], intro + form + '<div class="card">연간 재무·종가 자료가 아직 없어요. <b>지금 수집 → 시장·정책만</b>을 한 번 돌려 주세요 (재무는 주 1회 갱신).</div>')
     out = []
     for i, c in enumerate(cards[:30], 1):
         chips = " ".join(f'<span class="chip {"up" if p == mx else "down" if p == 0 else ""}" title="{escape(txt)}">{escape(nm.split(" (")[0])} {p}/{mx}</span>'
@@ -3234,6 +3260,14 @@ def view_guru(conn, q):
                 head += ' <span class="chip warn">부채 많음 — ROE가 부풀었을 수 있어요</span>'
             numbers = f'이익수익률 {c["ey"]:.1%} (PER {c["per"]:.1f}배) · ROE {c["roe_last"]:.1f}%'
             hint = ""
+        elif kind == "momentum":
+            mm = c["m"]
+            f = lambda v: f"{v:+.0%}" if v is not None else "-"
+            head = ('<span class="chip" style="background:var(--accent);color:var(--bg)">추세 위</span>' if mm["above_ma200"] else
+                    '<span class="chip warn">200일선 아래</span>' if mm["above_ma200"] is False else "")
+            numbers = (f'12-1개월 {f(mm["r12_1"])} · 6-1개월 {f(mm["r6_1"])}'
+                       + (f' · 52주 고점의 {mm["high_ratio"]:.0%}' if mm["high_ratio"] is not None else "") + f' · 기준일 {mm["last_date"]}')
+            hint = ""
         elif kind == "fscore":
             head = (f'<span class="chip" style="background:var(--accent);color:var(--bg)">개선 중</span> ' if c["total"] and c["passed"] >= c["total"] - 1 and c["total"] >= 6 else "")
             head += f'<span class="chip">{c["passed"]}/{c["total"]} 통과</span>'
@@ -3258,7 +3292,7 @@ def view_guru(conn, q):
             f'<details style="margin-top:4px"><summary class="muted">점수 근거</summary>{detail}'
             f'<div class="muted" style="font-size:12px;margin-top:4px">기준 연도 {escape(c["act"][0]["period"][:4])}~{escape(last["period"][:4])} · '
             f'기관 매수 {c["n"]}곳 · <a href="{score_url(code=c["code"])}">점수표로 평가하기 →</a></div></details></div>')
-    note = (f'<p class="muted">{len(rows)}개 종목 중 재무 자료로 계산된 {len(rows) - no_data}개' + (f' (자료 부족 {no_data}개 제외)' if no_data else "")
+    note = (f'<p class="muted">{len(rows)}개 종목 중 자료로 계산된 {len(rows) - no_data}개' + (f' (자료 부족 {no_data}개 제외)' if no_data else "")
             + f'에서 {len(cards)}개' + (f' ({GURU_PASS}점 이상)' if flt else "") + f' — 위 {min(len(cards), 30)}개를 보여 줘요.</p>')
     return page(info["title"], intro + form + note + ("".join(out) or '<p class="muted">조건에 맞는 종목이 없어요. 기간을 늘리거나 점수 필터를 풀어 보세요.</p>'))
 
