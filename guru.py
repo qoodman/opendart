@@ -244,3 +244,115 @@ def buffett(years, per_now, pbr_now=None):
     res["score"] = sum(i[1] for i in items)
     res["moat"] = bool(avg is not None and oavg is not None and avg >= 15 and min(roes) >= 12 and oavg >= 15 and min(opms) >= 10 and steady)
     return res
+
+
+# ---------------- 벤저민 그레이엄 (고전: 1949 '현명한 투자자') ----------------
+def graham(years, per_now, pbr_now=None):
+    """방어적 투자자 기준을 확정 연도 3개로 줄인 점수. → dict(ok, score, items, product, passed)
+    원래 기준은 10~20년 기록과 유동비율을 보지만, 여기서는 3개 연도와 부채비율로 줄였어요."""
+    act = actual(years, 3)
+    res = dict(ok=False, score=0, items=[], product=None, passed=False)
+    if len(act) < 2:
+        return res
+    res["ok"] = True
+    items = []
+    debt = act[-1].get("debt")
+    pts_debt = 0 if debt is None else 15 if debt <= 100 else 8 if debt <= 150 else 0
+    items.append(("재무 건전성 (부채비율)", pts_debt, 15, "자료 없음" if debt is None else f"{debt:.0f}% (≤100 통과 · ≤150 보통) — 금융업은 구조상 높아요"))
+    eps = [y["eps"] for y in act if y.get("eps") is not None]
+    ni = [y["ni"] for y in act if y.get("ni") is not None]
+    steady = len(eps) == len(act) and all(e > 0 for e in eps) and all(v > 0 for v in ni)
+    items.append(("이익 안정 (적자 없음)", 15 if steady else 0, 15, f"최근 {len(act)}개 연도 " + ("모두 흑자" if steady else "적자 연도가 있어요")))
+    dps = [y.get("dps") for y in act]
+    paid = sum(1 for d in dps if d and d > 0)
+    pts_div = 15 if paid == len(act) else 7 if paid else 0
+    items.append(("배당 지속", pts_div, 15, f"{len(act)}개 연도 중 {paid}개 연도에 배당"))
+    grow = len(eps) >= 2 and eps[-1] > eps[0] > 0
+    items.append(("이익 증가 (처음보다 최근 EPS가 높음)", 15 if grow else 0, 15,
+                  "계산 못 함" if len(eps) < 2 else f"EPS {eps[0]:,.0f}원 → {eps[-1]:,.0f}원"))
+    pts_per = 0 if not per_now or per_now <= 0 else 20 if per_now <= 15 else 10 if per_now <= 20 else 0
+    items.append(("PER이 낮은가", pts_per, 20, "PER 없음 (적자)" if not per_now or per_now <= 0 else f"{per_now:.1f}배 (≤15 통과 · ≤20 보통)"))
+    prod = per_now * pbr_now if per_now and per_now > 0 and pbr_now and pbr_now > 0 else None
+    res["product"] = prod
+    pts_pbr = 0 if not pbr_now or pbr_now <= 0 else 10 if pbr_now <= 1.5 else 5 if pbr_now <= 2.0 else 0
+    items.append(("PBR이 낮은가", pts_pbr, 10, "PBR 없음" if not pbr_now else f"{pbr_now:.2f}배 (≤1.5 통과 · ≤2 보통)"))
+    pts_prod = 10 if prod is not None and prod <= 22.5 else 0
+    items.append(("PER × PBR ≤ 22.5", pts_prod, 10, "계산 못 함" if prod is None else f"{prod:.1f} (22.5 이하면 통과)"))
+    res["items"] = items
+    res["score"] = sum(i[1] for i in items)
+    res["passed"] = bool(pts_debt >= 15 and steady and paid == len(act) and grow and pts_per == 20 and pts_pbr + pts_prod >= 10)
+    return res
+
+
+# ---------------- 조엘 그린블라트 마법공식 (2005) ----------------
+def magic_inputs(years, per_now):
+    """마법공식에 쓸 두 숫자. 원래는 EBIT/기업가치(이익수익률)와 투하자본수익률인데,
+    네이버 연간 재무에는 둘 다 없어서 1/PER(순이익 기준)과 ROE로 바꿨어요. → (이익수익률, ROE) 또는 None"""
+    act = actual(years, 3)
+    if not act or not per_now or per_now <= 0:
+        return None
+    roe = act[-1].get("roe")
+    if roe is None:
+        return None
+    return 1 / per_now, roe
+
+
+def magic_rank(cards):
+    """cards: [{'ey', 'roe', 'items', 'score'…}] 이익수익률 순위 + ROE 순위를 더한 종합순위로 점수(0~100)를 계산해 채움"""
+    n = len(cards)
+    if n == 0:
+        return
+    by_ey = sorted(range(n), key=lambda i: -cards[i]["ey"])
+    by_roe = sorted(range(n), key=lambda i: -cards[i]["roe_last"])
+    r_ey, r_roe = {i: k + 1 for k, i in enumerate(by_ey)}, {i: k + 1 for k, i in enumerate(by_roe)}
+    comb = sorted(range(n), key=lambda i: (r_ey[i] + r_roe[i], r_ey[i]))
+    r_all = {i: k + 1 for k, i in enumerate(comb)}
+    for i, c in enumerate(cards):
+        pe = round(50 * (n - r_ey[i]) / (n - 1)) if n > 1 else 50
+        pr = round(50 * (n - r_roe[i]) / (n - 1)) if n > 1 else 50
+        c["items"] = [("이익수익률 (1/PER) 순위", pe, 50, f"{c['ey']:.1%} · {n}개 중 {r_ey[i]}위"),
+                      ("자본수익률 (ROE) 순위", pr, 50, f"{c['roe_last']:.1f}% · {n}개 중 {r_roe[i]}위")]
+        c["score"] = pe + pr
+        c["rank_all"] = r_all[i]
+        c["rank_n"] = n
+
+
+# ---------------- 조지프 피오트로스키 F-스코어 (현대 학술: 2000) ----------------
+def fscore(years, per_now=None, pbr_now=None):
+    """재무가 '좋아지고 있나'를 점검하는 예/아니오 항목. 원래는 9개(현금흐름·유동비율·자산회전율 포함)인데
+    그 자료가 없어서 7개로 줄였고 일부는 비슷한 숫자로 바꿨어요. → dict(ok, score(0~100), passed, total, items)"""
+    act = actual(years, 3)
+    res = dict(ok=False, score=0, passed=0, total=0, items=[])
+    if len(act) < 2:
+        return res
+    cur, prev = act[-1], act[-2]
+    res["ok"] = True
+    tests = []
+
+    def add(name, ok, text):
+        if ok is not None:
+            tests.append((name, 1 if ok else 0, 1, text))
+
+    ni = cur.get("ni")
+    add("순이익이 흑자 (원래: ROA>0)", None if ni is None else ni > 0, "자료 없음" if ni is None else f"순이익 {ni:,.0f}")
+    op = cur.get("op")
+    add("영업이익이 흑자 (원래: 영업현금흐름>0)", None if op is None else op > 0, "자료 없음" if op is None else f"영업이익 {op:,.0f}")
+    r1, r0 = cur.get("roe"), prev.get("roe")
+    add("ROE가 개선 (원래: ROA 개선)", None if r1 is None or r0 is None else r1 > r0, "자료 없음" if r1 is None or r0 is None else f"{r0:.1f}% → {r1:.1f}%")
+    d1, d0 = cur.get("debt"), prev.get("debt")
+    add("부채비율이 감소", None if d1 is None or d0 is None else d1 < d0, "자료 없음" if d1 is None or d0 is None else f"{d0:.0f}% → {d1:.0f}%")
+    m1, m0 = cur.get("opm"), prev.get("opm")
+    add("영업이익률이 개선 (원래: 매출총이익률)", None if m1 is None or m0 is None else m1 > m0, "자료 없음" if m1 is None or m0 is None else f"{m0:.1f}% → {m1:.1f}%")
+    e1, e0 = cur.get("eps"), prev.get("eps")
+    add("EPS가 증가", None if e1 is None or e0 is None else e1 > e0, "자료 없음" if e1 is None or e0 is None else f"{e0:,.0f}원 → {e1:,.0f}원")
+    n1, n0 = cur.get("ni"), prev.get("ni")
+    if None not in (n1, n0, e1, e0) and e1 > 0 and e0 > 0 and n1 > 0 and n0 > 0:
+        s1, s0 = n1 / e1, n0 / e0                              # 순이익 ÷ EPS = 대략 주식 수 (단위는 상쇄)
+        add("주식 수를 늘리지 않음 (추정)", s1 <= s0 * 1.02, f"순이익÷EPS로 추정한 주식 수 {s1 / s0 - 1:+.1%}")
+    if len(tests) < 4:
+        res["ok"] = False
+        return res
+    res["items"] = tests
+    res["passed"], res["total"] = sum(t[1] for t in tests), len(tests)
+    res["score"] = round(100 * res["passed"] / res["total"])
+    return res

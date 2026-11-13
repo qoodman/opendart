@@ -1779,8 +1779,9 @@ def view_performance_detail(who, evs, h, ex, kind, s=""):
 # ---------------- 아이디어 ----------------
 IDEA_TABS = {"cheap": "기관 평단보다 싼 종목", "cluster": "여러 기관이 함께 산 종목", "super": "슈퍼개미 움직임",
              "rank": "종목 순위", "score": "점수표 (오일전문가)", "perf": "운용사 성적표",
-             "lynch": "피터 린치", "buffett": "워렌 버핏"}
-IDEA_GROUPS = [["cheap", "cluster", "super", "lynch", "buffett"], ["rank", "score", "perf"]]     # 위쪽 메뉴의 '아이디어' / '분석'
+             "lynch": "피터 린치", "buffett": "워렌 버핏",
+             "graham": "벤저민 그레이엄", "magic": "마법공식", "fscore": "F-스코어"}
+IDEA_GROUPS = [["cheap", "cluster", "super", "lynch", "buffett", "graham", "magic", "fscore"], ["rank", "score", "perf"]]     # 위쪽 메뉴의 '아이디어' / '분석'
 
 
 def idea_group_tabs(active):
@@ -2195,7 +2196,7 @@ def hub_tabs_row(path):
 
 
 def view_ideas(conn, q):
-    if q.get("t") in ("lynch", "buffett"):
+    if q.get("t") in GURU_INFO:
         _CTX.pre = idea_tabs_row(q["t"])
         try:
             return view_guru(conn, q)
@@ -3109,6 +3110,32 @@ GURU_INFO = {
         miss="버핏은 사업을 이해하는지(능력 범위), 경쟁 우위가 왜 오래가는지, 경영진의 정직함과 자본 배분 능력을 가장 중요하게 봐요. 모두 숫자로 못 봐요. 금융업은 부채비율이 구조상 높아서 이 방식에 불리해요.",
         sorts={"": "정렬: 버핏 점수순", "roe": "정렬: ROE 높은 순", "per": "정렬: PER 낮은 순"}),
 }
+GURU_INFO.update({
+    "graham": dict(
+        title="벤저민 그레이엄 방법 (고전)",
+        idea="'현명한 투자자'(1949)의 방어적 투자자 기준: 재무가 튼튼하고, 적자 없이 배당을 꾸준히 하고, 이익이 늘고, 이익·자산에 비해 싸게 거래되는 기업만 사요. 싸게 사서 생기는 '안전마진'이 핵심이에요.",
+        how=["점수(100): 부채비율 15 · 이익 안정(적자 없음) 15 · 배당 지속 15 · 이익 증가 15 · PER 20 · PBR 10 · PER×PBR 10",
+             "기준값: PER 15 이하 · PBR 1.5 이하 · PER×PBR 22.5 이하 · 부채비율 100% 이하. 모두 통과하면 '그레이엄 통과' 표시",
+             "원래는 10~20년 기록과 유동비율을 보는데, 여기서는 최근 확정 3개 연도와 부채비율로 줄였어요"],
+        miss="그레이엄은 최소 규모, 오랜 기간의 이익·배당 기록, 유동비율(단기 지급 능력), 순유동자산 대비 가격(넷넷)을 봐요. 자료가 없어 못 넣었어요. 금융업·성장주는 이 방식에 불리해요.",
+        sorts={"": "정렬: 그레이엄 점수순", "per": "정렬: PER 낮은 순", "pbr": "정렬: PBR 낮은 순"}),
+    "magic": dict(
+        title="그린블라트 마법공식 (고전·현대 사이)",
+        idea="조엘 그린블라트의 '주식시장을 이기는 작은 책'(2005): '싼 값(이익수익률)'과 '좋은 회사(자본수익률)' 두 가지 순위만 더해서 종합 1~30위를 사고, 1년 뒤 바꿔요.",
+        how=["이익수익률 = 1 ÷ PER, 자본수익률 = ROE. 각각 지금 목록 안에서 순위를 매기고 두 순위를 더해 종합 순위를 만들어요",
+             "점수(100) = 이익수익률 순위 50 + ROE 순위 50 (목록 안에서 상대 비교라, 종목 수가 달라지면 점수도 바뀌어요)",
+             "원래는 EBIT÷기업가치와 투하자본수익률인데 네이버 재무에 없어서 PER·ROE로 바꿨어요. 금융·공기업은 원래 제외하고, 적자 종목은 빼요"],
+        miss="기업가치(순부채 포함)와 투하자본이 없어서 빚이 많은 회사는 ROE가 부풀려 보일 수 있어요(부채비율 200% 넘으면 표시). 원래는 시가총액 일정 이상 종목에서 30개를 같은 비중으로 1년 보유해요.",
+        sorts={"": "정렬: 종합순위순", "ey": "정렬: 이익수익률 높은 순", "roe": "정렬: ROE 높은 순"}),
+    "fscore": dict(
+        title="피오트로스키 F-스코어 (현대 학술)",
+        idea="회계학자 조지프 피오트로스키(2000)가 '싸지만 부실한 회사'를 걸러내려고 만든 점검표예요. 수익성·재무 안정·효율이 '좋아지고 있는지' 예/아니오로 세어요. 싼 종목 안에서 점수가 높은 쪽이 더 나았다는 연구예요.",
+        how=["원래 9개 중 이 화면은 7개: 순이익 흑자 · 영업이익 흑자 · ROE 개선 · 부채비율 감소 · 영업이익률 개선 · EPS 증가 · 주식 수 안 늘림(추정)",
+             "점수(100) = 통과한 개수 ÷ 계산된 개수. 7개 중 6개 이상이면 '개선 중' 표시",
+             "최근 두 확정 연도를 비교해요 (올해가 작년보다 나아졌는지)"],
+        miss="영업현금흐름, 유동비율, 자산회전율은 자료가 없어서 빠졌어요. 항목 일부는 비슷한 숫자로 대신했어요(ROA→순이익·ROE, 매출총이익률→영업이익률). 가격(싼지)은 안 봐서 '싼 종목 중에서' 쓰는 필터예요.",
+        sorts={"": "정렬: F 점수순", "roe": "정렬: ROE 높은 순"}),
+})
 GURU_PASS = 60
 
 
@@ -3140,20 +3167,34 @@ def view_guru(conn, q):
         ys = fin.get(r["code"])
         v = vals.get(r["code"]) or {}
         per, pbr = v.get("per"), v.get("pbr")
-        res = guru.lynch(ys, per, pbr) if kind == "lynch" and ys else guru.buffett(ys, per, pbr) if ys else None
+        res = (guru.lynch(ys, per, pbr) if kind == "lynch" else guru.buffett(ys, per, pbr) if kind == "buffett"
+               else guru.graham(ys, per, pbr) if kind == "graham" else guru.fscore(ys, per, pbr) if kind == "fscore"
+               else dict(ok=True, score=0, items=[])) if ys else None
+        if res and kind == "magic":
+            mi = guru.magic_inputs(ys, per)
+            if not mi:
+                res = None
+            else:
+                res.update(ey=mi[0], roe_last=mi[1])
         if not res or not res["ok"]:
             no_data += 1
             continue
         act = guru.actual(ys, 3)
         res.update(code=r["code"], name=r["name"], mk=r["mk"], n=r["n"], amt=r["amt"], per=per, pbr=pbr, act=act)
         cards.append(res)
+    if kind == "magic":
+        guru.magic_rank(cards)
     if flt:
         cards = [c for c in cards if c["score"] >= GURU_PASS]
     key = {"": lambda c: -c["score"],
            "peg": lambda c: (c.get("peg") is None, c.get("peg") or 0),
            "growth": lambda c: (c.get("growth") is None, -(c.get("growth") or 0)),
            "roe": lambda c: -(sum(y["roe"] for y in c["act"] if y.get("roe") is not None) / max(1, sum(1 for y in c["act"] if y.get("roe") is not None))),
-           "per": lambda c: (not c["per"] or c["per"] <= 0, c["per"] or 0)}[srt]
+           "per": lambda c: (not c["per"] or c["per"] <= 0, c["per"] or 0),
+           "pbr": lambda c: (not c["pbr"] or c["pbr"] <= 0, c["pbr"] or 0),
+           "ey": lambda c: -c.get("ey", 0)}[srt]
+    if kind == "magic" and not srt:
+        key = lambda c: c["rank_all"]
     cards.sort(key=key)
     form = (f'<form method="get" class="filters" style="margin:8px 0"><input type="hidden" name="t" value="{kind}">'
             f'{select("w", WINDOWS, w)}' + (select("m", MARKET_OPTS, m) if "시장" in cols else "") + f'{select("ex", NPS_OPTS, ex)}'
@@ -3164,8 +3205,8 @@ def view_guru(conn, q):
              f'<ul class="muted" style="margin:6px 0 0;padding-left:18px">{how}</ul></details>'
              f'<details style="margin-top:4px"><summary class="muted">숫자로 못 보는 것</summary>'
              f'<div class="muted" style="margin-top:4px">{escape(info["miss"])}</div></details>'
-             '<div class="muted" style="margin-top:6px"><b>주의:</b> 두 사람이 공개적으로 강조한 원칙을 재무 숫자 몇 개로 줄인 단순 점수예요. '
-             '점수 구간은 제가 정한 기준이고 실제 두 사람의 판단과 달라요. 최근 3개 연도 자료라 장기 평가에는 모자라요. 투자 추천이 아니에요.</div></div>')
+             '<div class="muted" style="margin-top:6px"><b>주의:</b> 이 방법의 원칙을 재무 숫자 몇 개로 줄인 단순 점수예요. '
+             '점수 구간은 제가 정한 기준이고 실제 투자자·연구자의 판단과 달라요. 최근 3개 연도 자료라 장기 평가에는 모자라요. 투자 추천이 아니에요.</div></div>')
     if not fin:
         return page(info["title"], intro + form + '<div class="card">연간 재무 자료가 아직 없어요. <b>지금 수집 → 시장·정책만</b>을 한 번 돌려 주세요 (재무는 주 1회 갱신).</div>')
     out = []
@@ -3181,6 +3222,23 @@ def view_guru(conn, q):
             head = (f'<span class="chip">{escape(c["category"])}</span> ' + " ".join(f'<span class="chip warn">{escape(t)}</span>' for t in c["tags"]))
             numbers = (f'PER {c["per"]:.1f}배' if c["per"] else "PER -") + f' · 이익 성장률 {g} · <b>PEG {peg}</b>{fwd}'
             hint = f'<div class="muted" style="font-size:12px;margin-top:3px">{escape(guru.LYNCH_HINT[c["category"]])}</div>'
+        elif kind == "graham":
+            head = ('<span class="chip" style="background:var(--accent);color:var(--bg)">그레이엄 통과</span>' if c["passed"] else "")
+            numbers = ((f'PER {c["per"]:.1f}배' if c["per"] else "PER -") + (f' · PBR {c["pbr"]:.2f}배' if c["pbr"] else "")
+                       + (f' · PER×PBR {c["product"]:.1f}' if c["product"] else "")
+                       + (f' · 부채비율 {last["debt"]:.0f}%' if last.get("debt") is not None else ""))
+            hint = ""
+        elif kind == "magic":
+            head = f'<span class="chip" style="background:var(--accent);color:var(--bg)">종합 {c["rank_all"]}위 / {c["rank_n"]}</span>'
+            if last.get("debt") is not None and last["debt"] > 200:
+                head += ' <span class="chip warn">부채 많음 — ROE가 부풀었을 수 있어요</span>'
+            numbers = f'이익수익률 {c["ey"]:.1%} (PER {c["per"]:.1f}배) · ROE {c["roe_last"]:.1f}%'
+            hint = ""
+        elif kind == "fscore":
+            head = (f'<span class="chip" style="background:var(--accent);color:var(--bg)">개선 중</span> ' if c["total"] and c["passed"] >= c["total"] - 1 and c["total"] >= 6 else "")
+            head += f'<span class="chip">{c["passed"]}/{c["total"]} 통과</span>'
+            numbers = (f'ROE {last["roe"]:.1f}%' if last.get("roe") is not None else "ROE -") + (f' · PER {c["per"]:.1f}배' if c["per"] else "")
+            hint = ""
         else:
             roes = [y["roe"] for y in c["act"] if y.get("roe") is not None]
             opms = [y["opm"] for y in c["act"] if y.get("opm") is not None]
