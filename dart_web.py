@@ -923,7 +923,7 @@ DERIV_LEARN = [
     ("국고채 금리는 주식에 왜 중요해요?", "국고채는 가장 안전한 투자의 기준 금리예요. 안전한 채권이 높은 이자를 주면 위험한 주식에 돈을 둘 이유가 줄어요(주식 가치 평가에도 더 큰 할인율을 적용해요). 특히 먼 미래에 돈을 버는 성장주가 금리 상승에 약하다고 알려져 있어요."),
     ("장단기 금리차가 마이너스(역전)면?", "보통은 오래 빌려줄수록(10년) 이자를 더 받아서 10년 금리가 3년보다 높아요. 반대로 10년이 더 낮으면 '앞으로 경기가 나빠져서 금리가 내려갈 것'이라고 시장이 본다는 뜻이라, 경기 침체 신호로 자주 인용돼요. 틀릴 때도 많아요."),
     ("한미 금리차는요?", "미국 금리가 한국보다 많이 높으면 달러 자산을 가진 쪽이 유리해서, 원화가 약해지고 외국인이 한국 자산을 팔 압력이 생길 수 있다고 해요(가설). 환율·외국인 순매수와 같이 보세요."),
-    ("회사채 스프레드·풋/콜 비율·VKOSPI는요?", "회사채 신용 스프레드(회사채 − 국채 금리)는 경제에 위기감이 퍼질 때 벌어지는 신호이고, 풋/콜 비율과 VKOSPI(변동성지수)는 시장의 공포 정도를 보는 지표예요. 이 화면은 아직 이 자료를 못 받아서 '준비 중'으로 두었어요 (공개 자료원 확인이 필요해요)."),
+    ("풋/콜 비율·내재변동성·미결제약정은요?", "풋/콜 비율은 하락에 거는 권리(풋) 거래량 ÷ 상승에 거는 권리(콜) 거래량이에요. 1보다 크면 하락 대비 심리가 큰 거예요. 내재변동성은 옵션 가격에 담긴 '앞으로 얼마나 흔들릴 것 같은지'이고 높을수록 불안해요(거래소 VKOSPI와 같은 방향 지표). 미결제약정은 아직 청산 안 된 선물 계약 수라서, 가격과 같이 움직이면 새 돈이 들어왔다는 뜻일 수 있어요. 회사채 신용 스프레드(회사채 − 국채 금리)는 위기감이 퍼질 때 벌어지지만, 이 화면은 자료 문제로 아직 못 보여줘요."),
 ]
 
 
@@ -962,13 +962,33 @@ def view_derivs(conn, q):
         f'<div style="margin-top:4px">{d.isoformat()} <b>D-{(d - dt.date.today()).days}</b>'
         + (' <span class="chip warn">쿼드러플 위칭</span>' if quad else "") + '</div>' for d, quad in ex)
         + '<div class="muted" style="font-size:12px;margin-top:4px">매월 둘째 목요일 (공휴일이면 앞당겨질 수 있어요, 확인 필요). 달력에도 들어가요.</div></div>')
-    pending = ('<div class="card"><b>아직 못 받는 지표</b><div class="muted" style="margin-top:4px">옵션 풋/콜 비율 · 변동성지수(VKOSPI) · 회사채 신용 스프레드 — '
-               '공개 자료원을 아직 못 찾았어요. KRX Open API의 파생상품 서비스를 이용신청해서 승인되면 연결할 수 있어요.</div></div>')
+    have_krx = any(sg["id"] in ("put_call", "iv", "oi") for sg in sigs)
+    pending = ('<div class="card"><b>아직 못 받는 지표</b><div class="muted" style="margin-top:4px">회사채 신용 스프레드 — KRX 일반채권시장 자료에 신용등급 칸이 없어서 만들지 못했어요.'
+               + ('' if have_krx else ' 옵션 풋/콜 비율 · 내재변동성 · 미결제약정 · 금 가격은 KRX 키를 저장하고 <b>지금 수집 → 시장·정책만</b>을 한 번 돌리면 들어와요 (설정 → KRX 확인에서 서비스가 되는지 볼 수 있어요).')
+               + '</div></div>')
+    try:
+        import krx_deriv
+        cdate, curve = krx_deriv.curve_latest(conn)
+        sdate, stop = krx_deriv.stock_top(conn, 10)
+    except Exception:
+        cdate, curve, sdate, stop = None, [], None, []
+    curve_card = ""
+    if curve:
+        rows = "".join(f'<tr><td>{escape(t)}</td><td>{y:.3f}%</td><td>{("%+.2f%%p" % (y - o)) if o is not None else "-"}</td></tr>' for t, y, o in curve)
+        curve_card = ('<div class="card"><b>국채 수익률 곡선 (KRX 국채전문유통시장)</b><div class="muted">기준 ' + escape(cdate)
+                      + '</div><div class="scroll"><table><tr><th>만기</th><th>수익률</th><th>3개월 전 대비</th></tr>' + rows + '</table></div>'
+                      '<div class="muted" style="font-size:12px;margin-top:4px">만기가 길수록 높으면 정상, 짧은 쪽이 더 높으면(역전) 경기 둔화 신호로 읽어요 (가설).</div></div>')
+    stock_card = ""
+    if stop:
+        rows = "".join(f'<tr><td>{"선물" if k == "F" else "옵션"}</td><td>{escape(p)}</td><td>{v:,.0f}</td><td>{oi:,.0f}</td></tr>' for k, p, v, oi in stop)
+        stock_card = ('<div class="card"><b>단일종목 선물·옵션 거래 많은 상품</b><div class="muted">기준 ' + escape(sdate)
+                      + '</div><div class="scroll"><table><tr><th>종류</th><th>상품</th><th>거래량</th><th>미결제</th></tr>' + rows + '</table></div>'
+                      '<div class="muted" style="font-size:12px;margin-top:4px">거래가 몰리는 종목은 투기·헤지 수요가 크다는 뜻이라 변동성이 커질 수 있어요 (참고용).</div></div>')
     head = (f'<div class="card"><b>선물·채권 신호판</b><div style="margin-top:4px">지금 신호: <b>{text}</b> '
             f'<span class="muted">(신호 {n}개 합 {tot:+d})</span></div>'
             '<div class="muted" style="margin-top:6px"><b>주의:</b> 신호는 \'가설\'이에요. 선물·채권 숫자가 주식의 앞날을 보장하지 않고, 기준값은 제가 정한 단순한 값이에요. 투자 추천이 아니에요. '
             '용어가 낯설면 위쪽 <a href="/derivs?t=learn">배우기</a>를 먼저 보세요.</div></div>')
-    return page("선물·채권", tabs + head + cards + exp + pending)
+    return page("선물·채권", tabs + head + cards + curve_card + stock_card + exp + pending)
 
 
 def view_stock(conn, code, q=None):
@@ -1050,7 +1070,7 @@ def view_stock(conn, code, q=None):
             chart = stat + price_chart([p["date"] for p in pr], [p["close"] for p in pr], buys, avg,
                                        title=f"{name} 주가와 기관 매수", target=tgt)
     reports = view_reports(conn, code, tgt, n_br, last_close)
-    body = (head + value_line(value_map(conn).get(code)) + stock_scores_block(conn, code, name) + flow_block(conn, code) + ext_block(conn, code) + chart + reports
+    body = (head + value_line(value_map(conn).get(code)) + stock_deriv_line(conn, name) + stock_scores_block(conn, code, name) + flow_block(conn, code) + ext_block(conn, code) + chart + reports
             + trend_block(conn, code) + group_bar + '<h2 id="sum">날짜별 평균 매수단가</h2>'
             + (t1 or '<p class="muted">매수 내역 없음</p>')
             + '<h2 id="det">모든 변동 내역</h2>' + t2)
@@ -3503,6 +3523,24 @@ def snapshot_scores(db_path, log=print, today=None):
         return {"저장": n}
     finally:
         conn.close()
+
+
+def stock_deriv_line(conn, name):
+    """종목 화면: 이 종목의 단일종목 선물·옵션이 있으면 한 줄 (KRX 파생상품 자료가 있을 때만)"""
+    try:
+        import krx_deriv
+        d = krx_deriv.stock_deriv(conn, name)
+    except Exception:
+        return ""
+    if not d:
+        return ""
+    parts = []
+    if "F" in d:
+        parts.append(f'주식선물 거래 {d["F"][0]:,.0f}계약 · 미결제 {d["F"][1]:,.0f}')
+    if "O" in d:
+        pc = f' · 풋/콜 {d["O"][2]:.2f}' if d["O"][2] is not None else ""
+        parts.append(f'주식옵션 거래 {d["O"][0]:,.0f}{pc}')
+    return f'<div class="muted" style="margin-top:4px">단일종목 파생상품({escape(d["date"])}): {" · ".join(parts)}</div>'
 
 
 def stock_scores_block(conn, code, name):

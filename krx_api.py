@@ -20,12 +20,23 @@ import time
 import requests
 
 BASE = "https://data-dbg.krx.co.kr/svc/apis/sto/"
+BASE_ROOT = "https://data-dbg.krx.co.kr/svc/apis/"
 SERVICES = {                     # 시장 → (일별매매정보, 종목기본정보)
     "코스피": ("stk_bydd_trd", "stk_isu_base_info"),
     "코스닥": ("ksq_bydd_trd", "ksq_isu_base_info"),     # 주소는 이름 규칙으로 짐작 (확인 필요)
     "코넥스": ("knx_bydd_trd", "knx_isu_base_info"),     # 같음
 }
 SYNC_MARKETS = ("코스피", "코스닥")       # 매일 받는 시장 (코넥스는 점검에서만)
+
+
+# 파생상품·채권·원자재 일별매매정보 (사용자가 올린 명세서 기준, 모두 입력 basDd)
+EXTRA_SERVICES = [
+    ("파생상품", "선물 일별매매정보 (주식선물 제외)", "drv/fut_bydd_trd"), ("파생상품", "옵션 일별매매정보 (주식옵션 제외)", "drv/opt_bydd_trd"),
+    ("파생상품", "주식선물(유가)", "drv/eqsfu_stk_bydd_trd"), ("파생상품", "주식선물(코스닥)", "drv/eqkfu_ksq_bydd_trd"),
+    ("파생상품", "주식옵션(유가)", "drv/eqsop_bydd_trd"), ("파생상품", "주식옵션(코스닥)", "drv/eqkop_bydd_trd"),
+    ("채권", "국채전문유통시장", "bon/kts_bydd_trd"), ("채권", "일반채권시장", "bon/bnd_bydd_trd"), ("채권", "소액채권시장", "bon/smb_bydd_trd"),
+    ("원자재", "금시장", "gen/gold_bydd_trd"), ("원자재", "석유시장", "gen/oil_bydd_trd"), ("원자재", "배출권시장", "gen/ets_bydd_trd"),
+]
 
 
 class KrxError(Exception):
@@ -56,7 +67,7 @@ def short_code(v):
 def call(service, bas_dd, key, session=None, timeout=30):
     """한 서비스를 한 날짜로 호출 → OutBlock_1 줄 목록 (휴장일이면 []). 키 오류·미승인·한도 초과는 KrxError."""
     s = session or requests
-    url = BASE + service
+    url = (BASE_ROOT + service) if "/" in service else (BASE + service)      # "drv/fut_bydd_trd"처럼 분야가 붙은 주소도 받음
     headers = {"AUTH_KEY": key, "Accept": "application/json"}
     r = s.get(url, params={"basDd": bas_dd}, headers=headers, timeout=timeout)
     if r.status_code == 405:                         # GET이 막힌 서비스면 POST로
@@ -190,4 +201,19 @@ def check(key, session=None, today=None):
             except requests.RequestException as e:
                 item["note"] = f"연결 실패: {type(e).__name__}"
             out.append(item)
+    for market, label, svc in EXTRA_SERVICES:
+        item = dict(service=svc, market=market, label=label, ok=False, day="", rows=0, sample=None, note="")
+        try:
+            for day in recent_days(today, n=6):
+                rows = call(svc, day, key, session=session)
+                if rows:
+                    item.update(ok=True, day=day, rows=len(rows), sample=rows[0])
+                    break
+            else:
+                item["note"] = "최근 6일 평일에 데이터가 없어요 (이용신청·승인 확인)"
+        except KrxError as e:
+            item["note"] = str(e)
+        except requests.RequestException as e:
+            item["note"] = f"연결 실패: {type(e).__name__}"
+        out.append(item)
     return out

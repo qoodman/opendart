@@ -511,6 +511,13 @@ def run_market_policy(log=print):
         except Exception as e:
             out["krx"] = f"실패: {e}"
             log(f"KRX 시세 실패: {e}")
+    if env("DART_KRX_DERIV", "1") != "0" and krx_key_now():           # KRX 파생상품·채권·금시장 (선물·채권 탭)
+        try:
+            import krx_deriv
+            out["krx_deriv"] = krx_deriv.sync(results_db(), krx_key_now(), log=log)
+        except Exception as e:
+            out["krx_deriv"] = f"실패: {e}"
+            log(f"KRX 파생·채권 실패: {e}")
     if env("DART_LENDING", "1") != "0" and env_shared("DATA_GO_KR_KEY"):   # 주식 대차거래(대차잔고)
         try:
             import lending
