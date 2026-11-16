@@ -1862,6 +1862,22 @@ IDEA_TABS = {"overall": "종합", "mine": "내 종목 점수", "cheap": "기관 
 IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
 
 
+IDEA_SECTIONS = [("점수", ["overall", "mine"]), ("투자 방법", ["lynch", "buffett", "graham", "magic", "fscore", "momentum"]),
+                 ("종목 찾기", ["cheap", "cluster", "super", "rank"]), ("평가·성적", ["score", "perf"])]
+
+
+def idea_tab_html(active, link=None):
+    """아이디어 탭 줄: 묶음 이름과 함께 줄을 나눠 보여 줌. link(k) → 주소 (기본 /ideas?t=k)"""
+    link = link or (lambda k: "/ideas?" + urlencode({"t": k}))
+    rows = ""
+    for label, keys in IDEA_SECTIONS:
+        chips = " ".join(
+            (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{IDEA_TABS[k]}</b>' if k == active else
+             f'<a class="chip" href="{link(k)}">{IDEA_TABS[k]}</a>') for k in keys)
+        rows += f'<div style="margin:0 0 4px"><span class="muted" style="font-size:12px;margin-right:4px">{label}</span>{chips}</div>'
+    return rows
+
+
 def idea_group_tabs(active):
     """active 탭이 속한 묶음의 탭들 [(키, 이름)]"""
     grp = next((g for g in IDEA_GROUPS if active in g), IDEA_GROUPS[0])
@@ -2303,9 +2319,7 @@ def view_ideas(conn, q):
                               '위쪽 <b>지금 수집 → 보고서만</b>을 눌러 주세요.</div>')
     if q.get("t") == "super" and has_table(conn, "detail"):
         w = q.get("w") if q.get("w") in WINDOWS else "90"
-        tabs = " ".join(
-            (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == "super" else
-             f'<a class="chip" href="/ideas?{urlencode({"t": k})}">{v}</a>') for k, v in idea_group_tabs("cheap"))
+        tabs = idea_tab_html("super")
         win = " ".join(
             (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == w else
              f'<a class="chip" href="/ideas?{urlencode({"t": "super", "w": k})}">{v}</a>')
@@ -2392,8 +2406,7 @@ def view_ideas(conn, q):
         chart_title = "함께 산 기관들의 매수금액 합계"
 
     base = {"w": w, "ex": ex, **({"m": m} if m else {})}
-    tabs = " ".join(f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == tab
-                    else f'<a class="chip" href="/ideas?{urlencode({**base, "t": k})}">{v}</a>' for k, v in idea_group_tabs(tab))
+    tabs = idea_tab_html(tab, lambda k: "/ideas?" + urlencode({**base, "t": k}))
     form = (f'<form method="get" class="filters" style="margin-top:10px"><input type="hidden" name="t" value="{tab}">'
             f'{select("w", WINDOWS, w)}' + (select("m", MARKET_OPTS, m) if "시장" in cols else "")
             + f'{select("ex", NPS_OPTS, ex)}{select("sold", SOLD_OPTS, sold)}{select("s", IDEA_SORTS, srt)}<button>적용</button></form>')
@@ -2413,6 +2426,12 @@ def view_ideas(conn, q):
             hint = "주가가 아직 없습니다. 위쪽 지금 수집 → 보고서만을 한 번 돌려 주세요."
         return page("아이디어", tabs + form + note + f'<div class="card">{escape(why)}<div class="muted">{escape(hint)}</div></div>')
     cards = []
+    shown_codes = [i["r"]["code"] for i in ideas[:30]]
+    reps = report_map(conn, shown_codes)
+    try:
+        ov = {c["code"]: c for c in overall_cards(conn, [dict(code=i["r"]["code"], name=i["r"]["name"], mk=i["r"]["mk"], n=i["r"]["n"]) for i in ideas[:30]])}
+    except Exception:
+        ov = {}
     for k, i in enumerate(ideas[:30], 1):
         r = i["r"]
         pr = [p[0] for p in conn.execute("SELECT close FROM prices WHERE code=? ORDER BY date DESC LIMIT 120",
@@ -2432,6 +2451,9 @@ def view_ideas(conn, q):
                if i["v"].get("pbr") is not None and i["v"].get("per") is not None else "")
             + (f'<div class="muted">최근 5일 외국인 {_sg(fsum[r["code"]][0])}주 · 기관 {_sg(fsum[r["code"]][1])}주</div>'
                if r["code"] in fsum else "")
+            + (f'<div style="margin-top:4px"><a class="chip {"up" if ov[r["code"]]["avg"] >= GURU_PASS else ""}" href="/ideas?{urlencode({"t": "mine", "q": r["code"]})}">'
+               f'종합 점수 {ov[r["code"]]["avg"]:.0f} · 통과 {ov[r["code"]]["passed"]}/{len(ov[r["code"]]["sc"])}</a></div>' if r["code"] in ov and ov[r["code"]]["sc"] else "")
+            + report_box(conn, r["code"], r["name"], reps, i["close"])
             + _ext_line(i) + _pos_block(i) + f'{sparkline(pr, i["avg"])}</div>')
     body = (tabs + form + note + f"<h2>{chart_title}</h2>" + chart
             + '<div class="legend"><span><i class="ln" style="background:var(--price)"></i>최근 120거래일 종가</span>'
@@ -2667,9 +2689,7 @@ def score_url(**kw):
 
 
 def idea_tabs_row(active="score"):
-    return '<div style="margin:0 0 8px">' + " ".join(
-        (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == active else
-         f'<a class="chip" href="/ideas?{urlencode({"t": k})}">{v}</a>') for k, v in idea_group_tabs(active)) + '</div>'
+    return '<div style="margin:0 0 8px">' + idea_tab_html(active) + '</div>'
 
 
 def score_search_form(q=""):
