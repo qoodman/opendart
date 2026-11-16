@@ -83,7 +83,9 @@ def fetch_details(corp, key, kind_path, today=None, session=None):
     try:
         st, body = dart_json(kind_path, key, session=session, corp_code=corp,
                              bgn_de=(today - dt.timedelta(days=365 * YEARS)).strftime("%Y%m%d"), end_de=today.strftime("%Y%m%d"))
-    except AutoError:
+    except AutoError as e:
+        if "한도" in str(e):          # 한도 초과는 빈칸으로 저장하지 말고 올려 보내서 다음에 다시 받게 함
+            raise
         return {}
     return {r.get("rcept_no"): r for r in (body.get("list") or []) if r.get("rcept_no")}
 
@@ -158,9 +160,14 @@ def for_stock(conn, code):
     return [dict(rcept_no=r[0], date=r[1], kind=r[2], title=r[3], amount=r[4], price=r[5]) for r in rows]
 
 
+def is_correction(title):
+    """[기재정정]·[첨부정정] 같은 정정 공시 (같은 결정을 다시 낸 것이라 건수·알림에서는 한 번만 셈)"""
+    return "정정" in (title or "")
+
+
 def recent_count(rows, days=365, today=None):
     cut = ((today or dt.date.today()) - dt.timedelta(days=days)).isoformat()
-    return sum(1 for r in rows if r["date"] >= cut)
+    return sum(1 for r in rows if r["date"] >= cut and not is_correction(r["title"]))
 
 
 def checked(conn, code):
@@ -209,6 +216,7 @@ def recent_rows(conn, days=10, today=None):
     """최근 days일 안에 접수된 공시 [(code, rcept_no, rcept_dt, kind, title, amount, price)] (알림용)"""
     cut = ((today or dt.date.today()) - dt.timedelta(days=days)).isoformat()
     try:
-        return conn.execute("SELECT code, rcept_no, rcept_dt, kind, title, amount, price FROM dart_bonds WHERE rcept_dt >= ? ORDER BY rcept_dt DESC", (cut,)).fetchall()
+        rows = conn.execute("SELECT code, rcept_no, rcept_dt, kind, title, amount, price FROM dart_bonds WHERE rcept_dt >= ? ORDER BY rcept_dt DESC", (cut,)).fetchall()
+        return [r for r in rows if not is_correction(r[4])]
     except sqlite3.OperationalError:
         return []
