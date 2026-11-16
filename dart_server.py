@@ -138,6 +138,8 @@ SETTINGS_SPEC = [
     ("시장·정책", "DART_POLICY", "주식 정책 소식 받기 (보도자료·법령·국회 법안)", "bool", "1",
      "공공데이터포털·법제처·열린국회정보 키를 부동산 앱과 같이 씁니다."),
     ("시장·정책", "DART_POLICY_NOTIFY", "새 정책 소식 알림 보내기", "bool", "1", "첫 수집은 기준선이라 알림이 없습니다."),
+    ("알림", "DART_SCORE_NOTIFY", "종합 점수가 크게 바뀐 종목 알림", "bool", "1",
+     "아이디어 종합 점수가 7일 사이 10점 넘게 오르거나 내린 종목을 알립니다 (종목당 7일에 한 번, 최대 6개). 점수 기록이 쌓인 뒤(수집 5일 이상)부터 나옵니다."),
     ("시장·정책", "DART_CAL_NOTIFY", "내일 주요 증시 일정 알림 (저녁 6시)", "bool", "1",
      "달력의 ★ 일정(동시만기·휴장·FOMC·MSCI 반영·직접 추가한 중요 일정 등)이 내일이면 전날 저녁에 알립니다."),
     ("업데이트", "DART_AUTO_UPDATE", "매일 새벽 5시에 자동 업데이트", "bool", "0",
@@ -286,6 +288,44 @@ def won(v):
         return f"{float(v):,.0f}원"
     except (TypeError, ValueError):
         return "-"
+
+
+def score_alerts(log=print):
+    """종합 점수가 7일 사이 10점 넘게 바뀐 종목을 알림 (종목당 7일에 한 번)"""
+    import scorehist
+    conn = sqlite3.connect(results_db())
+    try:
+        moves = scorehist.big_moves(conn)
+        names = {}
+        try:
+            names = {r[0]: r[1] for r in conn.execute("SELECT 종목코드, MAX(종목명) FROM summary GROUP BY 종목코드")}
+        except sqlite3.OperationalError:
+            pass
+    finally:
+        conn.close()
+    state_path = data_dir() / "score_alert_state.json"
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        state = {}
+    today = dt.date.today()
+    fresh = [m for m in moves if m[0] not in state or (today - dt.date.fromisoformat(state[m[0]])).days >= 7]
+    if not fresh:
+        return 0
+    lines = [f"{'▲' if d > 0 else '▼'} {names.get(c, c)} {d:+.0f}점 (지금 {now:.0f}점)" for c, d, now in fresh]
+    url = env("DASHBOARD_URL")
+    try:
+        notify(f"종합 점수 큰 변화 {len(fresh)}건", "\n".join(lines), click=(url.rstrip("/") + "/ideas") if url else "", tags=("bar_chart",))
+    except Exception as e:
+        log(f"점수 알림 실패: {e}")
+        return 0
+    for c, _, _ in fresh:
+        state[c] = today.isoformat()
+    try:
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+    except OSError:
+        pass
+    return len(fresh)
 
 
 def notify_filter(by_rep):
@@ -484,6 +524,8 @@ def run_market_policy(log=print):
         try:    # 종합 점수를 하루 한 줄씩 기록 (점수가 오르내리는지 보려고)
             import dart_web
             out["score_hist"] = dart_web.snapshot_scores(results_db(), log=log)
+            if env("DART_SCORE_NOTIFY", "1") != "0":
+                score_alerts(log)
         except Exception as e:
             out["score_hist"] = f"실패: {e}"
             log(f"종합 점수 기록 실패: {e}")

@@ -74,3 +74,15 @@ def change(series, days=7, today=None):
         else:
             return None
     return last_v - base[1], base[0]
+
+
+def big_moves(conn, threshold=10.0, days=7, limit=6):
+    """최근 days일 사이 종합 점수가 threshold점 이상 오르거나 내린 종목 [(코드, 변화, 현재 점수)] 변화 큰 순.
+    기록이 짧아서 비교할 날이 없으면 빈 목록."""
+    out = []
+    for code, ser in load(conn).items():
+        ch = change(ser, days)
+        if ch and abs(ch[0]) >= threshold:
+            out.append((code, ch[0], ser[-1][1]))
+    out.sort(key=lambda x: -abs(x[1]))
+    return out[:limit]
