@@ -166,7 +166,7 @@ def page(title, body, refresh=False, charts=False):
 <link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#2b5a9e">
 <link rel="icon" href="/icon-192.png"><link rel="apple-touch-icon" href="/icon-192.png">
 </head><body>
-<header><div class="hrow"><b>DART 단순투자</b>{header_actions()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/ideas?t=rank">분석</a><a href="/market">시장</a>
+<header><div class="hrow"><b>DART 단순투자</b>{header_actions()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/market">시장</a>
 <a href="/settings">설정</a>{extra}</nav>
 </header><main>{body}</main>{"<script>" + CHART_JS + "</script>" if charts else ""}</body></html>""".encode()
 
@@ -1855,11 +1855,11 @@ def view_performance_detail(who, evs, h, ex, kind, s=""):
 
 
 # ---------------- 아이디어 ----------------
-IDEA_TABS = {"overall": "종합", "cheap": "기관 평단보다 싼 종목", "cluster": "여러 기관이 함께 산 종목", "super": "슈퍼개미 움직임",
+IDEA_TABS = {"overall": "종합", "mine": "내 종목 점수", "cheap": "기관 평단보다 싼 종목", "cluster": "여러 기관이 함께 산 종목", "super": "슈퍼개미 움직임",
              "rank": "종목 순위", "score": "점수표 (오일전문가)", "perf": "운용사 성적표",
              "lynch": "피터 린치", "buffett": "워렌 버핏",
              "graham": "벤저민 그레이엄", "magic": "마법공식", "fscore": "F-스코어", "momentum": "모멘텀"}
-IDEA_GROUPS = [["overall", "cheap", "cluster", "super", "lynch", "buffett", "graham", "magic", "fscore", "momentum"], ["rank", "score", "perf"]]     # 위쪽 메뉴의 '아이디어' / '분석'
+IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
 
 
 def idea_group_tabs(active):
@@ -2276,6 +2276,8 @@ def hub_tabs_row(path):
 def view_ideas(conn, q):
     if q.get("t") not in IDEA_TABS:         # 위쪽 '아이디어'를 누르면 종합부터
         q = {**q, "t": "overall"}
+    if q.get("t") == "mine":
+        return view_mine(conn, q)
     if q.get("t") == "overall":
         _CTX.pre = idea_tabs_row("overall")
         try:
@@ -3470,12 +3472,13 @@ def overall_cards(conn, rows):
     for r in rows:
         ys, v = fin.get(r["code"]), vals.get(r["code"]) or {}
         per, pbr = v.get("per"), v.get("pbr")
-        sc, extra = {}, {}
+        sc, extra, det = {}, {}, {}
         if ys:
             for key, fn in (("lynch", guru.lynch), ("buffett", guru.buffett), ("graham", guru.graham), ("fscore", guru.fscore)):
                 res = fn(ys, per, pbr)
                 if res["ok"]:
                     sc[key] = res["score"]
+                    det[key] = res["items"]
             mi = guru.magic_inputs(ys, per)
             if mi:
                 extra["magic"] = dict(ey=mi[0], roe_last=mi[1])
@@ -3483,7 +3486,7 @@ def overall_cards(conn, rows):
         if mm["ok"]:
             extra["momentum"] = dict(m=mm)
         if sc or extra:
-            cards.append(dict(code=r["code"], name=r["name"], mk=r["mk"], n=r["n"], sc=sc, extra=extra, per=per, pbr=pbr))
+            cards.append(dict(code=r["code"], name=r["name"], mk=r["mk"], n=r["n"], sc=sc, extra=extra, per=per, pbr=pbr, det=det))
     mg = [dict(c["extra"]["magic"]) for c in cards if "magic" in c["extra"]]
     guru.magic_rank(mg)
     it = iter(mg)
@@ -3491,9 +3494,12 @@ def overall_cards(conn, rows):
     momentum.score_all(mo)
     for c in cards:
         if "magic" in c["extra"]:
-            c["sc"]["magic"] = next(it)["score"]
+            mgc = next(it)
+            c["sc"]["magic"] = mgc["score"]
+            c["det"]["magic"] = mgc["items"]
         if "momentum" in c["extra"]:
             c["sc"]["momentum"] = c["extra"]["momentum"]["score"]
+            c["det"]["momentum"] = c["extra"]["momentum"]["items"]
         sc = c["sc"]
         c["avg"] = sum(sc.values()) / len(sc) if sc else 0
         vv = [sc[k] for k in VALUE_KEYS if k in sc]
@@ -3543,18 +3549,25 @@ def stock_deriv_line(conn, name):
     return f'<div class="muted" style="margin-top:4px">단일종목 파생상품({escape(d["date"])}): {" · ".join(parts)}</div>'
 
 
-def stock_scores_block(conn, code, name):
-    """종목 화면: 여섯 가지 투자 방법 점수를 한 칸에 모아 보여 줌 (종합 탭과 같은 기준: 최근 1년 매수·국민연금 제외 목록 안에서 비교)"""
-    try:
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(summary)")}
+def score_one(conn, code, name):
+    """종목 하나의 여섯 방법 점수 카드 (기관이 최근 1년 안에 산 종목(국민연금 제외) 목록 안에서 비교). 계산 못 하면 None"""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(summary)")} if has_table(conn, "summary") else set()
+    rows = []
+    if cols:
         market = "MAX(시장)" if "시장" in cols else "''"
         since = (dt.date.today() - dt.timedelta(days=365)).isoformat()
         rows = [dict(r) for r in conn.execute(
             f"SELECT 종목코드 code, MAX(종목명) name, {market} mk, COUNT(DISTINCT 제출인) n FROM summary "
             "WHERE 변동일 >= ? AND 매수수량 > 0 AND 평균매수단가 > 0 AND 제출인 NOT LIKE '%국민연금%' GROUP BY 종목코드", (since,))]
-        if not any(r["code"] == code for r in rows):
-            rows.append(dict(code=code, name=name, mk="", n=0))
-        card = next((c for c in overall_cards(conn, rows) if c["code"] == code), None)
+    if not any(r["code"] == code for r in rows):
+        rows.append(dict(code=code, name=name, mk="", n=0))
+    return next((c for c in overall_cards(conn, rows) if c["code"] == code), None)
+
+
+def stock_scores_block(conn, code, name):
+    """종목 화면: 여섯 가지 투자 방법 점수를 한 칸에 모아 보여 줌 (종합 탭과 같은 기준)"""
+    try:
+        card = score_one(conn, code, name)
     except Exception:
         return ""
     if not card or not card["sc"]:
@@ -3603,6 +3616,174 @@ def restat(c, on):
     c["trend"] = sc.get("momentum")
     c["passed"] = sum(1 for x in sc.values() if x >= GURU_PASS)
     c["split"] = abs(c["value"] - c["trend"]) if c["value"] is not None and c["trend"] is not None else 0
+
+
+def naver_autocomplete(raw, timeout=5):
+    """네이버 증권 검색 자동완성으로 이름 → [(코드, 이름)]. 안 되면 []"""
+    try:
+        import requests
+        r = requests.get("https://ac.stock.naver.com/ac", params={"q": raw, "target": "stock"}, timeout=timeout,
+                         headers={"User-Agent": "Mozilla/5.0"})
+        data = r.json()
+    except Exception:
+        return []
+    out, seen = [], set()
+
+    def walk(o):
+        if isinstance(o, dict):
+            code = str(o.get("code") or o.get("cd") or o.get("itemCode") or "")
+            name = o.get("name") or o.get("nm") or o.get("stockName") or ""
+            if SCORE_CODE.fullmatch(code) and name and code not in seen:
+                seen.add(code)
+                out.append((code, str(name)))
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+    walk(data)
+    return out[:20]
+
+
+def known_names(conn):
+    """코드 → 이름: 공시·점수표·리포트·KRX 시세에 나온 모든 종목"""
+    names = _score_names(conn)
+    for sql in ("SELECT code, MAX(name) FROM reports GROUP BY code", "SELECT code, MAX(name) FROM krx_daily GROUP BY code"):
+        try:
+            for c, n in conn.execute(sql):
+                if c and n:
+                    names.setdefault(c, n)
+        except sqlite3.OperationalError:
+            pass
+    return names
+
+
+def resolve_stock(conn, raw):
+    """입력(이름 일부 또는 6자리 코드) → [(코드, 이름)]"""
+    raw = (raw or "").strip()
+    names = known_names(conn)
+    if SCORE_CODE.fullmatch(raw):
+        return [(raw.upper(), names.get(raw.upper()) or "")]
+    key = raw.replace(" ", "")
+    hits = [(c, n) for c, n in names.items() if key and key in (n or "").replace(" ", "")]
+    exact = [h for h in hits if (h[1] or "").replace(" ", "") == key]
+    if exact:
+        return exact[:1]
+    if not hits:
+        hits = naver_autocomplete(raw)
+    return sorted(hits, key=lambda h: (len(h[1] or ""), h[1] or ""))[:30]
+
+
+def ensure_stock_data(code):
+    """이 종목의 재무·종가·PER/PBR이 없거나 오래됐으면 네이버에서 받아 저장 → (이름 또는 None, [안내 문구])"""
+    path = _DB["path"]
+    notes, name = [], None
+    if not path or not Path(path).exists():
+        return None, notes
+    try:
+        import guru, momentum, score_auto, stock_value
+    except Exception as e:
+        return None, [f"모듈을 불러오지 못했어요 ({e})"]
+    conn = sqlite3.connect(path)
+    try:
+        guru.ensure(conn)
+        momentum.ensure(conn)
+        today = dt.date.today()
+        fin = conn.execute("SELECT fetched FROM fin_fetch WHERE code=?", (code,)).fetchone()
+        if not fin or fin[0] < (today - dt.timedelta(days=guru.REFRESH_DAYS)).isoformat():
+            try:
+                guru.store(conn, code, score_auto.fetch_finance(code, "annual"))
+            except Exception as e:
+                notes.append(f"연간 재무를 받지 못했어요 ({str(e)[:50]})")
+        pf = conn.execute("SELECT fetched FROM price_fetch WHERE code=?", (code,)).fetchone()
+        if not pf or pf[0] < (today - dt.timedelta(days=momentum.REFRESH_DAYS)).isoformat():
+            try:
+                momentum.store(conn, code, momentum.fetch(code))
+            except Exception as e:
+                notes.append(f"종가 이력을 받지 못했어요 ({str(e)[:50]})")
+    finally:
+        conn.close()
+    try:
+        name, err = stock_value.refresh(path, code)
+        if err:
+            notes.append(err)
+    except Exception as e:
+        notes.append(f"PER·PBR을 받지 못했어요 ({str(e)[:50]})")
+    return name, notes
+
+
+def view_mine(conn, q):
+    """아이디어 → 내 종목 점수: 종목 이름·코드를 넣으면 여섯 가지 방법 점수를 계산 (기관이 안 산 종목도 됨)"""
+    raw = (q.get("q") or q.get("code") or "").strip()
+    form = ('<form method="get" action="/ideas" class="filters" style="margin:8px 0"><input type="hidden" name="t" value="mine">'
+            f'<input type="search" name="q" value="{escape(raw)}" placeholder="종목 이름 또는 6자리 코드 (예: 삼성전자, 005930)" style="flex:1 1 220px">'
+            '<button>점수 보기</button></form>')
+    intro = ('<div class="card"><b>내 종목 점수</b><div class="muted" style="margin-top:4px">'
+             '종목을 넣으면 린치 · 버핏 · 그레이엄 · 마법공식 · F-스코어 · 모멘텀 점수를 한 번에 계산해요. 기관이 안 산 종목도 돼요 '
+             '(재무·가격을 네이버에서 바로 받아 와서 몇 초 걸려요).</div>'
+             '<div class="muted" style="margin-top:6px"><b>주의:</b> 단순화한 점수예요. 마법공식·모멘텀은 \'기관이 최근 1년 안에 산 종목 목록\' 안에서 순위를 매기니 '
+             '그 목록과 비교한 상대 점수예요. 투자 추천이 아니에요.</div></div>')
+    if not raw:
+        names = known_names(conn)
+        recent = []
+        try:
+            recent = [r[0] for r in conn.execute("SELECT code FROM score_hist GROUP BY code ORDER BY MAX(d) DESC, MAX(avg) DESC LIMIT 12")]
+        except sqlite3.OperationalError:
+            pass
+        chips = "".join(f'<a class="chip" href="/ideas?{urlencode({"t": "mine", "q": c})}">{escape(names.get(c) or c)}</a> ' for c in recent)
+        return page("내 종목 점수", idea_tabs_row("mine") + form + intro + (f'<h2>점수가 기록된 종목</h2><div>{chips}</div>' if chips else ""))
+    hits = resolve_stock(conn, raw)
+    if not hits:
+        return page("내 종목 점수", idea_tabs_row("mine") + form + '<div class="card">이름으로 찾지 못했어요. <b>6자리 종목 코드</b>(예: 삼성전자 005930)로 넣어 주세요.</div>')
+    if len(hits) > 1:
+        links = "".join(f'<div class="card"><a class="big" href="/ideas?{urlencode({"t": "mine", "q": c})}">{escape(n or c)}</a> <span class="muted">{escape(c)}</span></div>' for c, n in hits)
+        return page("내 종목 점수", idea_tabs_row("mine") + form + f'<p class="muted">{len(hits)}개 종목이 맞아요. 하나를 골라 주세요.</p>' + links)
+    code, name = hits[0]
+    got_name, notes = ensure_stock_data(code)
+    name = got_name or name or code
+    path = _DB["path"]
+    try:
+        c2 = sqlite3.connect(f"file:{path}?mode=ro", uri=True) if path else conn
+        c2.row_factory = sqlite3.Row
+    except sqlite3.Error:
+        c2 = conn
+    try:
+        card = score_one(c2, code, name)
+        reps = report_map(c2, [code])
+        close = None
+        try:
+            import research
+            close = research.latest_close(c2, code)
+        except Exception:
+            pass
+        rbox = report_box(c2, code, name, reps, close)
+        in_dart = has_table(c2, "detail") and c2.execute("SELECT 1 FROM detail WHERE 종목코드=? LIMIT 1", (code,)).fetchone()
+    finally:
+        if c2 is not conn:
+            c2.close()
+    warn = ('<div class="card warn">' + "<br>".join(escape(n) for n in notes) + '<div class="muted">받지 못한 자료는 점수에서 빠지거나 예전에 받아 둔 값을 써요.</div></div>') if notes else ""
+    if not card or not card["sc"]:
+        return page("내 종목 점수", idea_tabs_row("mine") + form + warn + f'<div class="card"><b>{escape(name)}</b> <span class="muted">{escape(code)}</span><div style="margin-top:4px">점수를 계산할 자료가 모자라요 (연간 재무 확정 연도 2개 미만이거나 가격 이력이 짧아요). 신규 상장·적자 기업·ETF는 안 될 수 있어요.</div></div>')
+    sections = ""
+    for k, lab in OVERALL_METHODS:
+        v = card["sc"].get(k)
+        if v is None:
+            sections += f'<details class="card"><summary><b>{lab}</b> <span class="muted">자료 부족 — 계산 못 했어요</span></summary></details>'
+            continue
+        items = "".join(f'<div style="margin-top:3px"><b>{escape(nm)}</b> {p}/{mx}점 <span class="muted">— {escape(txt)}</span></div>' for nm, p, mx, txt in card["det"].get(k, []))
+        sections += (f'<details class="card" open><summary><b>{lab}</b> <b class="big {"up" if v >= GURU_PASS else ""}">{v}</b><span class="muted">/100</span> '
+                     f'<a href="/ideas?t={k}" style="font-size:12px">이 방법 설명·순위 →</a></summary>'
+                     f'<div style="height:5px;background:var(--chip);border-radius:3px;margin:6px 0"><div style="height:5px;width:{v}%;background:var(--accent);border-radius:3px"></div></div>{items}</details>')
+    tag = (f'<span class="chip warn">엇갈림: 가치·품질 {card["value"]:.0f} vs 추세 {card["trend"]:.0f}</span> ' if card["split"] >= 50 else "")
+    head = (f'<div class="card"><div class="row"><div><b class="big">{escape(name)}</b> <span class="muted">{escape(code)}</span></div>'
+            f'<div><b class="big">{card["avg"]:.0f}</b><span class="muted">/100 평균</span></div></div>'
+            f'<div style="margin-top:4px">{tag}<span class="chip">통과 {card["passed"]}/{len(card["sc"])}</span> '
+            + (f'<span class="muted">PER {card["per"]:.1f}배</span> ' if card["per"] else "") + (f'<span class="muted">PBR {card["pbr"]:.2f}배</span>' if card["pbr"] else "") + '</div>'
+            + rbox
+            + f'<div class="muted" style="font-size:12px;margin-top:6px">'
+            + (f'<a href="/stock?code={quote(code)}">공시·기관 매수 보기 →</a> · ' if in_dart else '기관 공시에는 없는 종목이에요 · ')
+            + f'<a href="{score_url(code=code)}">오일전문가 점수표로 평가하기 →</a> · <a href="{naver_link(code)}">네이버 증권 ↗</a></div></div>')
+    return page(f"{name} 점수", idea_tabs_row("mine") + form + warn + head + sections)
 
 
 def view_overall(conn, q):
