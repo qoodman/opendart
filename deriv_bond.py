@@ -8,7 +8,7 @@
   - 코스피 현물 투자자별 순매수(억원): 외국인·기관·개인
   - 국고채 3년·10년·30년, 미국 국채 10년 금리
 KRX Open API(krx_deriv.py)가 있으면 옵션 풋/콜 비율·내재변동성·미결제약정·금 가격도 같이 보여요.
-못 구한 것: 회사채 신용 스프레드 (일반채권시장 자료에 신용등급 칸이 없어요).
+회사채 신용 스프레드는 한국은행 ECOS(회사채 3년 AA- − 국고채 3년)에서 만듭니다 (KRX 일반채권시장 자료에는 신용등급 칸이 없어요).
 
 만기일은 계산으로 구해요 (코스피200 선물·옵션: 매월 둘째 목요일, 3·6·9·12월은 '쿼드러플 위칭').
 공휴일이면 앞당겨지는데 그건 반영하지 않아요 (확인 필요).
@@ -314,6 +314,26 @@ def signals(conn):
                         "한국 금리가 미국과 비슷하거나 높아요 — 자금 이탈 압력이 작은 편 (가설)" if g is not None and g >= 0 else "미국이 조금 높은 보통 수준")
     else:
         it["note"] = "미국 금리 자료가 아직 없어요"
+    out.append(it)
+    try:                         # 회사채 신용 스프레드 = 회사채 3년(AA-) − 국고채 3년 (한국은행 ECOS, 시장금리 탭과 같은 키)
+        import stock_market
+        c3, g3 = dict(stock_market.series(conn, "ecos:corp3")), dict(stock_market.series(conn, "ecos:ktb3"))
+    except Exception:
+        c3, g3 = {}, {}
+    cs = [(d, c3[d] - g3[d]) for d in sorted(set(c3) & set(g3))]
+    it = dict(id="credit", label="회사채 신용 스프레드 (AA- 3년 − 국고채 3년)", value="", change="", signal=None, reason="", points=[v for _, v in cs[-250:]], note="")
+    if cs:
+        last, prev = cs[-1][1], _ago(cs, 91)
+        it.update(value=f"{last:+.2f}%p", date=cs[-1][0])
+        if prev is not None:
+            d = last - prev
+            it["change"] = f"3개월 {d:+.2f}%p"
+            it["signal"] = -1 if d >= 0.15 else 1 if d <= -0.15 else 0
+            it["reason"] = ("스프레드가 벌어지는 중 — 회사채를 위험하게 보기 시작했다는 뜻이라 위기감이 퍼질 때 나타나요 (가설)" if it["signal"] < 0 else
+                            "스프레드가 좁아지는 중 — 신용 위험에 대한 걱정이 줄어드는 쪽 (가설)" if it["signal"] > 0 else "스프레드 큰 변화 없음")
+        it["note"] = "AA- 등급 3년 회사채 금리에서 국고채 3년 금리를 뺀 값이에요. 기준(±0.15%p)은 단순한 값이에요."
+    else:
+        it["note"] = "한국은행 ECOS 키가 있고 지금 수집 → 시장·정책만을 돌리면 들어와요"
     out.append(it)
     try:                         # KRX Open API 파생상품·금시장에서 받은 신호 (키·승인이 있을 때만 쌓임)
         import krx_deriv
