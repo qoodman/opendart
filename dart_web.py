@@ -313,7 +313,8 @@ def ext_check_card(S):
             '받은 응답의 필드 이름도 그대로 보여 주니, 이상하면 이 화면을 캡처해서 보내 주세요.</div>'
             '<form method="post" action="/settings/ext-check" class="filters" style="margin:8px 0 0">'
             f'<button name="src" value="krx"{"" if krx_ok else " disabled"}>KRX 확인</button>'
-            f'<button name="src" value="lending"{"" if dg_ok else " disabled"}>대차거래 확인</button></form>'
+            f'<button name="src" value="lending"{"" if dg_ok else " disabled"}>대차거래 확인</button>'
+            '<button name="src" value="bonds">DART 채권·증자 확인</button></form>'
             + ('' if krx_ok else '<div class="muted">KRX 키를 먼저 저장해 주세요.</div>')
             + ('' if dg_ok else '<div class="muted">공공데이터포털 키(DATA_GO_KR_KEY)가 없어서 대차거래는 확인할 수 없어요.</div>') + '</div>')
 
@@ -346,7 +347,7 @@ def view_ext_check(res):
                      + (f'<div class="muted">{info}</div>' if info else "")
                      + (f'<div class="warn" style="margin-top:4px">{escape(it["note"])}</div>' if it.get("note") else "")
                      + fields + sample + '</div>')
-    head = {"krx": "KRX Open API 연결 확인", "lending": "주식 대차거래 연결 확인"}[res["src"]]
+    head = {"krx": "KRX Open API 연결 확인", "lending": "주식 대차거래 연결 확인", "bonds": "DART 채권·증자 공시 연결 확인"}[res["src"]]
     return page(head, f'<h2>{head}</h2>' + "".join(cards)
                 + '<p class="muted">✖가 있으면 이유를 적어 두었어요. 대차거래는 필드 이름을 이름 규칙으로 찾기 때문에, '
                   '\'역할별로 찾은 필드\'가 틀려 보이면 이 화면을 캡처해서 보내 주세요.</p>' + back)
@@ -1070,7 +1071,7 @@ def view_stock(conn, code, q=None):
             chart = stat + price_chart([p["date"] for p in pr], [p["close"] for p in pr], buys, avg,
                                        title=f"{name} 주가와 기관 매수", target=tgt)
     reports = view_reports(conn, code, tgt, n_br, last_close)
-    body = (head + value_line(value_map(conn).get(code)) + stock_deriv_line(conn, name) + stock_scores_block(conn, code, name) + flow_block(conn, code) + ext_block(conn, code) + chart + reports
+    body = (head + value_line(value_map(conn).get(code)) + stock_deriv_line(conn, name) + bonds_block(conn, code) + stock_scores_block(conn, code, name) + flow_block(conn, code) + ext_block(conn, code) + chart + reports
             + trend_block(conn, code) + group_bar + '<h2 id="sum">날짜별 평균 매수단가</h2>'
             + (t1 or '<p class="muted">매수 내역 없음</p>')
             + '<h2 id="det">모든 변동 내역</h2>' + t2)
@@ -3551,6 +3552,31 @@ def snapshot_scores(db_path, log=print, today=None):
         conn.close()
 
 
+def bonds_block(conn, code):
+    """종목 화면·내 종목 점수: 최근 3년 전환사채·신주인수권부사채·교환사채·유상증자 결정 공시 (DART 주요사항보고)"""
+    try:
+        import dart_bonds
+    except Exception:
+        return ""
+    rows = dart_bonds.for_stock(conn, code)
+    if not rows:
+        if dart_bonds.checked(conn, code):
+            return '<div class="muted" style="margin-top:4px">채권·증자 공시: 최근 3년 전환사채·신주인수권부사채·유상증자 결정 공시 없음 (DART 주요사항보고 기준)</div>'
+        return ""
+    n1 = dart_bonds.recent_count(rows, 365)
+    kinds = {"CB": "전환사채", "BW": "신주인수권부사채", "EB": "교환사채", "유증": "유상증자"}
+    lines = ""
+    for r in rows[:8]:
+        extra = (f' · 규모 {escape(r["amount"])}' if r["amount"] else "") + (f' · 가격 {escape(r["price"])}' if r["price"] else "")
+        lines += (f'<div style="margin-top:3px"><span class="chip">{kinds.get(r["kind"], r["kind"])}</span> {escape(r["date"])} '
+                  f'<a href="{dart_link(r["rcept_no"])}">{escape(r["title"][:40])}</a><span class="muted">{extra}</span></div>')
+    return ('<div class="card"><div class="row"><b>채권·증자 공시</b>'
+            + (f'<span class="chip warn">최근 1년 {n1}건</span>' if n1 else '<span class="muted">최근 1년 없음</span>') + '</div>'
+            f'<div class="muted" style="font-size:12px;margin-top:2px">전환사채·신주인수권부사채는 주식으로 바뀌면 주식 수가 늘어(희석) 주가에 부담이 될 수 있고, 유상증자도 새 주식을 발행해요. '
+            '좋고 나쁨은 용도·조건에 따라 달라서 판단은 하지 않고 공시만 모았어요. 규모·가격은 DART 응답에서 읽은 값이라 비어 있거나 틀릴 수 있어요 — 공시 원문을 확인하세요 (최근 3년, 최대 8건).</div>'
+            f'{lines}</div>')
+
+
 def stock_deriv_line(conn, name):
     """종목 화면: 이 종목의 단일종목 선물·옵션이 있으면 한 줄 (KRX 파생상품 자료가 있을 때만)"""
     try:
@@ -3723,6 +3749,19 @@ def ensure_stock_data(code):
                 notes.append(f"종가 이력을 받지 못했어요 ({str(e)[:50]})")
     finally:
         conn.close()
+    try:                                  # 채권·증자 공시 (DART 키가 있을 때만)
+        import dart_bonds
+        dk = _DB["get_key"]() if _DB.get("get_key") else ""
+        if dk:
+            bc = sqlite3.connect(path)
+            try:
+                dart_bonds.refresh_code(bc, code, dk, str(Path(_DATA_DIR["path"] or ".") / "dart_cache")) if not dart_bonds.checked(bc, code) else None
+            except Exception as e:
+                notes.append(f"채권·증자 공시를 받지 못했어요 ({str(e)[:50]})")
+            finally:
+                bc.close()
+    except Exception:
+        pass
     try:
         name, err = stock_value.refresh(path, code)
         if err:
@@ -3803,7 +3842,14 @@ def view_mine(conn, q):
             + f'<div class="muted" style="font-size:12px;margin-top:6px">'
             + (f'<a href="/stock?code={quote(code)}">공시·기관 매수 보기 →</a> · ' if in_dart else '기관 공시에는 없는 종목이에요 · ')
             + f'<a href="{score_url(code=code)}">오일전문가 점수표로 평가하기 →</a> · <a href="{naver_link(code)}">네이버 증권 ↗</a></div></div>')
-    return page(f"{name} 점수", idea_tabs_row("mine") + form + warn + head + sections)
+    try:
+        c3 = sqlite3.connect(f"file:{path}?mode=ro", uri=True) if path else conn
+        bb = bonds_block(c3, code)
+        if c3 is not conn:
+            c3.close()
+    except sqlite3.Error:
+        bb = ""
+    return page(f"{name} 점수", idea_tabs_row("mine") + form + warn + head + bb + sections)
 
 
 def view_overall(conn, q):
@@ -4188,7 +4234,7 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 n = min(int(self.headers.get("Content-Length") or 0), 4096)
                 form = parse_qs(self.rfile.read(n).decode("utf-8", "ignore"))
                 src = (form.get("src") or [""])[0]
-                if src not in ("krx", "lending"):
+                if src not in ("krx", "lending", "bonds"):
                     return self._redirect("/settings")
                 try:
                     res = settings()["ext_check"](src)

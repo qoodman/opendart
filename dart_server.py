@@ -500,6 +500,15 @@ def run_market_policy(log=print):
             except Exception as e:
                 out["guru"] = f"실패: {e}"
                 log(f"연간 재무 실패: {e}")
+        if env("DART_BONDS", "1") != "0":          # 종목 화면: 전환사채·신주인수권부사채·유상증자 결정 공시 (DART, 주 1회)
+            try:
+                import dart_bonds
+                dk = read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", "")
+                if dk:
+                    out["bonds"] = dart_bonds.sync(results_db(), dk, str(data_dir() / "dart_cache"), log=log)
+            except Exception as e:
+                out["bonds"] = f"실패: {e}"
+                log(f"채권·증자 공시 실패: {e}")
         if env("DART_SHORTS", "1") != "0":        # 공매도 리포트 탭: 뉴스에서 숏셀러 보고서 기사 후보를 하루 한 번 찾음
             try:
                 import shortauto
@@ -1239,6 +1248,12 @@ def ext_check(src):
             return {"src": "krx", "error": "KRX 키가 아직 없어요. 설정에서 먼저 저장해 주세요."}
         import krx_api
         return {"src": "krx", "items": krx_api.check(key)}
+    if src == "bonds":
+        dk = read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", "")
+        if not dk:
+            return {"src": "bonds", "error": "DART 키가 아직 없어요. 설정에서 먼저 저장해 주세요."}
+        import dart_bonds
+        return {"src": "bonds", "items": dart_bonds.check(dk, str(data_dir() / "dart_cache"))}
     key = env_shared("DATA_GO_KR_KEY")
     if not key:
         return {"src": "lending", "error": "공공데이터포털 키(DATA_GO_KR_KEY)가 없어요. 서버 .env나 부동산 앱 .env에 넣어 주세요."}
