@@ -203,3 +203,12 @@ def check(key, cache_dir, session=None, today=None, sample_code="005930"):
             it["note"] = str(e)
         items.append(it)
     return items
+
+
+def recent_rows(conn, days=10, today=None):
+    """최근 days일 안에 접수된 공시 [(code, rcept_no, rcept_dt, kind, title, amount, price)] (알림용)"""
+    cut = ((today or dt.date.today()) - dt.timedelta(days=days)).isoformat()
+    try:
+        return conn.execute("SELECT code, rcept_no, rcept_dt, kind, title, amount, price FROM dart_bonds WHERE rcept_dt >= ? ORDER BY rcept_dt DESC", (cut,)).fetchall()
+    except sqlite3.OperationalError:
+        return []

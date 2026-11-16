@@ -140,6 +140,8 @@ SETTINGS_SPEC = [
     ("시장·정책", "DART_POLICY_NOTIFY", "새 정책 소식 알림 보내기", "bool", "1", "첫 수집은 기준선이라 알림이 없습니다."),
     ("알림", "DART_SCORE_NOTIFY", "종합 점수가 크게 바뀐 종목 알림", "bool", "1",
      "아이디어 종합 점수가 7일 사이 10점 넘게 오르거나 내린 종목을 알립니다 (종목당 7일에 한 번, 최대 6개). 점수 기록이 쌓인 뒤(수집 5일 이상)부터 나옵니다."),
+    ("알림", "DART_BONDS_NOTIFY", "새 채권·증자 공시 알림", "bool", "1",
+     "전환사채·신주인수권부사채·교환사채·유상증자 결정 공시가 새로 올라오면 알립니다 (공시당 한 번, 최대 8건 표시). 첫 수집은 기준선이라 알림이 없습니다."),
     ("시장·정책", "DART_CAL_NOTIFY", "내일 주요 증시 일정 알림 (저녁 6시)", "bool", "1",
      "달력의 ★ 일정(동시만기·휴장·FOMC·MSCI 반영·직접 추가한 중요 일정 등)이 내일이면 전날 저녁에 알립니다."),
     ("업데이트", "DART_AUTO_UPDATE", "매일 새벽 5시에 자동 업데이트", "bool", "0",
@@ -328,6 +330,48 @@ def score_alerts(log=print):
     return len(fresh)
 
 
+def bond_alerts(log=print):
+    """새로 알게 된 전환사채·신주인수권부사채·교환사채·유상증자 결정 공시를 알림 (공시당 한 번, 첫 수집은 기준선)"""
+    import dart_bonds
+    conn = sqlite3.connect(results_db())
+    try:
+        rows = dart_bonds.recent_rows(conn)
+        names = {}
+        try:
+            names = {r[0]: r[1] for r in conn.execute("SELECT 종목코드, MAX(종목명) FROM summary GROUP BY 종목코드")}
+        except sqlite3.OperationalError:
+            pass
+    finally:
+        conn.close()
+    state_path = data_dir() / "bond_alert_state.json"
+    try:
+        seen = set(json.loads(state_path.read_text(encoding="utf-8")))
+        first = False
+    except (OSError, ValueError):
+        seen, first = set(), True
+    fresh = [r for r in rows if r[1] not in seen]
+    if fresh and not first:
+        lines = []
+        for code, _, d, kind, _, amount, price in fresh[:8]:
+            extra = " · ".join(x for x in (f"규모 {int(amount):,}" if str(amount).replace(",", "").isdigit() else "",
+                                           f"가격 {price}" if price else "") if x)
+            lines.append(f"[{kind}] {names.get(code, code)} {d}" + (f" ({extra})" if extra else ""))
+        if len(fresh) > 8:
+            lines.append(f"…외 {len(fresh) - 8}건")
+        url = env("DASHBOARD_URL")
+        try:
+            notify(f"채권·증자 공시 {len(fresh)}건", "\n".join(lines), click=(url.rstrip("/") + "/ideas") if url else "", tags=("page_facing_up",))
+        except Exception as e:
+            log(f"채권·증자 알림 실패: {e}")
+            return 0
+    seen |= {r[1] for r in fresh}
+    try:
+        state_path.write_text(json.dumps(sorted(seen)[-1000:]), encoding="utf-8")
+    except OSError:
+        pass
+    return 0 if first else len(fresh)
+
+
 def notify_filter(by_rep):
     """설정의 알림 기준(최소 매수금액, 국민연금 제외)에 맞는 공시만"""
     min_amt = float(env("DART_NOTIFY_MIN_AMOUNT", "0") or 0)
@@ -506,6 +550,8 @@ def run_market_policy(log=print):
                 dk = read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", "")
                 if dk:
                     out["bonds"] = dart_bonds.sync(results_db(), dk, str(data_dir() / "dart_cache"), log=log)
+                    if env("DART_BONDS_NOTIFY", "1") != "0":
+                        bond_alerts(log)
             except Exception as e:
                 out["bonds"] = f"실패: {e}"
                 log(f"채권·증자 공시 실패: {e}")
