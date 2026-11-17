@@ -127,24 +127,57 @@ def run_widget():
             '</form></details>')
 
 
+def _app_version():
+    try:
+        from version import __version__
+        return __version__
+    except Exception:
+        return ""
+
+
 def update_widget():
-    """모든 화면 위쪽: '업데이트' 메뉴(새 버전 확인 / 지금 업데이트). 새 버전이 있다고 확인된 상태면 점을 붙임."""
+    """모든 화면 위쪽: '업데이트' 메뉴. 화면을 떠나지 않고 새 버전 확인·업데이트 결과를 메뉴 안에서 바로 보여 줌.
+    메뉴를 열었을 때 마지막 확인이 10분 넘었으면 자동으로 한 번 확인."""
     if not _NAV.get("has_update"):
         return ""
-    behind = 0
+    chk = {}
     try:
-        c = json.loads((Path(_DATA_DIR["path"] or ".") / "update_check.json").read_text(encoding="utf-8"))
-        behind = int(c.get("behind") or 0)
+        chk = json.loads((Path(_DATA_DIR["path"] or ".") / "update_check.json").read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         pass
-    dot = ' <span class="dot2">●</span>' if behind else ""
-    return (f'<details class="runmenu"><summary class="runbtn alt">업데이트{dot} ▾</summary>'
-            '<form method="post" class="menu">'
-            '<button formaction="/settings/update-check">새 버전 확인'
-            + (f' <span class="muted">새 버전 있음 ({behind}개)</span>' if behind else "") + '</button>'
-            '<button formaction="/settings/update-run" onclick="return confirm(\'지금 업데이트할까요? 1~3분 걸리고 화면이 잠깐 끊길 수 있습니다.\')">'
-            '지금 업데이트</button>'
-            '</form></details>')
+    behind = int(chk.get("behind") or 0) if isinstance(chk, dict) else 0
+    dot = ' <span class="dot2" id="updot">●</span>' if behind else ' <span class="dot2" id="updot" style="display:none">●</span>'
+    if chk.get("error"):
+        st = f'확인 실패: {chk["error"]}'
+    elif behind:
+        st = f'새 버전이 있습니다 ({behind}개 변경, {chk.get("checked", "")} 확인)'
+    elif "behind" in chk:
+        st = f'최신 버전입니다 ({chk.get("checked", "")} 확인)'
+    else:
+        st = "아직 확인하지 않았어요"
+    items = "".join(f"<li>{escape(x)}</li>" for x in (chk.get("items") or [])[:4]) if behind else ""
+    try:
+        age = max(0, int(time.time() - time.mktime(time.strptime(chk.get("checked", ""), "%Y-%m-%d %H:%M"))))
+    except (ValueError, TypeError, OverflowError):
+        age = 10 ** 9
+    ver = _app_version()
+    return (f'<details class="runmenu" id="updmenu" data-age="{age}"><summary class="runbtn alt">업데이트{dot} ▾</summary>'
+            '<form method="post" class="menu" onsubmit="return false">'
+            f'<div class="muted" style="padding:2px 8px;font-size:12px">지금 앱 v{escape(ver)}</div>'
+            f'<div id="upstat" style="padding:2px 8px;font-size:13px">{escape(st)}</div>'
+            f'<ul id="upitems" class="muted" style="margin:0;padding:0 8px 0 24px;font-size:12px">{items}</ul>'
+            '<button type="submit" formaction="/settings/update-check" onclick="return dartUpd(\'check\')">새 버전 확인</button>'
+            '<button type="submit" formaction="/settings/update-run" onclick="return dartUpd(\'run\')">지금 업데이트</button>'
+            '</form></details>'
+            "<script>function dartUpd(k){"
+            "if(k==='run'&&!confirm('지금 업데이트할까요? 1~3분 걸리고 화면이 잠깐 끊길 수 있습니다.'))return false;"
+            "var s=document.getElementById('upstat'),l=document.getElementById('upitems'),d=document.getElementById('updot');"
+            "if(!s)return true;s.textContent=k==='check'?'확인 중…':'시작하는 중…';"
+            "fetch('/settings/update-'+k+'?ajax=1',{method:'POST'}).then(function(r){return r.json()}).then(function(j){"
+            "s.textContent=j.msg;l.innerHTML='';(j.items||[]).slice(0,4).forEach(function(t){var li=document.createElement('li');li.textContent=t;l.appendChild(li)});"
+            "if(d)d.style.display=j.behind?'':'none';}).catch(function(){s.textContent='확인하지 못했어요 (연결을 확인해 주세요)'});return false}"
+            "(function(){var m=document.getElementById('updmenu');if(!m)return;m.addEventListener('toggle',function(){"
+            "if(m.open&&+m.dataset.age>600&&!m.dataset.done){m.dataset.done=1;dartUpd('check')}})})();</script>")
 
 
 def header_actions():
@@ -2113,6 +2146,203 @@ def view_bills(conn, q):
     return page("법안·종목", _bills_tabs("list") + flash + warn + head + body)
 
 
+LEGIS_SORTS = {"bill": (("recent", "최근 단계 변동순"), ("promul", "공포 임박순"), ("stocks", "영향 기업 많은 순"), ("stage", "진행 단계 높은 순"), ("new", "발의 최신순")),
+               "stock": (("cnt", "관련 법안 많은 순"), ("soon", "공포 임박순"), ("cap", "시가총액 큰 순"), ("stage", "진행 단계 높은 순"))}
+LEGIS_STAGE_FILTERS = (("", "입법 중 전체"), ("early", "소관위 심사 (1~4단계)"), ("law", "법사위 계류 (5단계)"), ("pass", "본회의 통과·공포 대기"), ("done", "공포 확인됨"))
+
+
+def _legis_promul_text(pm):
+    """공포 시기 한 줄 (확정 / 예상 / 미정)"""
+    k = pm["kind"]
+    if k == "done":
+        return (f'<b class="up">공포 확정 {escape(pm["date"])}</b>' + (f' · 시행 {escape(pm["effective"])}' if pm["effective"] else ""))
+    if k == "est":
+        return (f'<b>공포 예상 {escape(pm["date"][5:])} 전후</b>' + (f' <span class="muted">(늦어도 {escape(pm["until"][5:])}경)</span>' if pm["until"] else "")
+                if pm["date"] else f'<b>공포 대기</b>')
+    if k == "pending":
+        return '<span class="muted">공포 시기 미정</span>'
+    return f'<span class="muted">{escape(pm["note"])}</span>'
+
+
+def _legis_sort_key(sort):
+    far = "9999-12-31"
+
+    def promul_date(r):
+        pm = r["promul"]
+        return pm["date"] if pm["kind"] in ("done", "est") and pm["date"] else far
+    return {"recent": lambda r: r["last"] or "", "new": lambda r: r["started"] or "", "stocks": lambda r: r["n"], "stage": lambda r: (r["stage"], r["last"] or ""),
+            "promul": promul_date}[sort], sort in ("recent", "new", "stocks", "stage")
+
+
+def view_legis(conn, q):
+    """아이디어 → 입법 영향 기업: 지금 입법 중인 법안이 영향을 줄 기업 후보와 공포 시기를 법안별·기업별로, 필터·정렬 포함"""
+    import legis as lg
+    import theme_map
+    try:
+        rows = lg.load_rows(conn)
+    except sqlite3.OperationalError:
+        rows = []
+    mode = "stock" if q.get("m") == "stock" else "bill"
+    submitted = "f" in q
+    only_cand = (q.get("ne") == "1") if submitted else True
+    only_text = q.get("tx") == "1"
+    st = q.get("st") if q.get("st") in dict(LEGIS_STAGE_FILTERS) else ""
+    days = q.get("d") if q.get("d") in ("90", "180", "365", "0") else "365"
+    cpt = q.get("cp", "")
+    grp = (q.get("g") or "").strip()
+    comp = (q.get("c") or "").strip()
+    kw = (q.get("kw") or "").strip()
+    sorts = dict(LEGIS_SORTS[mode])
+    sort = q.get("s") if q.get("s") in sorts else LEGIS_SORTS[mode][0][0]
+    try:
+        page_no = int(q.get("p", "0"))
+    except ValueError:
+        page_no = 0
+    page_no = max(0, page_no)
+    names = {}
+    mcap = {}
+    try:
+        mcap = {c: m for c, m in conn.execute("SELECT code, mktcap FROM krx_daily WHERE bas_dd=(SELECT MAX(bas_dd) FROM krx_daily)")}
+    except sqlite3.OperationalError:
+        pass
+    total_all = len(rows)
+    n_cand = sum(1 for r in rows if r["n"])
+    n_text = sum(1 for r in rows if r["has_text"])
+    concept_count = {}
+    for r in rows:
+        for c in r["concepts"]:
+            concept_count[c] = concept_count.get(c, 0) + 1
+    # ---- 필터
+    cut = (dt.date.today() - dt.timedelta(days=int(days))).isoformat() if days != "0" else ""
+    sel = []
+    for r in rows:
+        if cut and (r["started"] or r["date"]) < cut:
+            continue
+        pk = r["promul"]["kind"]
+        if st == "early" and not (r["kind"] == "심사 중" and r["stage"] <= 4):
+            continue
+        if st == "law" and not (r["kind"] == "심사 중" and r["stage"] == 5):
+            continue
+        if st == "pass" and not (r["kind"] == "통과" and pk != "done"):
+            continue
+        if st == "done" and pk != "done":
+            continue
+        if only_cand and not r["n"]:
+            continue
+        if only_text and not r["has_text"]:
+            continue
+        if cpt and cpt not in r["concepts"]:
+            continue
+        if kw and kw not in r["title"]:
+            continue
+        if grp and not any(grp in g[1] for g in r["groups"]):
+            continue
+        if comp and not any(comp.replace(" ", "") in (s[1] or "").replace(" ", "") or comp == s[0] for s in r["stocks"]):
+            continue
+        sel.append(r)
+    # ---- 화면 위쪽: 설명·요약·필터
+    def select(name, opts, cur):
+        return f'<select name="{name}">' + "".join(f'<option value="{escape(v)}"{" selected" if v == cur else ""}>{escape(l)}</option>' for v, l in opts) + '</select>'
+    cp_opts = [("", "분야 전체")] + [(c, f"{c} ({n})") for c, n in sorted(concept_count.items(), key=lambda x: -x[1])]
+    form = ('<form method="get" action="/ideas" class="filters" style="margin:8px 0 0;flex-wrap:wrap"><input type="hidden" name="t" value="legis"><input type="hidden" name="f" value="1">'
+            f'<input type="hidden" name="m" value="{mode}">'
+            + select("st", LEGIS_STAGE_FILTERS, st)
+            + select("d", (("90", "발의 90일 내"), ("180", "발의 180일 내"), ("365", "발의 1년 내"), ("0", "전체 기간")), days)
+            + select("cp", cp_opts, cpt)
+            + f'<input type="text" name="g" value="{escape(grp)}" placeholder="테마·업종 (예: 면세점)" style="flex:1 1 130px">'
+            + f'<input type="text" name="c" value="{escape(comp)}" placeholder="기업 (이름·코드)" style="flex:1 1 120px">'
+            + f'<input type="text" name="kw" value="{escape(kw)}" placeholder="법안 제목" style="flex:1 1 120px">'
+            + select("s", LEGIS_SORTS[mode], sort)
+            + f'<label style="white-space:nowrap"><input type="checkbox" name="ne" value="1"{" checked" if only_cand else ""}> 후보 있는 것만</label>'
+            + f'<label style="white-space:nowrap"><input type="checkbox" name="tx" value="1"{" checked" if only_text else ""}> 본문 읽은 것만</label>'
+            '<button>적용</button></form>')
+    base = {"t": "legis", "f": "1", "st": st, "d": days, "cp": cpt, "g": grp, "c": comp, "kw": kw, "ne": "1" if only_cand else "", "tx": "1" if only_text else ""}
+    mode_tabs = " ".join(
+        (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{lab}</b>' if k == mode else
+         f'<a class="chip" href="/ideas?{urlencode({**base, "m": k})}">{lab}</a>') for k, lab in (("bill", "법안별로 보기"), ("stock", "기업별로 보기")))
+    theme_ok = bool(theme_map.load(conn)["테마"])
+    warn = ""
+    if not total_all:
+        warn = ('<div class="card warn">입법 중인 법안이 아직 없어요. 서버를 업데이트한 뒤 <b>지금 수집 → 시장·정책만</b>을 한 번 돌려 주세요 (국회 법안 목록과 테마·업종을 받아 영향 기업을 계산해요).</div>')
+    elif not theme_ok or not n_cand and total_all > 20:
+        warn = '<div class="card warn">영향 기업 계산이 아직 안 됐어요 (테마·업종 자료 필요). 지금 수집 → 시장·정책만을 눌러 주세요.</div>'
+    head = ('<div class="card"><b>입법 영향 기업</b>'
+            '<div class="muted">지금 국회에서 입법 중인 법안(심사 중 + 통과했지만 공포 전)이 어떤 기업에 닿을 수 있는지와 <b>공포 시기</b>를 한 화면에서 봐요. '
+            '법안을 하나씩 열지 않아도 수집 때 미리 계산해 둔 결과가 나와요. 기업 후보는 법안 문구를 테마·업종·기업명에 이은 짐작이고 호재·악재는 판단하지 않아요. '
+            '공포 \'예상\'은 일정을 보장하지 않아요 (통과 후 정부 이송 15일 이내 공포, 대통령 재의요구 시 달라짐).</div>'
+            f'<div class="muted" style="margin-top:4px">입법 중 {total_all}건 · 영향 기업 후보 있음 {n_cand}건 · 제안이유 본문을 읽음 {n_text}건 · 지금 조건에 맞는 법안 {len(sel)}건</div>'
+            f'<div style="margin-top:6px">{mode_tabs}</div>{form}</div>')
+    per = 25
+
+    def pager(total):
+        if total <= per:
+            return ""
+        b = {**base, "m": mode, "s": sort}
+        prev = f'<a class="chip" href="/ideas?{urlencode({**b, "p": page_no - 1})}">← 이전</a> ' if page_no > 0 else ""
+        nxt = f'<a class="chip" href="/ideas?{urlencode({**b, "p": page_no + 1})}">다음 →</a>' if (page_no + 1) * per < total else ""
+        return f'<div style="margin-top:8px">{prev}<span class="muted">{page_no * per + 1}~{min(total, (page_no + 1) * per)} / {total}</span> {nxt}</div>'
+
+    def prog(r):
+        dots = "".join(f'<span style="display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:2px;background:{"var(--accent)" if i <= r["stage"] else "#8884"}"></span>' for i in range(1, 7))
+        return dots
+    key_fn, rev = _legis_sort_key(sort) if mode == "bill" else (None, True)
+    if mode == "bill":
+        sel.sort(key=key_fn, reverse=rev)
+        shown = sel[page_no * per: (page_no + 1) * per]
+        cards = ""
+        for r in shown:
+            kind_cls = "up" if r["kind"] == "통과" else ""
+            chips = "".join(f'<span class="chip" title="{escape(e)}">{escape(nm)}</span> ' for _, nm, sc, e in r["stocks"][:6]) or '<span class="muted">후보 없음 (개념 사전·테마에 안 잡힌 분야이거나 본문이 필요해요)</span>'
+            more = f' <span class="muted">+{r["n"] - 6}</span>' if r["n"] > 6 else ""
+            extra = ""
+            if r["promul"]["dates"]:
+                extra += f' · 본문 날짜 {escape(", ".join(r["promul"]["dates"]))}'
+            if r["promul"]["hint"]:
+                extra += f' · {escape(r["promul"]["hint"])}'
+            cards += (f'<div style="margin:12px 0;padding-bottom:10px;border-bottom:1px solid #8883">'
+                      f'<div><a href="/bills?t=bill&key={quote(r["key"])}"><b>{escape(r["name"][:80])}</b></a> '
+                      f'<span class="chip {kind_cls}">{r["kind"]}</span></div>'
+                      f'<div style="font-size:13px;margin-top:3px">{prog(r)} {escape(r["stage_label"] or "-")} ({r["stage"]}/6) <span class="muted">· 최근 단계 {escape((r["last"] or "")[5:])} · 발의 {escape(r["started"] or "-")}</span></div>'
+                      f'<div style="font-size:13px;margin-top:2px">{_legis_promul_text(r["promul"])}<span class="muted">{extra}</span></div>'
+                      + ("" if r["promul"]["kind"] in ("done", "none") else f'<div class="muted" style="font-size:12px">{escape(r["promul"]["note"])}</div>')
+                      + (f'<div style="margin-top:3px">{" ".join(f"<span class=chip>{escape(c)}</span>" for c in r["concepts"][:3])}</div>' if r["concepts"] else "")
+                      + f'<div style="margin-top:4px"><span class="muted" style="font-size:12px">영향 기업 후보 ({"본문" if r["has_text"] else "제목"} 기준):</span> {chips}{more}</div></div>')
+        body = f'<div class="card">{cards or "<div class=muted>조건에 맞는 법안이 없어요. 필터를 풀어 보세요.</div>"}{pager(len(sel))}</div>'
+        return page("입법 영향 기업", head + warn + body)
+    # ---- 기업별
+    agg = {}
+    for r in sel:
+        for code, nm, sc, ev in r["stocks"]:
+            if comp and not (comp.replace(" ", "") in (nm or "").replace(" ", "") or comp == code):
+                continue
+            a = agg.setdefault(code, dict(code=code, name=nm, bills=[], stage=0, soon="", score=0.0))
+            a["bills"].append((r, sc, ev))
+            a["stage"] = max(a["stage"], r["stage"])
+            a["score"] += sc
+            pm = r["promul"]
+            if pm["kind"] in ("done", "est") and pm["date"] and (not a["soon"] or pm["date"] < a["soon"]):
+                a["soon"] = pm["date"]
+    items = list(agg.values())
+    far = "9999-12-31"
+    keyf = {"cnt": (lambda a: (len(a["bills"]), a["score"]), True), "soon": (lambda a: a["soon"] or far, False),
+            "cap": (lambda a: mcap.get(a["code"]) or 0, True), "stage": (lambda a: (a["stage"], len(a["bills"])), True)}[sort]
+    items.sort(key=keyf[0], reverse=keyf[1])
+    shown = items[page_no * per: (page_no + 1) * per]
+    trs = ""
+    for a in shown:
+        bl = sorted(a["bills"], key=lambda x: -x[1])
+        lis = "".join(f'<div style="font-size:13px"><a href="/bills?t=bill&key={quote(r["key"])}">{escape(r["name"][:44])}</a> '
+                      f'<span class="muted">{r["stage"]}/6 · {_legis_promul_text(r["promul"]) if r["promul"]["kind"] in ("done", "est") else "공포 미정"}</span></div>' for r, _, _ in bl[:3])
+        more = f'<div class="muted" style="font-size:12px">… 외 {len(bl) - 3}건</div>' if len(bl) > 3 else ""
+        soon = f'{a["soon"][5:]}' if a["soon"] else "-"
+        trs += (f'<tr><td><a href="{naver_link(a["code"])}" target="_blank" rel="noopener noreferrer"><b>{escape(a["name"])}</b></a><br><span class="muted" style="font-size:11px">{escape(a["code"])} · 시총 {_mcap_text(mcap.get(a["code"]))}</span></td>'
+                f'<td><b>{len(a["bills"])}</b></td><td>{a["stage"]}/6</td><td>{soon}</td><td>{lis}{more}</td></tr>')
+    body = ('<div class="card"><div class="muted" style="margin-bottom:4px">같은 기업이 여러 법안에 걸쳐 있으면 한 줄로 묶어 보여 줘요. 공포 열은 그 기업에 닿는 법안 중 가장 빠른 확정·예상 공포일이에요.</div>'
+            + (f'<div class="scroll"><table><tr><th>기업</th><th>법안 수</th><th>최고 단계</th><th>가장 빠른 공포</th><th>관련 법안 (영향 점수 높은 순)</th></tr>{trs}</table></div>' if trs else
+               '<div class="muted">조건에 맞는 기업이 없어요. 필터를 풀어 보세요.</div>') + pager(len(items)) + '</div>')
+    return page("입법 영향 기업", head + warn + body)
+
+
 def view_calendar(conn, q):
     try:
         import market_calendar as mc
@@ -2479,12 +2709,13 @@ def view_performance_detail(who, evs, h, ex, kind, s=""):
 IDEA_TABS = {"overall": "종합", "mine": "내 종목 점수", "cheap": "기관 평단보다 싼 종목", "cluster": "여러 기관이 함께 산 종목", "super": "슈퍼개미 움직임",
              "rank": "종목 순위", "score": "점수표 (오일전문가)", "perf": "운용사 성적표",
              "lynch": "피터 린치", "buffett": "워렌 버핏",
-             "graham": "벤저민 그레이엄", "magic": "마법공식", "fscore": "F-스코어", "momentum": "모멘텀"}
-IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
+             "graham": "벤저민 그레이엄", "magic": "마법공식", "fscore": "F-스코어", "momentum": "모멘텀",
+             "legis": "입법 영향 기업"}
+IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "legis", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
 
 
 IDEA_SECTIONS = [("점수", ["overall", "mine"]), ("투자 방법", ["lynch", "buffett", "graham", "magic", "fscore", "momentum"]),
-                 ("종목 찾기", ["cheap", "cluster", "super", "rank"]), ("평가·성적", ["score", "perf"])]
+                 ("종목 찾기", ["cheap", "cluster", "super", "legis", "rank"]), ("평가·성적", ["score", "perf"])]
 
 
 def idea_tab_html(active, link=None):
@@ -2915,6 +3146,12 @@ def view_ideas(conn, q):
         q = {**q, "t": "overall"}
     if q.get("t") == "mine":
         return view_mine(conn, q)
+    if q.get("t") == "legis":
+        _CTX.pre = idea_tabs_row("legis")
+        try:
+            return view_legis(conn, q)
+        finally:
+            _CTX.pre = ""
     if q.get("t") == "overall":
         _CTX.pre = idea_tabs_row("overall")
         try:
@@ -4859,6 +5096,8 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 n = min(int(self.headers.get("Content-Length") or 0), 65536)
                 self.rfile.read(n)          # 함께 온 설정 칸 값은 쓰지 않음
                 S = settings()
+                ajax = parse_qs(urlparse(self.path).query).get("ajax") == ["1"]
+                res = {}
                 if path.endswith("check"):
                     res = S["check_update"]()
                     msg = (f"✖ {res['error']}" if res.get("error") else
@@ -4866,6 +5105,10 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 else:
                     ok, why = S["start_update"]()
                     msg = ("✔ " if ok else "✖ ") + why
+                if ajax:        # 헤더 '업데이트' 메뉴: 화면을 떠나지 않고 결과만 돌려줌
+                    return self._send(200, "application/json; charset=utf-8", json.dumps(
+                        {"msg": msg, "behind": int(res.get("behind") or 0), "items": res.get("items") or [], "checked": res.get("checked", "")},
+                        ensure_ascii=False).encode())
                 return self._redirect("/settings?" + urlencode({"nt": msg}))
             if path == "/settings/notify-test" and settings_api:
                 ok, why = settings()["test_notify"]()

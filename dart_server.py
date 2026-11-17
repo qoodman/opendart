@@ -154,6 +154,10 @@ SETTINGS_SPEC = [
      "네이버 증권 테마 265개의 구성 종목을 주 1회 받습니다 (호출 300번 안팎, 키 불필요). 법안 조회에서 영향 기업 후보를 찾는 데 씁니다."),
     ("시장·정책", "DART_BILL_FEED", "국회 발의법률안 전체 받기 (법안 조회)", "bool", "1",
      "열린국회정보 키가 있으면 22대 국회 발의법률안 중 최근 120일치를 저장합니다 (한 번에 최대 45쪽)."),
+    ("시장·정책", "DART_LEGIS", "입법 영향 기업 계산 (아이디어 → 입법 영향)", "bool", "1",
+     "입법 중인 법안마다 영향을 받을 수 있는 기업 후보·공포 시기를 미리 계산해 둡니다 (수집 때)."),
+    ("시장·정책", "DART_BILL_TEXT_PER_RUN", "법안 제안이유 받기 (한 번에 최대 건수)", "int:0:1000", "100",
+     "국회 의안정보 페이지에서 제안이유를 읽어 영향 기업 짐작을 정확하게 합니다. 0이면 받지 않아요. 연속 5번 실패하면 멈춰요."),
     ("시장·정책", "DART_ETF_SHARE", "ETF 거래대금 비중 받기 (시장 지표)", "bool", "1",
      "KRX 키가 있어야 합니다. KRX 'ETF 일별매매정보'를 이용신청하면 과거까지 채우고, 아니면 장 마감 뒤(16시 이후) 수집한 날부터 쌓입니다."),
     ("시장·정책", "DART_NEWS", "해외 통신 속보 제목 받기 (로이터·AP·블룸버그·연합)", "bool", "1",
@@ -692,6 +696,22 @@ def run_market_policy(log=print):
         except Exception as e:
             out["bill_feed"] = f"실패: {e}"
             log(f"법안 목록 받기 실패: {e}")
+    if env("DART_LEGIS", "1") != "0":           # 아이디어 → 입법 영향 기업: 제안이유·공포일·영향 기업을 미리 계산해 저장
+        try:
+            import legis
+            try:
+                per = int(env("DART_BILL_TEXT_PER_RUN", "100") or 100)
+            except ValueError:
+                per = 100
+            res = {}
+            if per > 0:
+                res["제안이유"] = legis.fetch_texts(results_db(), per, log=log)
+            res["공포일"] = legis.sync_promul(results_db(), env_shared("LAW_OC"), log=log)
+            res["영향 기업"] = legis.refresh_cache(results_db(), log=log)
+            out["legis"] = res
+        except Exception as e:
+            out["legis"] = f"실패: {e}"
+            log(f"입법 영향 계산 실패: {e}")
     if env("DART_BILL_WATCH", "1") != "0":     # 법안 ↔ 종목 감시 규칙: 국회 법안을 받아 연결하고 연결 종목 주가를 받음
         try:
             out["bill_watch"] = bill_watch_run(log)

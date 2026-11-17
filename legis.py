@@ -1,0 +1,301 @@
+# -*- coding: utf-8 -*-
+"""
+입법 영향 기업: 지금 입법 과정에 있는 법안(심사 중 + 통과했지만 공포 전)이 어떤 기업에 닿을지, 언제쯤 공포될지를 한 화면에서.
+
+- 단계: 발의 → 소관위 회부 → 소관위 상정 → 소관위 처리 → 법사위 처리 → 본회의 처리 → (정부 이송) → 공포. 국회 API가 알려 주는 단계 날짜로 진행 정도를 매겨요.
+- 공포 시기
+    · 본회의를 통과한 법안: 법제처 법령 검색에서 그 법의 공포일(의결일 이후)을 찾으면 '확정'(시행일 포함), 아직 없으면 '예상'.
+      예상은 헌법 제53조(정부 이송 후 15일 이내 공포)에 따라 의결일 + 약 1~3주예요. 대통령 재의요구(거부권)가 나오면 달라져요.
+    · 심사 중인 법안: 언제 통과할지 알 수 없어요. 남은 단계 수만 알려 주고, 임기(22대: 2028-05-29) 안에 처리되지 않으면 폐기돼요.
+    · 시행 시기·적용기한: 제안이유 본문에 날짜(예: '2029년 12월 31일까지')나 '공포 후 N개월'이 있으면 그대로 보여 줘요 (본문이 없으면 비어요).
+- 영향 기업: bill_impact(법안 문구 → 테마·업종·기업명)로 법안마다 미리 계산해 저장하고(수집 때), 화면은 저장된 값을 읽어요.
+주의: 기업 후보는 짐작이고 호재·악재를 판단하지 않아요. 공포 '예상'은 일정을 보장하지 않아요.
+"""
+import datetime as dt
+import json
+import re
+import sqlite3
+import time
+
+import bill_impact
+import theme_map
+
+VER = "1"                    # 개념 사전·계산 방식이 바뀌면 올려서 저장값을 다시 계산
+TERM_END = "2028-05-29"      # 22대 국회 임기 만료
+STAGES = (("발의", 1), ("소관위 회부", 2), ("소관위 상정", 3), ("소관위 처리", 4), ("법사위 처리", 5), ("본회의 처리", 6))
+STAGE_NAMES = {0: "발의 전", 1: "발의", 2: "소관위 회부", 3: "소관위 상정", 4: "소관위 처리", 5: "법사위 처리", 6: "본회의 통과"}
+PASS_WORDS = ("원안가결", "수정가결", "가결")
+DROP_WORDS = ("폐기", "철회", "부결")
+
+
+def ensure(conn):
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS bill_impact_cache (
+        key TEXT PRIMARY KEY, sig TEXT, concepts TEXT, groups TEXT, stocks TEXT, n INTEGER, has_text INTEGER, computed TEXT);
+    CREATE TABLE IF NOT EXISTS bill_promul (
+        bill_key TEXT PRIMARY KEY, law TEXT, promulgated TEXT, effective TEXT, kind TEXT, checked TEXT);
+    """)
+
+
+def status_kind(status):
+    st = status or ""
+    if any(w in st for w in DROP_WORDS):
+        return "폐기"
+    if any(w in st for w in PASS_WORDS):
+        return "통과"
+    return "심사 중"
+
+
+def bill_name(title):
+    """'조세특례제한법 일부개정법률안 (홍길동의원 등 10인) · 위원회 심사 중' → '조세특례제한법 일부개정법률안'"""
+    t = re.sub(r"\s*\([^()]*(?:의원|위원장|정부|의장)[^()]*\)\s*(?:·.*)?$", "", title or "")
+    return t.split(" · ")[0].strip()
+
+
+def law_name(title):
+    n = bill_name(title)
+    n = re.sub(r"\s*(?:일부개정|전부개정|폐지|제정)?\s*법률안.*$|\s*일부개정안.*$|\s*전부개정안.*$|\s*제정안.*$", "", n).strip()
+    return n
+
+
+def stage_info(tracks, status):
+    """tracks [(날짜, 단계 이름)] → (진행 단계 0~6, 이름, 마지막 단계 날짜)"""
+    idx, last = 0, ""
+    for d, st in tracks:
+        for pre, i in STAGES:
+            if st.startswith(pre):
+                idx = max(idx, i)
+                last = max(last, d)
+    if status_kind(status) == "통과":
+        idx = 6
+    return idx, STAGE_NAMES.get(idx, ""), last
+
+
+def text_dates(text):
+    """제안이유에 나온 날짜들 → [(YYYY-MM-DD, 앞뒤 문맥)] (적용기한·시행일 짐작용)"""
+    out = []
+    for m in re.finditer(r"(20\d{2})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일", text or ""):
+        try:
+            d = dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3))).isoformat()
+        except ValueError:
+            continue
+        ctx = (text[max(0, m.start() - 22): m.end() + 14]).strip()
+        out.append((d, ctx))
+    return out
+
+
+def effective_hint(text):
+    """'공포 후 N개월 시행'·'공포한 날부터 시행' 같은 문구 → 짧은 설명 (없으면 '')"""
+    t = text or ""
+    m = re.search(r"공포\s*(?:한)?\s*(?:후|날부터)\s*(\d+)\s*(개월|일|년)\s*(?:이 경과한 날|이내)?[^.]{0,12}시행", t)
+    if m:
+        return f"본문: 공포 후 {m.group(1)}{m.group(2)} 시행"
+    if re.search(r"공포\s*한?\s*날부터\s*시행", t):
+        return "본문: 공포한 날부터 시행"
+    return ""
+
+
+def promulgation(status, tracks, promul, text="", today=None):
+    """→ dict(kind: 'done'|'est'|'pending'|'none', date, until, effective, note, text_dates)"""
+    today = today or dt.date.today()
+    out = dict(kind="none", date="", until="", effective="", note="", dates=[d for d, _ in text_dates(text)][:3], hint=effective_hint(text))
+    sk = status_kind(status)
+    if sk == "폐기":
+        out["note"] = "폐기·철회돼 공포되지 않아요"
+        return out
+    if promul and promul.get("promulgated"):
+        out.update(kind="done", date=promul["promulgated"], effective=promul.get("effective") or "", note="법제처에서 확인한 공포일")
+        return out
+    if sk == "통과":
+        passed = next((d for d, st in reversed(tracks) if st.startswith("본회의 처리")), "")
+        if not passed:
+            out.update(kind="est", note="본회의 통과 (공포 대기)")
+            return out
+        d0 = dt.date.fromisoformat(passed)
+        mid, late = d0 + dt.timedelta(days=14), d0 + dt.timedelta(days=21)
+        late_note = "" if today <= late else " (예상 시점이 지났어요 — 법제처 반영이 늦거나 재의요구일 수 있어요)"
+        out.update(kind="est", date=mid.isoformat(), until=late.isoformat(),
+                   note=f"의결 {passed} · 정부 이송 후 15일 이내 공포 → 보통 의결 후 1~3주{late_note}")
+        return out
+    idx, _, _ = stage_info(tracks, status)
+    left = 6 - idx
+    out.update(kind="pending", note=f"본회의까지 {left}단계 남음 · 통과 뒤 공포까지 보통 1~3주 · 임기({TERM_END}) 안에 처리되지 않으면 폐기")
+    return out
+
+
+# ---------------- 저장값 계산 ----------------
+def _stamp(conn):
+    parts = []
+    for tbl in ("theme_meta", "industry_meta"):
+        try:
+            r = conn.execute(f"SELECT value FROM {tbl} WHERE key='synced'").fetchone()
+            parts.append(r[0] if r else "")
+        except sqlite3.OperationalError:
+            parts.append("")
+    return "/".join(parts)
+
+
+def _sig(text, stamp):
+    return f"{len(text or '')}|{stamp}|{VER}"
+
+
+def in_process(conn, days=400):
+    """[(key, title, date, url, status)] 폐기가 아닌 최근 법안"""
+    cut = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+    try:
+        rows = conn.execute("SELECT key, title, date, url, status FROM policy_items WHERE kind='법안' AND key!='_meta' AND date >= ? ORDER BY date DESC", (cut,)).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [r for r in rows if status_kind(r[4]) != "폐기"]
+
+
+def refresh_cache(db_path, log=print, days=400):
+    """입법 중인 법안마다 영향 기업을 계산해 저장 (바뀐 것만) → {계산, 건너뜀}"""
+    conn = sqlite3.connect(db_path)
+    try:
+        ensure(conn)
+        data = theme_map.load(conn)
+        if not data["테마"] and not data["업종"]:
+            return {"건너뜀": "테마·업종 자료 없음"}
+        stamp = _stamp(conn)
+        texts = {}
+        try:
+            texts = {k: t for k, t in conn.execute("SELECT bill_key, text FROM bill_text")}
+        except sqlite3.OperationalError:
+            pass
+        have = {k: s for k, s in conn.execute("SELECT key, sig FROM bill_impact_cache")}
+        done = skipped = 0
+        live = set()
+        for key, title, date, url, status in in_process(conn, days):
+            live.add(key)
+            text = texts.get(key, "")
+            sig = _sig(text, stamp)
+            if have.get(key) == sig:
+                skipped += 1
+                continue
+            r = bill_impact.analyze(conn, bill_name(title), text, top=15, data=data)
+            conn.execute("INSERT OR REPLACE INTO bill_impact_cache VALUES (?,?,?,?,?,?,?,?)", (
+                key, sig, json.dumps([c for c, _ in r["concepts"]], ensure_ascii=False),
+                json.dumps([[g[0], g[1], g[4]] for g in r["groups"][:8]], ensure_ascii=False),
+                json.dumps([[s["code"], s["name"], s["score"], (s["evidence"] or [""])[0]] for s in r["stocks"]], ensure_ascii=False),
+                len(r["stocks"]), 1 if r["has_text"] else 0, dt.date.today().isoformat()))
+            done += 1
+            if done % 200 == 0:
+                conn.commit()
+        conn.execute("DELETE FROM bill_impact_cache WHERE key NOT IN (SELECT key FROM policy_items WHERE kind='법안')")
+        conn.commit()
+        log(f"입법 영향 기업: 계산 {done} · 그대로 {skipped}")
+        return {"계산": done, "그대로": skipped}
+    finally:
+        conn.close()
+
+
+def fetch_texts(db_path, limit=100, log=print, days=400, sleep=0.3, fetcher=None):
+    """입법 중인 법안 중 제안이유가 없는 것을 최신 순으로 limit개 받음. 연속 5번 실패하면 멈춤 (국회 페이지가 막혔을 때 두드리지 않게)"""
+    import bill_watch
+    fetcher = fetcher or bill_watch.fetch_text
+    conn = sqlite3.connect(db_path)
+    try:
+        bill_watch.ensure(conn)
+        have = {k for (k,) in conn.execute("SELECT bill_key FROM bill_text")}
+        todo = [(k, u) for k, t, d, u, s in in_process(conn, days) if k not in have and u][:limit]
+        ok = fail = streak = 0
+        for key, url in todo:
+            try:
+                txt = fetcher(url)
+                streak = 0
+            except Exception:
+                fail += 1
+                streak += 1
+                if streak >= 5:
+                    log("제안이유 받기: 5번 연속 실패해서 멈췄어요 (국회 페이지 접근을 확인해 주세요)")
+                    break
+                continue
+            conn.execute("INSERT OR REPLACE INTO bill_text VALUES (?,?,?)", (key, dt.date.today().isoformat(), txt))
+            ok += 1
+            if ok % 20 == 0:
+                conn.commit()
+            time.sleep(sleep)
+        conn.commit()
+        log(f"제안이유 받기: 대상 {len(todo)} · 성공 {ok} · 실패 {fail}")
+        return {"성공": ok, "실패": fail, "대상": len(todo)}
+    finally:
+        conn.close()
+
+
+def sync_promul(db_path, law_oc, log=print, days=150, session=None):
+    """통과한 법안의 법을 법제처에서 찾아 공포일·시행일 저장 (의결일 이후 공포가 있으면). → {확인, 공포}"""
+    import stock_policy as sp
+    if not law_oc:
+        return {"건너뜀": "법제처 키 없음"}
+    conn = sqlite3.connect(db_path)
+    try:
+        ensure(conn)
+        api = sp.Client("", law_oc, "")
+        checked = found = 0
+        today = dt.date.today()
+        for key, title, date, url, status in in_process(conn, days):
+            if status_kind(status) != "통과":
+                continue
+            row = conn.execute("SELECT promulgated, checked FROM bill_promul WHERE bill_key=?", (key,)).fetchone()
+            if row and (row[0] or (row[1] and row[1] >= (today - dt.timedelta(days=2)).isoformat())):
+                continue
+            tr = [(d, s) for d, s in conn.execute("SELECT date, stage FROM bill_track WHERE bill_key=? ORDER BY date", (key,))]
+            passed = next((d for d, st in reversed(tr) if st.startswith("본회의 처리")), date or "")
+            name = law_name(title)
+            if not name or not passed:
+                continue
+            try:
+                laws = api.laws(name)
+            except Exception as e:
+                log(f"공포일 확인 실패 ({name[:14]}): {type(e).__name__}")
+                continue
+            checked += 1
+            norm = lambda x: re.sub(r"\s", "", x or "")
+            cands = sorted((v for v in laws if norm(v.get("name")) == norm(name) and (v.get("promulgated") or "") >= passed), key=lambda v: v["promulgated"])
+            v = cands[0] if cands else None
+            if v:
+                found += 1
+            conn.execute("INSERT OR REPLACE INTO bill_promul VALUES (?,?,?,?,?,?)", (
+                key, name, v["promulgated"] if v else "", (v.get("effective") or "") if v else "", (v.get("kind") or "") if v else "", today.isoformat()))
+            time.sleep(0.3)
+        conn.commit()
+        log(f"공포일 확인: {checked}건 조회 · 공포 확인 {found}건")
+        return {"확인": checked, "공포": found}
+    finally:
+        conn.close()
+
+
+# ---------------- 화면용 읽기 ----------------
+def load_rows(conn, days=400):
+    """입법 중인 법안 전체 → [dict(key, title, name, date, url, status, kind, stage, stage_label, last, started, promul, concepts, stocks, n, has_text, text)]"""
+    ensure(conn)
+    tracks = {}
+    try:
+        for k, d, s in conn.execute("SELECT bill_key, date, stage FROM bill_track ORDER BY date"):
+            tracks.setdefault(k, []).append((d, s))
+    except sqlite3.OperationalError:
+        pass
+    cache = {}
+    for k, c, g, s, n, ht in conn.execute("SELECT key, concepts, groups, stocks, n, has_text FROM bill_impact_cache"):
+        cache[k] = dict(concepts=json.loads(c or "[]"), groups=json.loads(g or "[]"), stocks=json.loads(s or "[]"), n=n, has_text=bool(ht))
+    promul = {}
+    for k, law, p, e, kd, ck in conn.execute("SELECT * FROM bill_promul"):
+        promul[k] = dict(law=law, promulgated=p, effective=e, kind=kd)
+    texts = {}
+    try:
+        texts = {k: t for k, t in conn.execute("SELECT bill_key, text FROM bill_text WHERE text != ''")}
+    except sqlite3.OperationalError:
+        pass
+    out = []
+    for key, title, date, url, status in in_process(conn, days):
+        tr = tracks.get(key, [])
+        idx, label, last = stage_info(tr, status)
+        c = cache.get(key) or dict(concepts=[], groups=[], stocks=[], n=0, has_text=False)
+        started = next((d for d, s in tr if s.startswith("발의")), date or "")
+        txt = texts.get(key, "")
+        out.append(dict(key=key, title=title, name=bill_name(title), date=date or "", url=url or "", status=status or "", kind=status_kind(status),
+                        stage=idx, stage_label=label, last=last or date or "", started=started, tracks=tr,
+                        promul=promulgation(status, tr, promul.get(key), txt), concepts=c["concepts"], groups=c["groups"],
+                        stocks=c["stocks"], n=c["n"], has_text=bool(txt) or c["has_text"]))
+    return out
