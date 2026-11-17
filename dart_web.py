@@ -2075,8 +2075,13 @@ def view_bills(conn, q):
         linked = conn.execute("SELECT l.code, COALESCE(s.name, l.code) FROM bill_links l LEFT JOIN bill_stocks s ON s.code=l.code WHERE l.bill_key=?", (key,)).fetchall() if has_table(conn, "bill_links") else []
         lk = ('<div style="margin-top:6px"><b style="font-size:13px">연결된 종목</b> ' + " ".join(
             f'<span class="chip">{escape(n)}</span>' for _, n in linked) + ' <a class="chip" href="/bills?t=watch">반응 보기(내 종목 감시)</a></div>') if linked else ""
-        head = (f'<div class="card"><div class="muted" style="font-size:12px"><a href="/bills">← 법안 조회</a></div><div style="margin-top:4px"><b>{t_html}</b></div>'
-                f'<div class="muted" style="font-size:13px">{escape(date or "")} · {escape(status or "")}</div>'
+        import legis as _lg
+        _sm = _lg.summary_line(text)
+        _nt = _lg.nature_hint(title, text)
+        head = (f'<div class="card"><div class="muted" style="font-size:12px"><a href="/bills">← 법안 조회</a></div><div style="margin-top:4px"><b>{t_html}</b> {_nature_chip(_nt)}</div>'
+                + (f'<div style="font-size:14px;margin-top:4px">→ {escape(_sm)}</div>' if _sm else "")
+                + (f'<div class="muted" style="font-size:12px;margin-top:2px">단어로 본 힌트: 지원 쪽 {escape(", ".join(_nt["support"]) or "-")} · 규제 쪽 {escape(", ".join(_nt["burden"]) or "-")} (기업마다 다르게 닿아요, 호재·악재 판단이 아니에요)</div>' if _nt["kind"] != "none" else "")
+                + f'<div class="muted" style="font-size:13px">{escape(date or "")} · {escape(status or "")}</div>'
                 f'<div style="margin-top:4px">{tl}</div>{lk}{text_html}{tools}</div>')
         res = _impact_html(bi.analyze(conn, title, text, data=data), key) if not no_theme else ""
         return page("법안·종목", _bills_tabs("list") + flash + warn + head + (f'<div class="card">{res}</div>' if res else "")
@@ -2122,7 +2127,11 @@ def view_bills(conn, q):
                 pre = ('<div style="font-size:13px;margin-top:2px">후보: ' + ", ".join(escape(s["name"]) for s in r["stocks"][:4])
                        + f' <span class="muted">({"본문" if texts.get(key) else "제목"} 기준)</span></div>')
         kind = _bill_status_kind(status)
-        items += (f'<div style="margin:10px 0"><div><a href="/bills?t=bill&key={quote(key)}"><b>{escape(title[:80])}</b></a></div>'
+        import legis as _lg
+        sm_line = _lg.summary_line(texts.get(key, ""))
+        nt_chip = _nature_chip(_lg.nature_hint(title, texts.get(key, "")))
+        pre = (f'<div style="font-size:13px;margin-top:2px">→ {escape(sm_line)}</div>' if sm_line else "") + pre
+        items += (f'<div style="margin:10px 0"><div><a href="/bills?t=bill&key={quote(key)}"><b>{escape(title[:80])}</b></a> {nt_chip}</div>'
                   f'<div class="muted" style="font-size:12px">{escape(date or "")} · <span class="chip {"up" if kind == "통과" else "down" if kind == "폐기" else ""}">{kind}</span> '
                   + "".join(f'<span class="chip">{escape(x)}</span> ' for x in tps[:3]) + f'</div>{pre}</div>')
 
@@ -2227,6 +2236,47 @@ def legis_prep_card(conn, diag, total_all, n_cand):
     return (f'<div class="card">{head}{probs}{body}</div>', running)
 
 
+_NATURE_TXT = {"support": ("수혜 가능 힌트", "up"), "burden": ("부담 가능 힌트", "down"), "mixed": ("지원·규제 혼재", "warn")}
+
+
+def _nature_chip(n):
+    """법안 문구의 단어로 본 지원/규제 힌트 칩 (판단이 아니라 힌트. 기업마다 다르게 닿을 수 있음)"""
+    if not n or n.get("kind") not in _NATURE_TXT:
+        return ""
+    lab, cls = _NATURE_TXT[n["kind"]]
+    words = " · ".join(([f"지원 {', '.join(n['support'][:3])}"] if n["support"] else []) + ([f"규제 {', '.join(n['burden'][:3])}"] if n["burden"] else []))
+    return f'<span class="chip {cls}" title="{escape(words)} — 단어로 본 힌트예요. 기업마다 다르게 닿고, 호재·악재 판단이 아니에요">{lab}</span>'
+
+
+def _summary_div(r):
+    return (f'<div style="font-size:13px;margin-top:3px">→ {escape(r["summary"])}</div>' if r.get("summary")
+            else ('<div class="muted" style="font-size:12px;margin-top:3px">제안이유 본문이 아직 없어요 (제목만 기준)</div>' if not r.get("has_text") else ""))
+
+
+def _legis_card(r, prog_fn, sub=False):
+    """법안 한 건 카드 (대표 법안). sub=True면 묶음 안에서 보여 줄 짧은 줄"""
+    if sub:
+        return (f'<div style="margin:6px 0;font-size:13px"><a href="/bills?t=bill&key={quote(r["key"])}">{escape(r["name"][:70])}</a> '
+                f'<span class="muted">{r["stage"]}/6 {escape(r["stage_label"] or "-")} · 발의 {escape(r["started"] or "-")}</span> {_nature_chip(r["nature"])}'
+                + (f'<div class="muted">→ {escape(r["summary"])}</div>' if r.get("summary") else "") + '</div>')
+    kind_cls = "up" if r["kind"] == "통과" else ""
+    chips = "".join(f'<span class="chip" title="{escape(e)}">{escape(nm)}</span> ' for _, nm, sc, e in r["stocks"][:6]) or '<span class="muted">후보 없음 (개념 사전·테마에 안 잡힌 분야이거나 본문이 필요해요)</span>'
+    more = f' <span class="muted">+{r["n"] - 6}</span>' if r["n"] > 6 else ""
+    extra = ""
+    if r["promul"]["dates"]:
+        extra += f' · 본문 날짜 {escape(", ".join(r["promul"]["dates"]))}'
+    if r["promul"]["hint"]:
+        extra += f' · {escape(r["promul"]["hint"])}'
+    return (f'<div><a href="/bills?t=bill&key={quote(r["key"])}"><b>{escape(r["name"][:80])}</b></a> '
+            f'<span class="chip {kind_cls}">{r["kind"]}</span> {_nature_chip(r["nature"])}</div>'
+            + _summary_div(r)
+            + f'<div style="font-size:13px;margin-top:3px">{prog_fn(r)} {escape(r["stage_label"] or "-")} ({r["stage"]}/6) <span class="muted">· 최근 단계 {escape((r["last"] or "")[5:])} · 발의 {escape(r["started"] or "-")}</span></div>'
+            f'<div style="font-size:13px;margin-top:2px">{_legis_promul_text(r["promul"])}<span class="muted">{extra}</span></div>'
+            + ("" if r["promul"]["kind"] in ("done", "none") else f'<div class="muted" style="font-size:12px">{escape(r["promul"]["note"])}</div>')
+            + (f'<div style="margin-top:3px">{" ".join(f"<span class=chip>{escape(c)}</span>" for c in r["concepts"][:3])}</div>' if r["concepts"] else "")
+            + f'<div style="margin-top:4px"><span class="muted" style="font-size:12px">영향 기업 후보 ({"본문" if r["has_text"] else "제목"} 기준):</span> {chips}{more}</div>')
+
+
 def view_legis(conn, q):
     """아이디어 → 입법 영향 기업: 지금 입법 중인 법안이 영향을 줄 기업 후보와 공포 시기를 법안별·기업별로, 필터·정렬 포함"""
     import legis as lg
@@ -2237,6 +2287,7 @@ def view_legis(conn, q):
     submitted = "f" in q
     only_cand = (q.get("ne") == "1") if submitted else True
     only_text = q.get("tx") == "1"
+    group_on = (q.get("gr") == "1") if submitted else True
     st = q.get("st") if q.get("st") in dict(LEGIS_STAGE_FILTERS) else ""
     days = q.get("d") if q.get("d") in ("90", "180", "365", "0") else "365"
     cpt = q.get("cp", "")
@@ -2306,8 +2357,9 @@ def view_legis(conn, q):
             + select("s", LEGIS_SORTS[mode], sort)
             + f'<label style="white-space:nowrap"><input type="checkbox" name="ne" value="1"{" checked" if only_cand else ""}> 후보 있는 것만</label>'
             + f'<label style="white-space:nowrap"><input type="checkbox" name="tx" value="1"{" checked" if only_text else ""}> 본문 읽은 것만</label>'
+            + f'<label style="white-space:nowrap"><input type="checkbox" name="gr" value="1"{" checked" if group_on else ""}> 비슷한 법안 묶기</label>'
             '<button>적용</button></form>')
-    base = {"t": "legis", "f": "1", "st": st, "d": days, "cp": cpt, "g": grp, "c": comp, "kw": kw, "ne": "1" if only_cand else "", "tx": "1" if only_text else ""}
+    base = {"t": "legis", "f": "1", "st": st, "d": days, "cp": cpt, "g": grp, "c": comp, "kw": kw, "ne": "1" if only_cand else "", "tx": "1" if only_text else "", "gr": "1" if group_on else ""}
     mode_tabs = " ".join(
         (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{lab}</b>' if k == mode else
          f'<a class="chip" href="/ideas?{urlencode({**base, "m": k})}">{lab}</a>') for k, lab in (("bill", "법안별로 보기"), ("stock", "기업별로 보기")))
@@ -2335,27 +2387,24 @@ def view_legis(conn, q):
         return dots
     key_fn, rev = _legis_sort_key(sort) if mode == "bill" else (None, True)
     if mode == "bill":
-        sel.sort(key=key_fn, reverse=rev)
-        shown = sel[page_no * per: (page_no + 1) * per]
+        groups = lg.group_rows(sel) if group_on else [dict(rep=r, items=[r], n=1) for r in sel]
+
+        def sort_row(g):          # 묶음 전체를 대표하는 값으로 정렬 (최근 단계는 가장 최근, 단계는 가장 앞선 것, 공포는 가장 빠른 것)
+            its = g["items"]
+            pr = min((x for x in its if x["promul"]["kind"] in ("done", "est") and x["promul"]["date"]), key=lambda x: x["promul"]["date"], default=g["rep"])
+            return {"last": max((x["last"] or "") for x in its), "started": max((x["started"] or "") for x in its), "n": g["rep"]["n"],
+                    "stage": max(x["stage"] for x in its), "promul": pr["promul"]}
+        groups.sort(key=lambda g: key_fn(sort_row(g)), reverse=rev)
+        shown = groups[page_no * per: (page_no + 1) * per]
         cards = ""
-        for r in shown:
-            kind_cls = "up" if r["kind"] == "통과" else ""
-            chips = "".join(f'<span class="chip" title="{escape(e)}">{escape(nm)}</span> ' for _, nm, sc, e in r["stocks"][:6]) or '<span class="muted">후보 없음 (개념 사전·테마에 안 잡힌 분야이거나 본문이 필요해요)</span>'
-            more = f' <span class="muted">+{r["n"] - 6}</span>' if r["n"] > 6 else ""
-            extra = ""
-            if r["promul"]["dates"]:
-                extra += f' · 본문 날짜 {escape(", ".join(r["promul"]["dates"]))}'
-            if r["promul"]["hint"]:
-                extra += f' · {escape(r["promul"]["hint"])}'
-            cards += (f'<div style="margin:12px 0;padding-bottom:10px;border-bottom:1px solid #8883">'
-                      f'<div><a href="/bills?t=bill&key={quote(r["key"])}"><b>{escape(r["name"][:80])}</b></a> '
-                      f'<span class="chip {kind_cls}">{r["kind"]}</span></div>'
-                      f'<div style="font-size:13px;margin-top:3px">{prog(r)} {escape(r["stage_label"] or "-")} ({r["stage"]}/6) <span class="muted">· 최근 단계 {escape((r["last"] or "")[5:])} · 발의 {escape(r["started"] or "-")}</span></div>'
-                      f'<div style="font-size:13px;margin-top:2px">{_legis_promul_text(r["promul"])}<span class="muted">{extra}</span></div>'
-                      + ("" if r["promul"]["kind"] in ("done", "none") else f'<div class="muted" style="font-size:12px">{escape(r["promul"]["note"])}</div>')
-                      + (f'<div style="margin-top:3px">{" ".join(f"<span class=chip>{escape(c)}</span>" for c in r["concepts"][:3])}</div>' if r["concepts"] else "")
-                      + f'<div style="margin-top:4px"><span class="muted" style="font-size:12px">영향 기업 후보 ({"본문" if r["has_text"] else "제목"} 기준):</span> {chips}{more}</div></div>')
-        body = f'<div class="card">{cards or "<div class=muted>조건에 맞는 법안이 없어요. 위 필터를 풀거나 \'후보 있는 것만\'을 꺼 보세요.</div>"}{pager(len(sel))}</div>'
+        for g in shown:
+            r = g["rep"]
+            sub = ""
+            if g["n"] > 1:
+                inner = "".join(_legis_card(x, prog, sub=True) for x in g["items"][1:])
+                sub = (f'<details style="margin-top:6px"><summary class="muted" style="font-size:13px">같은 법·분야의 비슷한 개정안 {g["n"] - 1}건 더 보기</summary>{inner}</details>')
+            cards += f'<div style="margin:12px 0;padding-bottom:10px;border-bottom:1px solid #8883">{_legis_card(r, prog)}{sub}</div>'
+        body = f'<div class="card">{cards or "<div class=muted>조건에 맞는 법안이 없어요. 위 필터를 풀거나 \'후보 있는 것만\'을 꺼 보세요.</div>"}{pager(len(groups))}</div>'
         return page("입법 영향 기업", head + warn + body, refresh=running)
     # ---- 기업별
     agg = {}
@@ -2363,8 +2412,9 @@ def view_legis(conn, q):
         for code, nm, sc, ev in r["stocks"]:
             if comp and not (comp.replace(" ", "") in (nm or "").replace(" ", "") or comp == code):
                 continue
-            a = agg.setdefault(code, dict(code=code, name=nm, bills=[], stage=0, soon="", score=0.0))
+            a = agg.setdefault(code, dict(code=code, name=nm, bills=[], gset=set(), stage=0, soon="", score=0.0))
             a["bills"].append((r, sc, ev))
+            a["gset"].add(lg.group_key(r) if group_on else r["key"])
             a["stage"] = max(a["stage"], r["stage"])
             a["score"] += sc
             pm = r["promul"]
@@ -2372,7 +2422,7 @@ def view_legis(conn, q):
                 a["soon"] = pm["date"]
     items = list(agg.values())
     far = "9999-12-31"
-    keyf = {"cnt": (lambda a: (len(a["bills"]), a["score"]), True), "soon": (lambda a: a["soon"] or far, False),
+    keyf = {"cnt": (lambda a: (len(a["gset"]), a["score"]), True), "soon": (lambda a: a["soon"] or far, False),
             "cap": (lambda a: mcap.get(a["code"]) or 0, True), "stage": (lambda a: (a["stage"], len(a["bills"])), True)}[sort]
     items.sort(key=keyf[0], reverse=keyf[1])
     shown = items[page_no * per: (page_no + 1) * per]
@@ -2384,7 +2434,7 @@ def view_legis(conn, q):
         more = f'<div class="muted" style="font-size:12px">… 외 {len(bl) - 3}건</div>' if len(bl) > 3 else ""
         soon = f'{a["soon"][5:]}' if a["soon"] else "-"
         trs += (f'<tr><td><a href="{naver_link(a["code"])}" target="_blank" rel="noopener noreferrer"><b>{escape(a["name"])}</b></a><br><span class="muted" style="font-size:11px">{escape(a["code"])} · 시총 {_mcap_text(mcap.get(a["code"]))}</span></td>'
-                f'<td><b>{len(a["bills"])}</b></td><td>{a["stage"]}/6</td><td>{soon}</td><td>{lis}{more}</td></tr>')
+                f'<td><b>{len(a["gset"])}</b>' + (f'<br><span class="muted" style="font-size:11px">개정안 {len(a["bills"])}건</span>' if len(a["bills"]) != len(a["gset"]) else "") + f'</td><td>{a["stage"]}/6</td><td>{soon}</td><td>{lis}{more}</td></tr>')
     body = ('<div class="card"><div class="muted" style="margin-bottom:4px">같은 기업이 여러 법안에 걸쳐 있으면 한 줄로 묶어 보여 줘요. 공포 열은 그 기업에 닿는 법안 중 가장 빠른 확정·예상 공포일이에요.</div>'
             + (f'<div class="scroll"><table><tr><th>기업</th><th>법안 수</th><th>최고 단계</th><th>가장 빠른 공포</th><th>관련 법안 (영향 점수 높은 순)</th></tr>{trs}</table></div>' if trs else
                '<div class="muted">조건에 맞는 기업이 없어요. 필터를 풀어 보세요.</div>') + pager(len(items)) + '</div>')

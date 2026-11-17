@@ -333,7 +333,8 @@ def load_rows(conn, days=400, live_limit=150):
         out.append(dict(key=key, title=title, name=bill_name(title), date=date or "", url=url or "", status=status or "", kind=status_kind(status),
                         stage=idx, stage_label=label, last=last or date or "", started=started, tracks=tr,
                         promul=promulgation(status, tr, promul.get(key), txt), concepts=c["concepts"], groups=c["groups"],
-                        stocks=c["stocks"], n=c["n"], has_text=bool(txt) or c["has_text"]))
+                        stocks=c["stocks"], n=c["n"], has_text=bool(txt) or c["has_text"],
+                        summary=summary_line(txt), nature=nature_hint(title, txt)))
     return out
 
 
@@ -438,3 +439,90 @@ def read_status(status_path):
                 if stp.get("state") in ("run", "wait"):
                     stp["state"], stp["msg"] = "fail", "중단됐어요 (서버가 재시작되었거나 작업이 끊겼어요) — 다시 준비하기를 눌러 주세요"
     return st
+
+
+# ---------------- 제안이유 핵심 요약 · 성격 힌트 · 비슷한 법안 묶기 ----------------
+_PURPOSE = re.compile(r"(?:이에|따라서|이를\s*(?:개선|해소|보완)하기\s*위하여)?\s*([^.]*?(?:하려는|려는|개정하려는|신설하려는|도입하려는|확대하려는|강화하려는|연장하려는|완화하려는|폐지하려는)\s*것임)")
+
+
+def _clean_sentence(s):
+    s = re.sub(r"\(\s*(?:안|제안)\s*제[^)]*\)", "", s)               # (안 제107조의2) 같은 조문 표시
+    s = re.sub(r"^\s*(?:이에|따라서|그런데|한편|또한)\s*,?\s*", "", s)
+    s = re.sub(r"\s+", " ", s).strip(" ,.。")
+    s = re.sub(r"려는\s*것임$", "려 함", s)                           # '연장하려는 것임' → '연장하려 함'
+    s = re.sub(r"\s*것임$", "", s)
+    return s.strip(" ,.。")
+
+
+def summary_line(text, limit=110):
+    """제안이유 본문 → 법안이 하려는 일 한 줄 (목적 문장 '…하려는 것임'을 우선, 없으면 첫 문장). 본문이 없으면 ''"""
+    t = re.sub(r"\s+", " ", text or "").strip()
+    if not t:
+        return ""
+    t = re.sub(r"^.{0,12}제안이유\s*(?:및\s*주요\s*내용)?\s*[:：]?\s*", "", t)
+    sents = [x.strip() for x in re.split(r"(?<=[.。])\s+|(?<=것임)\s+(?=[가-힣A-Za-z0-9])", t) if x.strip()]
+    pick = ""
+    for s in sents:                                                  # 목적 문장은 보통 '이에 … 하려는 것임'
+        if re.search(r"(?:하려는|려는)\s*것임", s):
+            pick = s
+            break
+    if not pick and sents:
+        pick = sents[0]
+    out = _clean_sentence(pick)
+    if len(out) > limit:
+        out = out[: limit - 1].rstrip() + "…"
+    return out
+
+
+SUPPORT_STRONG = ("세액공제", "감면", "면제", "특례", "환급", "지원금", "보조금", "융자", "인센티브", "비과세", "분리과세", "일몰 연장", "적용기한을 연장", "규제 완화", "규제를 완화", "완화")
+SUPPORT_WEAK = ("지원", "육성", "촉진", "활성화", "허용", "혜택", "확대", "공제")
+BURDEN_STRONG = ("처벌", "과징금", "과태료", "벌칙", "벌금", "금지", "제재", "환수", "의무화", "규제 강화", "규제를 강화", "부과", "징수", "상한", "폐지", "취소")
+BURDEN_WEAK = ("의무", "제한", "강화", "인상", "신고", "보고", "등록")
+
+
+def nature_hint(title, text):
+    """법안 문구의 단어로 '수혜 가능 / 부담 가능 / 혼재' 힌트 → dict(kind, support, burden). 본문이 없으면 kind='none'.
+    호재·악재 판단이 아니에요: 같은 법안이 기업마다 다르게 닿고, 단어만으로는 방향을 확정할 수 없어요 (예: '지원 강화'의 '강화')."""
+    body = text or ""                                  # 제목은 쓰지 않아요 (법 이름 '조세특례제한법'의 '특례'·'제한'이 단어로 잡혀 오염되므로)
+    if len(body.strip()) < 30:
+        return dict(kind="none", support=[], burden=[])
+
+    def count(strong, weak):
+        hit_s = [w for w in strong if w in body]
+        hit_w = [w for w in weak if w in body and not any(w in s for s in hit_s)]
+        return hit_s, hit_w
+    ss, sw = count(SUPPORT_STRONG, SUPPORT_WEAK)
+    bs, bw = count(BURDEN_STRONG, BURDEN_WEAK)
+    # '지원 강화'처럼 지원이 붙은 '강화'는 부담이 아님
+    if "강화" in bw and re.search(r"(?:지원|육성|공제|감면|혜택|보호)[^.]{0,6}강화", body) and not re.search(r"(?:규제|처벌|의무|과징금|제재)[^.]{0,6}강화", body):
+        bw = [w for w in bw if w != "강화"]
+    sup, bur = 2 * len(ss) + len(sw), 2 * len(bs) + len(bw)
+    if sup >= 2 and bur >= 2 and abs(sup - bur) < 2:
+        kind = "mixed"
+    elif sup >= bur + 2:
+        kind = "support"
+    elif bur >= sup + 2:
+        kind = "burden"
+    else:
+        kind = "none"
+    return dict(kind=kind, support=(ss + sw)[:5], burden=(bs + bw)[:5])
+
+
+def group_key(row):
+    """비슷한 법안 묶는 기준: 같은 법 + 같은 분야(개념 앞 두 개). 분야가 안 잡힌 법안은 법 이름만으로 묶지 않고 낱개로 둠"""
+    law = law_name(row["title"]) or row["name"]
+    if not row["concepts"]:
+        return (law, row["key"])
+    return (law, tuple(sorted(row["concepts"][:2])))
+
+
+def group_rows(rows):
+    """[row] → [dict(rep=대표 법안, items=[전부], n)]. 대표는 가장 앞선 단계(같으면 최근 변동이 늦은 것)"""
+    groups = {}
+    for r in rows:
+        groups.setdefault(group_key(r), []).append(r)
+    out = []
+    for items in groups.values():
+        items.sort(key=lambda r: (r["stage"], r["last"] or ""), reverse=True)
+        out.append(dict(rep=items[0], items=items, n=len(items)))
+    return out
