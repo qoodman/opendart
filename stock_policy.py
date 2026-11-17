@@ -213,8 +213,8 @@ class Client:
                         "org": g("소관부처명")})
         return out
 
-    def bills(self, keyword):
-        r = self._get(BILL_URL, {"KEY": self.assembly_key, "Type": "json", "pIndex": 1, "pSize": 100,
+    def bills(self, keyword, page=1):
+        r = self._get(BILL_URL, {"KEY": self.assembly_key, "Type": "json", "pIndex": page, "pSize": 100,
                                  "AGE": ASSEMBLY_AGE, "BILL_NAME": keyword})
         rows, code = _find_rows(r.json())
         if code and not str(code).endswith(("000", "200")):
@@ -312,6 +312,11 @@ def sync(db_path, press_key="", law_oc="", assembly_key="", log=print):
                     title = f"{r.get('BILL_NAME', '')}{f' ({who})' if who else ''} · {result}"
                     date = _norm_date(r.get("PROC_DT") or r.get("PROPOSE_DT") or "")
                     tps = topics_of(r.get("BILL_NAME", ""), "", "") or ["자본시장 제도"]
+                    try:
+                        import bill_watch
+                        bill_watch.record_tracks(conn, f"bill:{bid}", r)      # 단계별 날짜 (법안·종목 탭의 반응 계산에 씀)
+                    except Exception:
+                        pass
                     if _upsert(conn, f"bill:{bid}", "법안", "국회", date, title, r.get("DETAIL_LINK") or "",
                                "", tps, first, status=result):
                         stats["새 항목"] += 1

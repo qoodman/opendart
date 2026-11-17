@@ -146,6 +146,10 @@ SETTINGS_SPEC = [
      "네이버 증권 업종 79개의 구성 종목을 주 1회 받습니다 (호출 100번 안팎, 키 불필요)."),
     ("알림", "DART_LIGHTS_NOTIFY", "하락 원인 신호 변화 알림", "bool", "1",
      "시장·정책 수집 때 하락 점검의 원인 신호(금리·반도체 쏠림·외국인·환율·신용·정책·법안)가 새로 켜지거나 꺼지면 알립니다. 첫 기록은 기준선이라 알림이 없습니다."),
+    ("시장·정책", "DART_BILL_WATCH", "법안 ↔ 종목 감시 (시장 → 법안·종목)", "bool", "1",
+     "감시 규칙(예: 글로벌텍스프리)에 맞는 국회 법안을 받아 종목에 연결하고, 연결 종목 주가를 받아 단계별 반응을 계산합니다."),
+    ("알림", "DART_BILL_NOTIFY", "관심 법안 소식 알림", "bool", "1",
+     "감시 규칙·직접 연결한 법안이 종목에 새로 연결되거나 새 단계(소관위·법사위·본회의 처리)에 들어가면 알립니다. 규칙을 처음 돌릴 때는 알림이 없습니다."),
     ("시장·정책", "DART_ETF_SHARE", "ETF 거래대금 비중 받기 (시장 지표)", "bool", "1",
      "KRX 키가 있어야 합니다. KRX 'ETF 일별매매정보'를 이용신청하면 과거까지 채우고, 아니면 장 마감 뒤(16시 이후) 수집한 날부터 쌓입니다."),
     ("시장·정책", "DART_NEWS", "해외 통신 속보 제목 받기 (로이터·AP·블룸버그·연합)", "bool", "1",
@@ -670,12 +674,100 @@ def run_market_policy(log=print):
         except Exception as e:
             out["policy"] = f"실패: {e}"
             log(f"정책 소식 실패: {e}")
+    if env("DART_BILL_WATCH", "1") != "0":     # 법안 ↔ 종목 감시 규칙: 국회 법안을 받아 연결하고 연결 종목 주가를 받음
+        try:
+            out["bill_watch"] = bill_watch_run(log)
+        except Exception as e:
+            out["bill_watch"] = f"실패: {e}"
+            log(f"법안 감시 실패: {e}")
     try:            # 하락 점검 신호등을 하루 한 줄 기록하고, 새로 켜지거나 꺼진 신호가 있으면 알림
         out["lights"] = lights_alerts(log)
     except Exception as e:
         out["lights"] = f"실패: {e}"
         log(f"신호등 기록 실패: {e}")
     return out
+
+
+def bill_watch_run(log=print):
+    """법안 감시를 지금 돌리고, 새 연결·새 단계가 있으면 알림 → 요약 dict"""
+    import bill_watch
+    res = bill_watch.sync(results_db(), env_shared("ASSEMBLY_API_KEY"), log=log)
+    msgs = res.pop("알림", [])
+    if msgs and env("DART_BILL_NOTIFY", "1") != "0":
+        url = env("DASHBOARD_URL")
+        lines = msgs[:6] + ([f"…외 {len(msgs) - 6}건"] if len(msgs) > 6 else [])
+        try:
+            notify(f"관심 법안 소식 {len(msgs)}건", "\n".join(lines), click=(url.rstrip("/") + "/bills") if url else "", tags=("scroll",))
+        except Exception as e:
+            log(f"관심 법안 알림 실패: {e}")
+    res["알림 수"] = len(msgs)
+    return res
+
+
+def bills_action(action, form):
+    """법안·종목 화면의 버튼들: (성공 여부, 한 줄 안내). form은 {필드: 값 문자열}"""
+    import bill_watch
+    import dart_web
+
+    def one(v):
+        return (form.get(v) or "").strip()
+
+    def pick_stock(conn, raw):
+        hits = dart_web.resolve_stock(conn, raw)
+        if not hits:
+            return None, f"'{raw}' 종목을 못 찾았어요. 6자리 코드로 넣어 보세요."
+        exact = [h for h in hits if (h[1] or "").replace(" ", "") == raw.replace(" ", "")]
+        if len(hits) > 1 and not exact:
+            return None, "여러 종목이 맞아요: " + ", ".join(f"{n}({c})" for c, n in hits[:6]) + " — 6자리 코드로 넣어 주세요."
+        code, name = (exact or hits)[0]
+        return (code, name), ""
+    conn = sqlite3.connect(results_db())
+    try:
+        bill_watch.ensure(conn)
+        if action == "refresh":
+            res = bill_watch_run()
+            return True, (f"법안 {res.get('법안', 0)}건 확인 · 새 연결 {res.get('새연결', 0)} · 본문 {res.get('본문', 0)} · 주가 {res.get('주가', 0)} · 알림 {res.get('알림 수', 0)}건")
+        if action == "add_rule":
+            name = one("name")
+            laws = [x.strip() for x in one("laws").replace("，", ",").split(",") if x.strip()]
+            kws = [x.strip() for x in one("kws").replace("，", ",").split(",") if x.strip()]
+            raws = [x.strip() for x in one("stocks").replace("，", ",").split(",") if x.strip()]
+            if not name or not raws or not (laws or kws):
+                return False, "이름, 종목, 그리고 법 이름이나 본문 키워드 중 하나는 꼭 넣어 주세요."
+            codes = []
+            for raw in raws:
+                st, why = pick_stock(conn, raw)
+                if not st:
+                    return False, why
+                bill_watch.ensure_stock(conn, st[0], st[1])
+                codes.append(st[0])
+            bill_watch.add_rule(conn, name, laws, kws, codes)
+            return True, f"감시 규칙을 추가했어요. 다음 수집 때 (또는 '지금 확인') 국회 법안을 받아 연결해요."
+        if action == "del_rule":
+            bill_watch.del_rule(conn, int(one("id") or 0))
+            return True, "규칙을 지웠어요 (그 규칙이 자동으로 이은 연결도 함께 지웠어요)."
+        if action == "link":
+            key, raw = one("bill"), one("stock")
+            if not key or not raw:
+                return False, "종목 이름이나 코드를 넣어 주세요."
+            st, why = pick_stock(conn, raw)
+            if not st:
+                return False, why
+            nm, mk = bill_watch.ensure_stock(conn, st[0], st[1])
+            bill_watch.link(conn, key, st[0], "수동")
+            try:
+                bill_watch.refresh_prices(conn, st[0])
+            except Exception as e:
+                return True, f"{nm}에 연결했어요 (주가는 아직 못 받았어요: {type(e).__name__})"
+            return True, f"{nm}({mk or '시장 미확인'})에 연결했어요."
+        if action == "unlink":
+            bill_watch.unlink(conn, one("bill"), one("code"))
+            return True, "연결을 풀었어요."
+        return False, "알 수 없는 동작이에요."
+    except Exception as e:
+        return False, f"{type(e).__name__}: {str(e)[:120]}"
+    finally:
+        conn.close()
 
 
 def lights_alerts(log=print):
@@ -1408,6 +1500,13 @@ def ext_check(src):
             return {"src": "bonds", "error": "DART 키가 아직 없어요. 설정에서 먼저 저장해 주세요."}
         import dart_bonds
         return {"src": "bonds", "items": dart_bonds.check(dk, str(data_dir() / "dart_cache"))}
+    if src == "bills":
+        import bill_watch
+        conn = sqlite3.connect(results_db())
+        try:
+            return {"src": "bills", "items": bill_watch.check(env_shared("ASSEMBLY_API_KEY"), conn)}
+        finally:
+            conn.close()
     if src == "policy":
         import stock_policy
 
@@ -1457,7 +1556,7 @@ def cmd_web(args):
                     update_info=update_info, check_update=check_update, start_update=start_update,
                     backup_list=backup_list, backup_busy=backup_busy, backup_start=backup_start,
                     backup_file=backup_file, krx_key=krx_key_now, save_krx_key=save_krx_key,
-                    ext_check=ext_check, news_refresh=news_refresh_web, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
+                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
     serve(results_db(), host=args.host, port=args.port, child_env=child_env,
           get_key=lambda: read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", ""),
           save_key=save_key, settings_api=settings_api)
