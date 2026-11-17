@@ -1603,6 +1603,66 @@ def news_impact_card(conn):
     return head + body + '</div>'
 
 
+def view_diag(conn, q):
+    """시장 → 하락 점검: 낙폭, 누가 끌어내렸나(시총 기여도), 금리·외국인·환율 한 화면. 원인을 단정하지 않고 사실만 모음"""
+    import deriv_bond as dvb
+    import drop_diag as dd
+    import stock_market
+    # 1) 고점 대비 낙폭
+    rows = ""
+    for label, sid in (("코스피", "idx:KOSPI"), ("코스닥", "idx:KOSDAQ"), ("S&amp;P500", "idx:SPX")):
+        r = dd.drawdown(list(stock_market.series(conn, sid)))
+        if r:
+            rows += (f'<tr><td>{label}</td><td>{r["last"]:,.0f} <span class="muted">{r["last_date"]}</span></td>'
+                     f'<td>{r["high"]:,.0f} <span class="muted">{r["high_date"]}</span></td><td class="down">{r["dd"]:+.1f}%</td></tr>')
+    dd_card = ('<div class="card"><b>고점 대비 얼마나 빠졌나</b><div class="muted">최근 약 1년(250거래일) 안의 최고 종가 대비.</div>'
+               + (f'<div class="scroll"><table><tr><th>지수</th><th>지금</th><th>1년 내 고점</th><th>낙폭</th></tr>{rows}</table></div>' if rows else
+                  '<div class="muted">지수 기록이 아직 없어요. 지금 수집 → 시장·정책만을 눌러 주세요.</div>') + '</div>')
+    # 2) 누가 끌어내렸나
+    wins = dd.windows(conn)
+    if not wins:
+        ct = ('<div class="card"><b>누가 끌어내렸나 (시가총액 기여도)</b><div class="muted">KRX 시세가 아직 부족해요. KRX 키를 저장하고 수집하면 '
+              '(거래일 2일 이상) 계산돼요.</div></div>')
+    else:
+        parts = ""
+        for label, a, b in wins:
+            r = dd.contrib(conn, a, b)
+            if not r:
+                continue
+            fmt = lambda xs: " · ".join(f"{escape(n)} {v:+.2f}" for n, v in xs) or "-"
+            parts += (f'<div style="margin-top:10px"><b>{escape(label)}</b> <span class="muted">{a[4:6]}/{a[6:]} → {b[4:6]}/{b[6:]}</span>'
+                      f'<div>코스피 시총 변화 <b class="{"down" if r["total"] < 0 else "up"}">{r["total"]:+.2f}%</b> = '
+                      f'삼성전자·SK하이닉스 {r["semi"]:+.2f}%p + 그 외 {r["other"]:+.2f}%p</div>'
+                      f'<div class="muted" style="font-size:13px">가장 끌어내린 종목(%p): {fmt(r["down"][:6])}</div>'
+                      f'<div class="muted" style="font-size:13px">가장 받쳐 준 종목(%p): {fmt(r["up"][:4])}</div></div>')
+        ct = ('<div class="card"><b>누가 끌어내렸나 (시가총액 기여도)</b>'
+              '<div class="muted">종목 시가총액 변화 ÷ 시작일 코스피 전체 시가총액. 공식 지수와는 유동주식 비율 등으로 조금 달라요. '
+              '앱이 받아 둔 KRX 시세(약 25거래일) 안에서만 계산해요.</div>' + (parts or '<div class="muted">계산할 자료가 부족해요.</div>') + '</div>')
+    # 3) 금리·외국인·환율·신용
+    sigs = {s["id"]: s for s in dvb.signals(conn)}
+    inds = {i.key: i for i in stock_market.indicators(conn)}
+    items = []
+    if "kr_us" in sigs:
+        items.append(("한미 금리차·미국 10년", sigs["kr_us"]))
+    for k in ("kr10", "curve", "credit", "spot_foreign", "fut_foreign"):
+        if k in sigs:
+            items.append((sigs[k]["label"], sigs[k]))
+    trs = ""
+    for label, sg in items:
+        chip = ("" if sg["signal"] is None else
+                f'<span class="chip {"up" if sg["signal"] > 0 else "down" if sg["signal"] < 0 else ""}">{"우호" if sg["signal"] > 0 else "부담" if sg["signal"] < 0 else "중립"}</span>')
+        trs += (f'<tr><td>{escape(label)}</td><td><b>{escape(sg["value"] or "-")}</b></td><td>{escape(sg["change"])}</td><td>{chip}</td></tr>')
+    fx = inds.get("usdkrw")
+    if fx and fx.available:
+        trs += f'<tr><td>원/달러 환율</td><td><b>{escape(fx.value_text)}</b></td><td>{escape(fx.change_text)}</td><td></td></tr>'
+    chk = ('<div class="card"><b>금리·외국인·환율</b><div class="muted">미국 금리가 오르고 외국인이 팔며 환율이 오르면 한국 증시에는 겹치는 부담이에요. 각 줄의 자세한 설명과 그래프는 선물·채권 탭에 있어요.</div>'
+           + (f'<div class="scroll"><table><tr><th>지표</th><th>지금</th><th>변화</th><th>신호</th></tr>{trs}</table></div>' if trs else
+              '<div class="muted">자료가 아직 없어요 (지금 수집 → 시장·정책만).</div>') + '</div>')
+    note = ('<div class="muted" style="font-size:12px">이 화면은 누가 얼마나 빠졌고 어떤 지표가 같이 움직이는지 사실만 모아요. 하락의 원인을 단정하거나 '
+            '사고팔 시점을 알려주지 않아요. 기사로 본 원인(AI 규제·금리·외국인 매도)은 시장 → 속보 탭에서 확인하세요.</div>')
+    return page("하락 점검", hub_tabs_row("/diag") + dd_card + ct + chk + note)
+
+
 def view_calendar(conn, q):
     try:
         import market_calendar as mc
@@ -2384,7 +2444,7 @@ def perf_url(**kw):
     return "/ideas?" + urlencode({"t": "perf", **kw})
 
 
-MARKET_HUB = {"/market": "시장 온도", "/policy": "정책", "/radar": "대비 레이더", "/news": "속보", "/shorts": "공매도 리포트", "/derivs": "선물·채권", "/calendar": "달력"}
+MARKET_HUB = {"/market": "시장 온도", "/policy": "정책", "/radar": "대비 레이더", "/diag": "하락 점검", "/news": "속보", "/shorts": "공매도 리포트", "/derivs": "선물·채권", "/calendar": "달력"}
 
 
 REPORT_HUB = {"/": "보고서", "/new": "새 공시", "/reports": "증권사 리포트"}
@@ -4180,6 +4240,8 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     return self._redirect("/ideas?" + urlencode({"t": "rank", **{k: v for k, v in q.items() if not k.startswith("_")}}))
                 elif url.path == "/radar":
                     body = view_radar(conn, q)
+                elif url.path == "/diag":
+                    body = view_diag(conn, q)
                 elif url.path == "/news":
                     body = view_news(conn, q)
                 elif url.path == "/shorts":

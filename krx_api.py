@@ -106,7 +106,7 @@ def ensure(conn):
     """)
 
 
-def sync(db_path, key, log=print, want_days=10, today=None, session=None, sleep=0.2):
+def sync(db_path, key, log=print, want_days=25, today=None, session=None, sleep=0.2):
     """코스피·코스닥 일별매매정보를 최근 거래일부터 want_days개 받아 저장. 이미 있는 날짜는 건너뜀."""
     conn = sqlite3.connect(db_path)
     try:
