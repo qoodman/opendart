@@ -93,3 +93,65 @@ def by_industry(conn, start, end, top=6):
         return None
     by = sorted(agg.items(), key=lambda x: x[1])
     return dict(down=[x for x in by[:top] if x[1] < 0], up=[x for x in reversed(by[-top:]) if x[1] > 0], unmapped=unmapped, mapped_share=100.0 * mapped_cap / base)
+
+
+# ---------------- 원인 신호등 ----------------
+STATE_TXT = {"on": "켜짐", "watch": "주의", "off": "꺼짐", "na": "자료 없음"}
+
+
+def lights(conn):
+    """하락 원인별 신호등 [{id, name, state(on/watch/off/na), evidence, rule}]. 원인을 단정하지 않고 '지금 이 신호가 켜져 있나'만 알려 줘요.
+    기준은 단순한 값이라 틀릴 수 있고, 여러 개가 동시에 켜지는 게 보통이에요."""
+    import deriv_bond as dvb
+    import stock_market
+    out = []
+    # 1) 금리 충격: 미국 10년 3개월 변화
+    us = dvb.series(conn, "bond:us10")
+    it = dict(id="rate", name="금리 충격", state="na", evidence="미국 금리 자료가 아직 없어요", rule="미국 10년 3개월 +0.50%p 이상 켜짐 · +0.25%p 이상 주의")
+    if us:
+        last, prev = us[-1][1], dvb._ago(us, 91)
+        if prev is not None:
+            d = last - prev
+            it.update(state="on" if d >= 0.5 else "watch" if d >= 0.25 else "off", evidence=f"미국 10년 {last:.2f}% (3개월 {d:+.2f}%p)")
+        else:
+            it["evidence"] = f"미국 10년 {last:.2f}% (3개월 전 자료 없음)"
+    out.append(it)
+    # 2) 업종 쏠림: 최근 5거래일(없으면 하루) 코스피 하락 중 삼성전자·SK하이닉스 몫
+    it = dict(id="concentration", name="반도체 쏠림", state="na", evidence="KRX 시세가 아직 부족해요", rule="코스피 시총 -1% 이하일 때 두 종목 몫 60% 이상 켜짐 · 40% 이상 주의")
+    wins = windows(conn)
+    pick = next((w for w in wins if w[0].startswith("최근 5")), wins[0] if wins else None)
+    if pick:
+        r = contrib(conn, pick[1], pick[2])
+        if r:
+            if r["total"] > -1.0:
+                it.update(state="off", evidence=f"{pick[0]} 코스피 시총 {r['total']:+.2f}% (하락이 -1% 미만이라 따지지 않아요)")
+            else:
+                share = r["semi"] / r["total"]
+                it.update(state="on" if share >= 0.6 else "watch" if share >= 0.4 else "off",
+                          evidence=f"{pick[0]} 코스피 {r['total']:+.2f}% 중 삼성전자·SK하이닉스 {r['semi']:+.2f}%p ({share * 100:.0f}%)")
+    out.append(it)
+    # 3) 외국인 수급: 선물·채권 탭의 외국인 코스피 현물 순매수 신호 (5일·20일 합 방향)
+    sigs = {s["id"]: s for s in dvb.signals(conn)}
+    it = dict(id="foreign", name="외국인 매도", state="na", evidence="외국인 순매수 자료가 아직 없어요", rule="외국인 5일·20일 합이 모두 순매도면 켜짐 · 엇갈리면 주의")
+    sg = sigs.get("spot_foreign")
+    if sg and sg.get("signal") is not None:
+        it.update(state="on" if sg["signal"] < 0 else "watch" if sg["signal"] == 0 else "off", evidence=f"{sg['value']} · {sg['change']} (억원)")
+    out.append(it)
+    # 4) 환율: 원/달러 3개월 변화
+    inds = {i.key: i for i in stock_market.indicators(conn)}
+    fx = inds.get("usdkrw")
+    it = dict(id="fx", name="원화 약세", state="na", evidence="환율 자료가 아직 없어요 (ECOS 키)", rule="원/달러 3개월 +3% 이상 켜짐 · +1.5% 이상 주의")
+    if fx and fx.available and fx.change_text:
+        try:
+            d = float(fx.change_text.split()[-1].replace("%", "")) / 100
+            it.update(state="on" if d >= 0.03 else "watch" if d >= 0.015 else "off", evidence=f"{fx.value_text} ({fx.change_text})")
+        except ValueError:
+            it["evidence"] = f"{fx.value_text} ({fx.change_text})"
+    out.append(it)
+    # 5) 신용: 회사채 스프레드 3개월 변화 (선물·채권 탭의 신호)
+    it = dict(id="credit", name="신용 경색", state="na", evidence="회사채 스프레드 자료가 아직 없어요 (ECOS 키)", rule="회사채 스프레드 3개월 +0.15%p 이상 켜짐")
+    sg = sigs.get("credit")
+    if sg and sg.get("signal") is not None:
+        it.update(state="on" if sg["signal"] < 0 else "off", evidence=f"{sg['value']} ({sg['change']})")
+    out.append(it)
+    return out

@@ -1643,6 +1643,28 @@ def history_card(conn):
             '처음 넘어선 날 이후라서 단기 수익률이 낮게 나오기 쉬운 구조이기도 해요. 과거 기록일 뿐 앞으로를 보장하지 않고, 사고팔 시점을 알려주지 않아요.</div></div>')
 
 
+def lights_card(conn):
+    """하락 점검 맨 위: 원인별 신호등 (금리·반도체 쏠림·외국인·환율·신용). 지금 켜진 신호만 알려 주고 대처는 말하지 않음"""
+    try:
+        import drop_diag as dd
+        ls = dd.lights(conn)
+    except Exception:
+        return ""
+    on = [x for x in ls if x["state"] == "on"]
+    known = [x for x in ls if x["state"] != "na"]
+    cls = {"on": "down", "watch": "warn", "off": "up", "na": ""}
+    rows = "".join(
+        f'<div style="margin:8px 0"><div class="row"><b>{escape(x["name"])}</b><span class="chip {cls[x["state"]]}">{dd.STATE_TXT[x["state"]]}</span></div>'
+        f'<div>{escape(x["evidence"])}</div><div class="muted" style="font-size:12px">기준: {escape(x["rule"])}</div></div>' for x in ls)
+    head = (f'지금 켜진 신호 <b>{len(on)}개</b> / 확인 가능 {len(known)}개 ' + ("— " + " · ".join(escape(x["name"]) for x in on) if on else ""))
+    return ('<div class="card"><b>원인 신호등</b>'
+            f'<div style="margin-top:4px">{head}</div>'
+            f'{rows}'
+            '<div class="muted" style="font-size:12px">기준은 단순한 값이라 틀릴 수 있어요. 신호가 여러 개 동시에 켜지는 게 보통이고, 원인마다 살펴볼 것이 달라요 '
+            '(금리 → 이자 부담·금리 방향 신호, 쏠림 → 업종 비중과 실적, 외국인 → 빌린 돈·강제 매도 여부, 환율·신용 → 자금 흐름). '
+            '이 카드는 지금 어떤 신호가 켜져 있는지만 알려 주고, 어떻게 대처할지는 말하지 않아요. 내 보유 기간·레버리지·비중이 대처를 더 크게 좌우해요.</div></div>')
+
+
 def view_diag(conn, q):
     """시장 → 하락 점검: 낙폭, 누가 끌어내렸나(시총 기여도), 금리·외국인·환율 한 화면. 원인을 단정하지 않고 사실만 모음"""
     import deriv_bond as dvb
@@ -1701,7 +1723,7 @@ def view_diag(conn, q):
               '<div class="muted">자료가 아직 없어요 (지금 수집 → 시장·정책만).</div>') + '</div>')
     note = ('<div class="muted" style="font-size:12px">이 화면은 누가 얼마나 빠졌고 어떤 지표가 같이 움직이는지 사실만 모아요. 하락의 원인을 단정하거나 '
             '사고팔 시점을 알려주지 않아요. 기사로 본 원인(AI 규제·금리·외국인 매도)은 시장 → 속보 탭에서 확인하세요.</div>')
-    return page("하락 점검", dd_card + ct + history_card(conn) + chk + note)
+    return page("하락 점검", lights_card(conn) + dd_card + ct + history_card(conn) + chk + note)
 
 
 def view_calendar(conn, q):
