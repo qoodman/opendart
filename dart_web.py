@@ -2174,14 +2174,65 @@ def _legis_sort_key(sort):
             "promul": promul_date}[sort], sort in ("recent", "new", "stocks", "stage")
 
 
+def legis_prep_card(conn, diag, total_all, n_cand):
+    """입법 영향 탭 맨 위: 무엇이 준비됐고 무엇이 비었는지 진단 + '지금 준비하기' 버튼 + 진행 상황. → (html, 진행 중 여부)"""
+    import legis as lg
+    d = Path(_DATA_DIR["path"] or ".")
+    st = lg.read_status(str(d / "legis_status.json"))
+    run = None
+    try:
+        run = json.loads((d / "market_run.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    running = bool(st and st.get("running"))
+    problems = []
+    if not diag["themes"] or not diag["industries"]:
+        problems.append(f'테마·업종 자료 없음 (테마 {diag["themes"]}개, 업종 매핑 {diag["industries"]}종목)')
+    if not diag["bills"]:
+        problems.append("받아 둔 국회 법안이 없어요 (국회 법안 목록을 못 받았어요)")
+    elif not diag["in_process"]:
+        problems.append("법안은 있는데 최근 입법 중인 법안이 없어요 (모두 폐기됐거나 기간 밖)")
+    if diag["in_process"] and not n_cand and diag["themes"]:
+        problems.append("영향 기업 후보가 하나도 안 잡혔어요 (제안이유 본문이 없는 법안이 많을 수 있어요)")
+    ok = not problems and total_all > 0
+    icon = {"ok": "✔", "fail": "✖", "run": "…", "wait": "·"}
+    steps = ""
+    if st:
+        for s_ in st.get("steps", []):
+            steps += (f'<div style="margin:3px 0"><b>{icon.get(s_["state"], "")} {escape(s_["name"])}</b>'
+                      f' <span class="{"warn" if s_["state"] == "fail" else "muted"}" style="font-size:12px">{escape(s_.get("msg", ""))}</span></div>')
+        steps = (f'<div style="margin-top:8px"><b style="font-size:13px">{"진행 중" if running else "마지막 준비 결과"}</b> '
+                 f'<span class="muted" style="font-size:12px">{escape(st.get("started", ""))} ~ {escape(st.get("finished", "") or "…")}</span>{steps}</div>')
+    last = ""
+    if run and isinstance(run.get("out"), dict):
+        keys = [(k, run["out"][k]) for k in ("themes", "industry", "bill_feed", "legis", "bill_watch", "policy") if k in run["out"]]
+        if keys:
+            last = ('<details style="margin-top:6px"><summary class="muted">마지막 시장·정책 수집(' + escape(run.get("when", "")) + ') 결과</summary>'
+                    + "".join(f'<div style="font-size:12px;margin:2px 0"><b>{escape(k)}</b>: <span class="muted">{escape(json.dumps(v, ensure_ascii=False, default=str)[:260])}</span></div>' for k, v in keys) + '</details>')
+        else:
+            last = f'<div class="muted" style="font-size:12px;margin-top:6px">마지막 시장·정책 수집({escape(run.get("when", ""))})에 법안·테마 단계 기록이 없어요 — 서버가 아직 새 버전이 아닐 수 있어요.</div>'
+    elif not run:
+        last = '<div class="muted" style="font-size:12px;margin-top:6px">시장·정책 수집 기록이 없어요 (서버가 새 버전으로 한 번 수집해야 기록돼요).</div>'
+    counts = (f'법안 {diag["bills"]}건 · 입법 중 {diag["in_process"]} · 단계 기록 {diag["tracks"]} · 영향 기업 계산됨 {diag["cached"]} · 제안이유 {diag["texts"]} · '
+              f'테마 {diag["themes"]}(종목 {diag["theme_stocks"]}) · 업종 매핑 {diag["industries"]}종목 · 공포일 확인 {diag["promul"]}')
+    btn = ('<form method="post" action="/legis/prepare" class="filters" style="margin:8px 0 0">'
+           f'<button{" disabled" if running else ""}>{"준비하는 중…" if running else "지금 준비하기"}</button>'
+           '<span class="muted" style="font-size:12px">테마·업종 → 국회 법안 → 제안이유 → 공포일 → 영향 기업을 차례로 받아 계산해요 (처음엔 5~8분)</span></form>')
+    msg = ""
+    body = (f'<div class="muted" style="font-size:13px">{escape(counts)}</div>' + btn + steps + last)
+    if ok and not running:
+        return (f'<details class="card"><summary><b>준비 상태</b> <span class="muted">✔ 정상 — 필요하면 다시 준비</span></summary>{body}</details>', False)
+    head = ('<b>준비 상태</b> ' + ("<span class=\"warn\">진행 중</span>" if running else "<span class=\"warn\">비어 있는 게 있어요</span>"))
+    probs = "".join(f'<div class="warn" style="margin-top:4px">· {escape(x)}</div>' for x in problems)
+    return (f'<div class="card">{head}{probs}{body}</div>', running)
+
+
 def view_legis(conn, q):
     """아이디어 → 입법 영향 기업: 지금 입법 중인 법안이 영향을 줄 기업 후보와 공포 시기를 법안별·기업별로, 필터·정렬 포함"""
     import legis as lg
     import theme_map
-    try:
-        rows = lg.load_rows(conn)
-    except sqlite3.OperationalError:
-        rows = []
+    rows = lg.load_rows(conn)
+    diag = lg.diagnose(conn)
     mode = "stock" if q.get("m") == "stock" else "bill"
     submitted = "f" in q
     only_cand = (q.get("ne") == "1") if submitted else True
@@ -2260,12 +2311,9 @@ def view_legis(conn, q):
     mode_tabs = " ".join(
         (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{lab}</b>' if k == mode else
          f'<a class="chip" href="/ideas?{urlencode({**base, "m": k})}">{lab}</a>') for k, lab in (("bill", "법안별로 보기"), ("stock", "기업별로 보기")))
-    theme_ok = bool(theme_map.load(conn)["테마"])
-    warn = ""
-    if not total_all:
-        warn = ('<div class="card warn">입법 중인 법안이 아직 없어요. 서버를 업데이트한 뒤 <b>지금 수집 → 시장·정책만</b>을 한 번 돌려 주세요 (국회 법안 목록과 테마·업종을 받아 영향 기업을 계산해요).</div>')
-    elif not theme_ok or not n_cand and total_all > 20:
-        warn = '<div class="card warn">영향 기업 계산이 아직 안 됐어요 (테마·업종 자료 필요). 지금 수집 → 시장·정책만을 눌러 주세요.</div>'
+    warn, running = legis_prep_card(conn, diag, total_all, n_cand)
+    if q.get("msg"):
+        warn = f'<div class="card {"warn" if q["msg"].startswith("✖") else ""}">{escape(q["msg"])}</div>' + warn
     head = ('<div class="card"><b>입법 영향 기업</b>'
             '<div class="muted">지금 국회에서 입법 중인 법안(심사 중 + 통과했지만 공포 전)이 어떤 기업에 닿을 수 있는지와 <b>공포 시기</b>를 한 화면에서 봐요. '
             '법안을 하나씩 열지 않아도 수집 때 미리 계산해 둔 결과가 나와요. 기업 후보는 법안 문구를 테마·업종·기업명에 이은 짐작이고 호재·악재는 판단하지 않아요. '
@@ -2307,8 +2355,8 @@ def view_legis(conn, q):
                       + ("" if r["promul"]["kind"] in ("done", "none") else f'<div class="muted" style="font-size:12px">{escape(r["promul"]["note"])}</div>')
                       + (f'<div style="margin-top:3px">{" ".join(f"<span class=chip>{escape(c)}</span>" for c in r["concepts"][:3])}</div>' if r["concepts"] else "")
                       + f'<div style="margin-top:4px"><span class="muted" style="font-size:12px">영향 기업 후보 ({"본문" if r["has_text"] else "제목"} 기준):</span> {chips}{more}</div></div>')
-        body = f'<div class="card">{cards or "<div class=muted>조건에 맞는 법안이 없어요. 필터를 풀어 보세요.</div>"}{pager(len(sel))}</div>'
-        return page("입법 영향 기업", head + warn + body)
+        body = f'<div class="card">{cards or "<div class=muted>조건에 맞는 법안이 없어요. 위 필터를 풀거나 \'후보 있는 것만\'을 꺼 보세요.</div>"}{pager(len(sel))}</div>'
+        return page("입법 영향 기업", head + warn + body, refresh=running)
     # ---- 기업별
     agg = {}
     for r in sel:
@@ -2340,7 +2388,7 @@ def view_legis(conn, q):
     body = ('<div class="card"><div class="muted" style="margin-bottom:4px">같은 기업이 여러 법안에 걸쳐 있으면 한 줄로 묶어 보여 줘요. 공포 열은 그 기업에 닿는 법안 중 가장 빠른 확정·예상 공포일이에요.</div>'
             + (f'<div class="scroll"><table><tr><th>기업</th><th>법안 수</th><th>최고 단계</th><th>가장 빠른 공포</th><th>관련 법안 (영향 점수 높은 순)</th></tr>{trs}</table></div>' if trs else
                '<div class="muted">조건에 맞는 기업이 없어요. 필터를 풀어 보세요.</div>') + pager(len(items)) + '</div>')
-    return page("입법 영향 기업", head + warn + body)
+    return page("입법 영향 기업", head + warn + body, refresh=running)
 
 
 def view_calendar(conn, q):
@@ -5124,6 +5172,12 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 except Exception as e:
                     res = {"src": src, "error": f"확인 중 오류: {type(e).__name__}: {str(e)[:120]}"}
                 return self._send(200, "text/html; charset=utf-8", view_ext_check(res))
+            if path == "/legis/prepare" and settings_api:
+                n = min(int(self.headers.get("Content-Length") or 0), 4096)
+                self.rfile.read(n)
+                S = settings()
+                ok, why = S["legis_prepare"]() if "legis_prepare" in S else (False, "이 서버 버전은 지원하지 않아요")
+                return self._redirect("/ideas?" + urlencode({"t": "legis", "msg": ("✔ " if ok else "✖ ") + why}))
             if path.startswith("/bills/") and settings_api:
                 act = path[len("/bills/"):]
                 if act not in ("refresh", "add_rule", "del_rule", "link", "unlink", "fetch_text", "save_text"):

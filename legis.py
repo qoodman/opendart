@@ -266,32 +266,68 @@ def sync_promul(db_path, law_oc, log=print, days=150, session=None):
         conn.close()
 
 
-# ---------------- 화면용 읽기 ----------------
-def load_rows(conn, days=400):
-    """입법 중인 법안 전체 → [dict(key, title, name, date, url, status, kind, stage, stage_label, last, started, promul, concepts, stocks, n, has_text, text)]"""
-    ensure(conn)
-    tracks = {}
+# ---------------- 화면용 읽기 (쓰기 없음: 대시보드는 DB를 읽기 전용으로 열어요) ----------------
+_MEMO = {}          # 서버가 아직 계산 못 한 법안을 화면에서 즉석 계산한 결과 (프로세스가 떠 있는 동안 유지)
+
+
+def _q(conn, sql, args=()):
+    """표가 없거나 읽을 수 없으면 빈 목록 (한 표가 비었다고 화면 전체가 '법안 없음'이 되지 않게)"""
     try:
-        for k, d, s in conn.execute("SELECT bill_key, date, stage FROM bill_track ORDER BY date"):
-            tracks.setdefault(k, []).append((d, s))
+        return conn.execute(sql, args).fetchall()
     except sqlite3.OperationalError:
-        pass
+        return []
+
+
+def diagnose(conn):
+    """화면 진단용 개수들: 법안 수, 입법 중, 계산됨, 본문, 테마·업종, 공포일 확인"""
+    def n(sql):
+        r = _q(conn, sql)
+        return r[0][0] if r else 0
+    return dict(
+        bills=n("SELECT COUNT(*) FROM policy_items WHERE kind='법안' AND key!='_meta'"),
+        in_process=len(in_process(conn)),
+        tracks=n("SELECT COUNT(*) FROM bill_track"),
+        cached=n("SELECT COUNT(*) FROM bill_impact_cache"),
+        texts=n("SELECT COUNT(*) FROM bill_text WHERE text != ''"),
+        themes=n("SELECT COUNT(*) FROM theme_names"),
+        theme_stocks=n("SELECT COUNT(DISTINCT code) FROM theme_stocks"),
+        industries=n("SELECT COUNT(*) FROM industry_map"),
+        promul=n("SELECT COUNT(*) FROM bill_promul WHERE promulgated != ''"),
+    )
+
+
+def load_rows(conn, days=400, live_limit=150):
+    """입법 중인 법안 전체 → [dict(...)]. 서버가 영향 기업을 아직 계산하지 않은 법안은 최근 것부터 live_limit개까지 즉석에서 계산해 채움."""
+    tracks = {}
+    for k, d, s in _q(conn, "SELECT bill_key, date, stage FROM bill_track ORDER BY date"):
+        tracks.setdefault(k, []).append((d, s))
     cache = {}
-    for k, c, g, s, n, ht in conn.execute("SELECT key, concepts, groups, stocks, n, has_text FROM bill_impact_cache"):
+    for k, c, g, s, n, ht in _q(conn, "SELECT key, concepts, groups, stocks, n, has_text FROM bill_impact_cache"):
         cache[k] = dict(concepts=json.loads(c or "[]"), groups=json.loads(g or "[]"), stocks=json.loads(s or "[]"), n=n, has_text=bool(ht))
     promul = {}
-    for k, law, p, e, kd, ck in conn.execute("SELECT * FROM bill_promul"):
+    for k, law, p, e, kd, ck in _q(conn, "SELECT bill_key, law, promulgated, effective, kind, checked FROM bill_promul"):
         promul[k] = dict(law=law, promulgated=p, effective=e, kind=kd)
-    texts = {}
-    try:
-        texts = {k: t for k, t in conn.execute("SELECT bill_key, text FROM bill_text WHERE text != ''")}
-    except sqlite3.OperationalError:
-        pass
+    texts = {k: t for k, t in _q(conn, "SELECT bill_key, text FROM bill_text WHERE text != ''")}
+    data = None
+    live = 0
     out = []
     for key, title, date, url, status in in_process(conn, days):
         tr = tracks.get(key, [])
         idx, label, last = stage_info(tr, status)
-        c = cache.get(key) or dict(concepts=[], groups=[], stocks=[], n=0, has_text=False)
+        c = cache.get(key)
+        if c is None:                                    # 서버 계산 전: 즉석 계산 (테마·업종 자료가 있을 때만)
+            txt0 = texts.get(key, "")
+            memo = _MEMO.get((key, len(txt0)))
+            if memo is None and live < live_limit:
+                if data is None:
+                    data = theme_map.load(conn)
+                if data["테마"] or data["업종"]:
+                    r = bill_impact.analyze(conn, bill_name(title), txt0, top=15, data=data)
+                    memo = dict(concepts=[x for x, _ in r["concepts"]], groups=[[g[0], g[1], g[4]] for g in r["groups"][:8]],
+                                stocks=[[s["code"], s["name"], s["score"], (s["evidence"] or [""])[0]] for s in r["stocks"]], n=len(r["stocks"]), has_text=r["has_text"])
+                    _MEMO[(key, len(txt0))] = memo
+                    live += 1
+            c = memo or dict(concepts=[], groups=[], stocks=[], n=0, has_text=False)
         started = next((d for d, s in tr if s.startswith("발의")), date or "")
         txt = texts.get(key, "")
         out.append(dict(key=key, title=title, name=bill_name(title), date=date or "", url=url or "", status=status or "", kind=status_kind(status),
@@ -299,3 +335,64 @@ def load_rows(conn, days=400):
                         promul=promulgation(status, tr, promul.get(key), txt), concepts=c["concepts"], groups=c["groups"],
                         stocks=c["stocks"], n=c["n"], has_text=bool(txt) or c["has_text"]))
     return out
+
+
+# ---------------- 화면에서 '지금 준비하기' ----------------
+def prepare(db_path, assembly_key, law_oc, status_path, text_limit=30, log=print):
+    """대시보드 버튼용: 테마·업종 → 국회 법안 목록 → 제안이유 → 공포일 → 영향 기업 계산을 차례로 돌리고, 단계마다 결과·오류를 status_path(JSON)에 적음.
+    각 단계는 따로 try 해서 한 단계가 실패해도 나머지를 계속 시도하고, 실패 이유를 그대로 화면에 보여 줌."""
+    import industry
+    import bill_feed
+    names = ["테마·업종 자료", "국회 법안 목록", "제안이유 본문", "공포일(법제처)", "영향 기업 계산"]
+    steps = [dict(name=n, state="wait", msg="") for n in names]
+    st = dict(running=True, started=time.strftime("%Y-%m-%d %H:%M:%S"), finished="", steps=steps)
+
+    def save():
+        try:
+            with open(status_path, "w", encoding="utf-8") as f:
+                json.dump(st, f, ensure_ascii=False)
+        except OSError:
+            pass
+
+    def run(i, fn):
+        steps[i]["state"] = "run"
+        save()
+        try:
+            res = fn()
+            steps[i]["state"], steps[i]["msg"] = "ok", (res if isinstance(res, str) else json.dumps(res, ensure_ascii=False))[:300]
+        except Exception as e:
+            steps[i]["state"], steps[i]["msg"] = "fail", f"{type(e).__name__}: {str(e)[:260]}"
+        save()
+    save()
+
+    def themes():
+        a = theme_map.sync(db_path, log=log)
+        b = industry.sync(db_path, log=log)
+        return f"테마 {a} · 업종 {b}"
+    run(0, themes)
+
+    def feed():
+        if not assembly_key:
+            raise RuntimeError("열린국회정보 키(ASSEMBLY_API_KEY)가 없어요. 이 앱 .env 또는 부동산 앱 .env에 넣어 주세요")
+        r = bill_feed.sync(db_path, assembly_key, log=log)
+        if "실패" in r:
+            raise RuntimeError(r["실패"])
+        if not r.get("최근"):
+            raise RuntimeError(f"목록은 받았는데 최근 법안이 0건이에요 (전체 {r.get('전체')}건, 정렬 {r.get('순서')}) — 설정 → 법안·종목 확인의 응답을 캡처해 주세요")
+        return r
+    run(1, feed)
+    run(2, lambda: fetch_texts(db_path, text_limit, log=log))
+    run(3, lambda: sync_promul(db_path, law_oc, log=log))
+    run(4, lambda: refresh_cache(db_path, log=log))
+    st["running"] = False
+    st["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    save()
+    return st
+
+
+def read_status(status_path):
+    try:
+        with open(status_path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None

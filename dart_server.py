@@ -723,7 +723,40 @@ def run_market_policy(log=print):
     except Exception as e:
         out["lights"] = f"실패: {e}"
         log(f"신호등 기록 실패: {e}")
+    try:            # 화면(입법 영향 탭)에서 '마지막 수집이 무엇을 했나'를 볼 수 있게 결과를 적어 둠
+        (data_dir() / "market_run.json").write_text(json.dumps(
+            {"when": dt.datetime.now().strftime("%Y-%m-%d %H:%M"), "out": out}, ensure_ascii=False, default=str), encoding="utf-8")
+    except OSError:
+        pass
     return out
+
+
+_LEGIS_JOB = {"thread": None}
+
+
+def legis_prepare():
+    """입법 영향 탭의 '지금 준비하기': 테마·업종 → 국회 법안 목록 → 제안이유 → 공포일 → 영향 기업 계산을 백그라운드에서 돌림. (성공 여부, 안내)"""
+    import threading
+    import legis
+    t = _LEGIS_JOB["thread"]
+    if t is not None and t.is_alive():
+        return False, "이미 준비하는 중이에요. 아래 진행 상황을 확인하세요."
+    status = str(data_dir() / "legis_status.json")
+    db, key, oc = str(results_db()), env_shared("ASSEMBLY_API_KEY"), env_shared("LAW_OC")
+
+    def work():
+        try:
+            legis.prepare(db, key, oc, status)
+        except Exception as e:
+            try:
+                Path(status).write_text(json.dumps({"running": False, "finished": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                                    "steps": [{"name": "전체", "state": "fail", "msg": f"{type(e).__name__}: {str(e)[:200]}"}]}, ensure_ascii=False), encoding="utf-8")
+            except OSError:
+                pass
+    t = threading.Thread(target=work, daemon=True)
+    _LEGIS_JOB["thread"] = t
+    t.start()
+    return True, "준비를 시작했어요. 처음에는 테마·업종을 받느라 5~8분 걸려요. 이 화면이 자동으로 새로고침돼요."
 
 
 def bill_watch_run(log=print):
@@ -1622,7 +1655,7 @@ def cmd_web(args):
                     update_info=update_info, check_update=check_update, start_update=start_update,
                     backup_list=backup_list, backup_busy=backup_busy, backup_start=backup_start,
                     backup_file=backup_file, krx_key=krx_key_now, save_krx_key=save_krx_key,
-                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
+                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
     serve(results_db(), host=args.host, port=args.port, child_env=child_env,
           get_key=lambda: read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", ""),
           save_key=save_key, settings_api=settings_api)
