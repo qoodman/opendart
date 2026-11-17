@@ -20,7 +20,7 @@ import time
 import bill_impact
 import theme_map
 
-VER = "1"                    # 개념 사전·계산 방식이 바뀌면 올려서 저장값을 다시 계산
+VER = "2"                    # 개념 사전·계산 방식이 바뀌면 올려서 저장값을 다시 계산 (2: 테마 구성 종목도 저장)
 TERM_END = "2028-05-29"      # 22대 국회 임기 만료
 STAGES = (("발의", 1), ("소관위 회부", 2), ("소관위 상정", 3), ("소관위 처리", 4), ("법사위 처리", 5), ("본회의 처리", 6))
 STAGE_NAMES = {0: "발의 전", 1: "발의", 2: "소관위 회부", 3: "소관위 상정", 4: "소관위 처리", 5: "법사위 처리", 6: "본회의 통과"}
@@ -34,7 +34,15 @@ def ensure(conn):
         key TEXT PRIMARY KEY, sig TEXT, concepts TEXT, groups TEXT, stocks TEXT, n INTEGER, has_text INTEGER, computed TEXT);
     CREATE TABLE IF NOT EXISTS bill_promul (
         bill_key TEXT PRIMARY KEY, law TEXT, promulgated TEXT, effective TEXT, kind TEXT, checked TEXT);
+    CREATE TABLE IF NOT EXISTS legis_watch (code TEXT PRIMARY KEY, name TEXT, added TEXT, baselined INTEGER DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS legis_feedback (
+        scope TEXT, ref TEXT, code TEXT, name TEXT, verdict TEXT, created TEXT, PRIMARY KEY (scope, ref, code));
+    CREATE TABLE IF NOT EXISTS legis_alerted (k TEXT PRIMARY KEY);
     """)
+    try:                                        # 예전 DB에는 members 열이 없어서 한 번 늘림 (읽기 전용 연결에서는 호출하지 않아요)
+        conn.execute("ALTER TABLE bill_impact_cache ADD COLUMN members TEXT")
+    except sqlite3.OperationalError:
+        pass
 
 
 def status_kind(status):
@@ -149,6 +157,17 @@ def in_process(conn, days=400):
     return [r for r in rows if status_kind(r[4]) != "폐기"]
 
 
+def _members_of(r):
+    """분석 결과의 '가장 잘 맞는 작은 테마·업종' 구성 종목 → [[코드, 이름, 테마·업종 이름, 점수]] (한 종목은 가장 높은 점수 하나만).
+    점수 상위 목록에서 밀려도 관심 종목·종목 화면에서 놓치지 않게 따로 저장해요."""
+    best = {}
+    for m in r["members"]:
+        for code, name in m["stocks"]:
+            if code not in best or m["score"] > best[code][3]:
+                best[code] = [code, name, m["name"], round(m["score"], 1)]
+    return list(best.values())
+
+
 def refresh_cache(db_path, log=print, days=400):
     """입법 중인 법안마다 영향 기업을 계산해 저장 (바뀐 것만) → {계산, 건너뜀}"""
     conn = sqlite3.connect(db_path)
@@ -174,11 +193,12 @@ def refresh_cache(db_path, log=print, days=400):
                 skipped += 1
                 continue
             r = bill_impact.analyze(conn, bill_name(title), text, top=15, data=data)
-            conn.execute("INSERT OR REPLACE INTO bill_impact_cache VALUES (?,?,?,?,?,?,?,?)", (
+            conn.execute("INSERT OR REPLACE INTO bill_impact_cache (key, sig, concepts, groups, stocks, n, has_text, computed, members) VALUES (?,?,?,?,?,?,?,?,?)", (
                 key, sig, json.dumps([c for c, _ in r["concepts"]], ensure_ascii=False),
                 json.dumps([[g[0], g[1], g[4]] for g in r["groups"][:8]], ensure_ascii=False),
                 json.dumps([[s["code"], s["name"], s["score"], (s["evidence"] or [""])[0]] for s in r["stocks"]], ensure_ascii=False),
-                len(r["stocks"]), 1 if r["has_text"] else 0, dt.date.today().isoformat()))
+                len(r["stocks"]), 1 if r["has_text"] else 0, dt.date.today().isoformat(),
+                json.dumps(_members_of(r), ensure_ascii=False)))
             done += 1
             if done % 200 == 0:
                 conn.commit()
@@ -302,12 +322,17 @@ def load_rows(conn, days=400, live_limit=150):
     for k, d, s in _q(conn, "SELECT bill_key, date, stage FROM bill_track ORDER BY date"):
         tracks.setdefault(k, []).append((d, s))
     cache = {}
-    for k, c, g, s, n, ht in _q(conn, "SELECT key, concepts, groups, stocks, n, has_text FROM bill_impact_cache"):
-        cache[k] = dict(concepts=json.loads(c or "[]"), groups=json.loads(g or "[]"), stocks=json.loads(s or "[]"), n=n, has_text=bool(ht))
+    rows_c = _q(conn, "SELECT key, concepts, groups, stocks, n, has_text, members FROM bill_impact_cache")
+    if not rows_c:                                          # members 열이 없는 예전 DB
+        rows_c = [tuple(r) + (None,) for r in _q(conn, "SELECT key, concepts, groups, stocks, n, has_text FROM bill_impact_cache")]
+    for k, c, g, s, n, ht, mb in rows_c:
+        cache[k] = dict(concepts=json.loads(c or "[]"), groups=json.loads(g or "[]"), stocks=json.loads(s or "[]"), n=n, has_text=bool(ht),
+                        members=json.loads(mb or "[]"))
     promul = {}
     for k, law, p, e, kd, ck in _q(conn, "SELECT bill_key, law, promulgated, effective, kind, checked FROM bill_promul"):
         promul[k] = dict(law=law, promulgated=p, effective=e, kind=kd)
     texts = {k: t for k, t in _q(conn, "SELECT bill_key, text FROM bill_text WHERE text != ''")}
+    fb = feedback(conn)
     data = None
     live = 0
     out = []
@@ -324,16 +349,21 @@ def load_rows(conn, days=400, live_limit=150):
                 if data["테마"] or data["업종"]:
                     r = bill_impact.analyze(conn, bill_name(title), txt0, top=15, data=data)
                     memo = dict(concepts=[x for x, _ in r["concepts"]], groups=[[g[0], g[1], g[4]] for g in r["groups"][:8]],
-                                stocks=[[s["code"], s["name"], s["score"], (s["evidence"] or [""])[0]] for s in r["stocks"]], n=len(r["stocks"]), has_text=r["has_text"])
+                                stocks=[[s["code"], s["name"], s["score"], (s["evidence"] or [""])[0]] for s in r["stocks"]], n=len(r["stocks"]), has_text=r["has_text"],
+                                members=_members_of(r))
                     _MEMO[(key, len(txt0))] = memo
                     live += 1
-            c = memo or dict(concepts=[], groups=[], stocks=[], n=0, has_text=False)
+            c = memo or dict(concepts=[], groups=[], stocks=[], n=0, has_text=False, members=[])
         started = next((d for d, s in tr if s.startswith("발의")), date or "")
         txt = texts.get(key, "")
+        stocks, removed, added = apply_feedback(c["stocks"], c["concepts"], key, fb)
+        gone = {x[0] for x in removed}
+        top = {x[0] for x in stocks}
+        mem = [m for m in c.get("members", []) if m[0] not in gone and m[0] not in top]          # 점수 상위 밖의 테마 구성 종목
         out.append(dict(key=key, title=title, name=bill_name(title), date=date or "", url=url or "", status=status or "", kind=status_kind(status),
                         stage=idx, stage_label=label, last=last or date or "", started=started, tracks=tr,
                         promul=promulgation(status, tr, promul.get(key), txt), concepts=c["concepts"], groups=c["groups"],
-                        stocks=c["stocks"], n=c["n"], has_text=bool(txt) or c["has_text"],
+                        stocks=stocks, members=mem, removed=removed, added=added, n=len(stocks), has_text=bool(txt) or c["has_text"],
                         summary=summary_line(txt), nature=nature_hint(title, txt)))
     return out
 
@@ -526,3 +556,153 @@ def group_rows(rows):
         items.sort(key=lambda r: (r["stage"], r["last"] or ""), reverse=True)
         out.append(dict(rep=items[0], items=items, n=len(items)))
     return out
+
+
+
+# ---------------- 관심 종목 · 후보 직접 고치기 · 단계 변화 알림 ----------------
+def watch_list(conn):
+    """[(코드, 이름)] 관심 종목"""
+    return [(c, n or c) for c, n in _q(conn, "SELECT code, name FROM legis_watch ORDER BY added, code")]
+
+
+def feedback(conn):
+    """{'concept': {분야: {코드: (verdict, 이름)}}, 'bill': {법안키: {코드: (verdict, 이름)}}}"""
+    fb = {"concept": {}, "bill": {}}
+    for scope, ref, code, name, verdict in _q(conn, "SELECT scope, ref, code, name, verdict FROM legis_feedback"):
+        fb.setdefault(scope, {}).setdefault(ref, {})[code] = (verdict, name or code)
+    return fb
+
+
+def apply_feedback(stocks, concepts, key, fb):
+    """계산된 후보 [[코드, 이름, 점수, 근거]]에 사용자의 수정을 반영 → (후보, 제외한 것, 직접 추가한 것).
+    제외/추가 항목은 [(코드, 이름, 이유, scope, ref)] — 되돌리기에 scope·ref가 필요해요.
+    분야(개념) 수정은 그 분야의 모든 법안에, 법안 수정은 그 법안에만 적용돼요. 같은 기업에 둘이 충돌하면 법안 수정이 이겨요.
+    '직접 추가'한 기업은 점수 순위 맨 위에 와요."""
+    rules = {}
+    for cname in concepts or []:
+        for code, (v, nm) in fb.get("concept", {}).get(cname, {}).items():
+            rules[code] = (v, nm, f"분야 '{cname}'", "concept", cname)
+    for code, (v, nm) in fb.get("bill", {}).get(key, {}).items():
+        rules[code] = (v, nm, "이 법안", "bill", key)
+    out, removed, added, seen = [], [], [], set()
+    for code, name, score, ev in stocks:
+        r = rules.get(code)
+        if r and r[0] == "no":
+            removed.append((code, name, r[2], r[3], r[4]))
+            continue
+        if r and r[0] == "yes":
+            score, ev = max(score, 90.0), f"직접 추가 ({r[2]}) · {ev}"
+            added.append((code, name, r[2], r[3], r[4]))
+        out.append([code, name, score, ev])
+        seen.add(code)
+    for code, (v, nm, why, sc, rf) in rules.items():
+        if v == "yes" and code not in seen:
+            out.append([code, nm, 90.0, f"직접 추가 ({why})"])
+            added.append((code, nm, why, sc, rf))
+        elif v == "no" and code not in seen:
+            pass                                             # 원래 후보에 없던 기업의 '제외'는 화면에 안 보임
+    out.sort(key=lambda x: (-x[2], x[1]))
+    return out, removed, added
+
+
+def watch_hits(row, wcodes):
+    """이 법안에서 관심 종목이 걸린 항목 [[코드, 이름, 점수, 근거]] — 상위 후보에 있으면 그 점수, 점수 밖이어도 '테마 구성 종목'이면 약하게 포함"""
+    hits = [x for x in row["stocks"] if x[0] in wcodes]
+    seen = {x[0] for x in hits}
+    for code, name, theme, sc in row.get("members", []):
+        if code in wcodes and code not in seen:
+            hits.append([code, name, sc, f"테마·업종 {theme}의 구성 종목"])
+    return hits
+
+
+def watch_alerts(db_path, log=print):
+    """관심 종목에 영향을 주는 법안의 새 등장·단계 진행·공포(확정/예상)를 알림 문구로 (이미 알린 것은 제외).
+    관심 종목을 새로 넣은 직후 첫 계산은 지금까지의 것을 '이미 알린 것'으로 쳐서 알림이 쏟아지지 않게 함. → [문구...]"""
+    conn = sqlite3.connect(db_path)
+    try:
+        ensure(conn)
+        watch = watch_list(conn)
+        if not watch:
+            return []
+        rows = load_rows(conn)
+        done = {k for (k,) in conn.execute("SELECT k FROM legis_alerted")}
+        base = {c: b for c, b in conn.execute("SELECT code, baselined FROM legis_watch")}
+        msgs, new_keys = [], []
+        for code, wname in watch:
+            fresh = []
+            for r in rows:
+                hit = next(iter(watch_hits(r, {code})), None)
+                if not hit:
+                    continue
+                pm = r["promul"]
+                ks = [(f"new:{r['key']}:{code}", f"[새 법안] {wname} ← {r['name'][:42]} ({r['stage_label'] or '발의'})"),
+                      (f"stage:{r['key']}:{code}:{r['stage']}", f"[{r['stage_label'] or '발의'}] {wname} ← {r['name'][:42]}")]
+                if pm["kind"] == "done":
+                    ks.append((f"prom:{r['key']}:{code}:done", f"[공포 확정 {pm['date']}] {wname} ← {r['name'][:42]}" + (f" (시행 {pm['effective']})" if pm["effective"] else "")))
+                elif pm["kind"] == "est" and pm["date"]:
+                    ks.append((f"prom:{r['key']}:{code}:est", f"[공포 예상 {pm['date'][5:]}경] {wname} ← {r['name'][:42]}"))
+                for k, m in ks:
+                    if k not in done:
+                        fresh.append((k, m))
+            if not base.get(code):                                   # 첫 계산: 조용히 기준선만
+                new_keys += [k for k, _ in fresh]
+                conn.execute("UPDATE legis_watch SET baselined=1 WHERE code=?", (code,))
+                continue
+            # 같은 법안의 '새 법안'과 '단계'가 한꺼번에 나오면 '새 법안' 한 줄만
+            seen_new = {k.split(":")[1] for k, _ in fresh if k.startswith("new:")}
+            for k, m in fresh:
+                if k.startswith("stage:") and k.split(":")[1] in seen_new:
+                    new_keys.append(k)
+                    continue
+                new_keys.append(k)
+                msgs.append(m)
+        conn.executemany("INSERT OR IGNORE INTO legis_alerted VALUES (?)", [(k,) for k in new_keys])
+        conn.commit()
+        log(f"관심 종목 입법 알림: 관심 {len(watch)}종목 · 새 알림 {len(msgs)}건")
+        return msgs
+    finally:
+        conn.close()
+
+
+def for_stock(conn, code, limit=6):
+    """종목 화면용: 이 종목에 영향을 줄 수 있는 입법 중 법안 (저장된 영향 기업 계산 + 직접 추가분). 전체를 읽지 않고 이 종목이 든 것만 가볍게 읽어요."""
+    like = f'%"{code}"%'
+    got = _q(conn, "SELECT key, concepts, stocks, members FROM bill_impact_cache WHERE stocks LIKE ? OR members LIKE ?", (like, like))
+    if not got:                                               # members 열이 없는 예전 DB
+        got = [tuple(r) + (None,) for r in _q(conn, "SELECT key, concepts, stocks FROM bill_impact_cache WHERE stocks LIKE ?", (like,))]
+    cand = {}
+    for k, c, st, mb in got:
+        stocks_ = json.loads(st or "[]")
+        if not any(x[0] == code for x in stocks_):             # 상위 후보에는 없고 테마 구성 종목으로만 걸린 경우: 약한 후보로 넣음
+            m = next((x for x in json.loads(mb or "[]") if x[0] == code), None)
+            if m:
+                stocks_.append([m[0], m[1], m[3], f"테마·업종 {m[2]}의 구성 종목"])
+        cand[k] = (json.loads(c or "[]"), stocks_)
+    for (k,) in _q(conn, "SELECT ref FROM legis_feedback WHERE scope='bill' AND code=? AND verdict='yes'", (code,)):
+        if k not in cand:
+            row = _q(conn, "SELECT concepts, stocks FROM bill_impact_cache WHERE key=?", (k,))
+            cand[k] = (json.loads(row[0][0] or "[]"), json.loads(row[0][1] or "[]")) if row else ([], [])
+    if not cand:
+        return []
+    fb = feedback(conn)
+    out = []
+    for key, (concepts, stocks) in cand.items():
+        kept, _, _ = apply_feedback(stocks, concepts, key, fb)
+        hit = next((x for x in kept if x[0] == code), None)
+        if not hit:
+            continue
+        pi = _q(conn, "SELECT title, date, url, status FROM policy_items WHERE key=?", (key,))
+        if not pi or status_kind(pi[0][3]) == "폐기":
+            continue
+        title, date, url, status = pi[0]
+        tr = [(d, st) for d, st in _q(conn, "SELECT date, stage FROM bill_track WHERE bill_key=? ORDER BY date", (key,))]
+        idx, label, last = stage_info(tr, status)
+        pm = _q(conn, "SELECT law, promulgated, effective, kind FROM bill_promul WHERE bill_key=?", (key,))
+        promul_row = dict(law=pm[0][0], promulgated=pm[0][1], effective=pm[0][2], kind=pm[0][3]) if pm else None
+        tx = _q(conn, "SELECT text FROM bill_text WHERE bill_key=? AND text != ''", (key,))
+        txt = tx[0][0] if tx else ""
+        out.append(dict(key=key, name=bill_name(title), kind=status_kind(status), stage=idx, stage_label=label, last=last or date or "",
+                        started=next((d for d, s in tr if s.startswith("발의")), date or ""), promul=promulgation(status, tr, promul_row, txt),
+                        score=hit[2], evidence=hit[3], summary=summary_line(txt), nature=nature_hint(title, txt), has_text=bool(txt)))
+    out.sort(key=lambda r: (r["stage"], r["last"], r["score"]), reverse=True)
+    return out[:limit]

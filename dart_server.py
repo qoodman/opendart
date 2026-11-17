@@ -158,6 +158,8 @@ SETTINGS_SPEC = [
      "입법 중인 법안마다 영향을 받을 수 있는 기업 후보·공포 시기를 미리 계산해 둡니다 (수집 때)."),
     ("시장·정책", "DART_BILL_TEXT_PER_RUN", "법안 제안이유 받기 (한 번에 최대 건수)", "int:0:1000", "100",
      "국회 의안정보 페이지에서 제안이유를 읽어 영향 기업 짐작을 정확하게 합니다. 0이면 받지 않아요. 연속 5번 실패하면 멈춰요."),
+    ("알림", "DART_LEGIS_NOTIFY", "관심 종목 입법 소식 알림", "bool", "1",
+     "입법 영향 탭에서 정한 관심 종목에 영향을 주는 법안이 새로 생기거나 단계(소관위·법사위·본회의)가 바뀌거나 공포(확정·예상)가 잡히면 알립니다. 관심 종목을 처음 넣을 때는 알리지 않아요."),
     ("시장·정책", "DART_ETF_SHARE", "ETF 거래대금 비중 받기 (시장 지표)", "bool", "1",
      "KRX 키가 있어야 합니다. KRX 'ETF 일별매매정보'를 이용신청하면 과거까지 채우고, 아니면 장 마감 뒤(16시 이후) 수집한 날부터 쌓입니다."),
     ("시장·정책", "DART_NEWS", "해외 통신 속보 제목 받기 (로이터·AP·블룸버그·연합)", "bool", "1",
@@ -708,6 +710,7 @@ def run_market_policy(log=print):
                 res["제안이유"] = legis.fetch_texts(results_db(), per, log=log)
             res["공포일"] = legis.sync_promul(results_db(), env_shared("LAW_OC"), log=log)
             res["영향 기업"] = legis.refresh_cache(results_db(), log=log)
+            res["관심 종목 알림"] = legis_watch_notify(log)
             out["legis"] = res
         except Exception as e:
             out["legis"] = f"실패: {e}"
@@ -729,6 +732,109 @@ def run_market_policy(log=print):
     except OSError:
         pass
     return out
+
+
+def legis_watch_notify(log=print):
+    """관심 종목에 영향을 주는 법안의 새 등장·단계 진행·공포 소식을 ntfy로 (처음 등록한 직후 첫 계산은 조용히)"""
+    import legis
+    msgs = legis.watch_alerts(str(results_db()), log=log)
+    if msgs and env("DART_LEGIS_NOTIFY", "1") != "0":
+        url = env("DASHBOARD_URL")
+        lines = msgs[:7] + ([f"…외 {len(msgs) - 7}건"] if len(msgs) > 7 else [])
+        try:
+            notify(f"관심 종목 입법 소식 {len(msgs)}건", "\n".join(lines), click=(url.rstrip("/") + "/ideas?t=legis&w=1&f=1") if url else "", tags=("scroll",))
+        except Exception as e:
+            log(f"관심 종목 입법 알림 실패: {e}")
+    return len(msgs)
+
+
+def legis_action(action, form):
+    """입법 영향 탭·법안 상세의 버튼들: 관심 종목 추가·삭제·가져오기, 후보 제외·추가·되돌리기. (성공 여부, 한 줄 안내)"""
+    import legis
+    import dart_web
+
+    def one(k):
+        return (form.get(k) or "").strip()
+
+    def pick_stock(conn, raw):
+        hits = dart_web.resolve_stock(conn, raw)
+        if not hits:
+            return None, f"'{raw}' 종목을 못 찾았어요. 6자리 코드로 넣어 보세요."
+        exact = [h for h in hits if (h[1] or "").replace(" ", "") == raw.replace(" ", "")]
+        if len(hits) > 1 and not exact:
+            return None, "여러 종목이 맞아요: " + ", ".join(f"{n}({c})" for c, n in hits[:6]) + " — 6자리 코드로 넣어 주세요."
+        code, name = (exact or hits)[0]
+        if not name:                                  # 이름을 못 찾았으면 테마·업종 자료의 이름으로
+            import theme_map
+            name = theme_map.load(conn)["이름"].get(code, "")
+        return (code, name), ""
+    conn = sqlite3.connect(results_db())
+    try:
+        legis.ensure(conn)
+        now = dt.date.today().isoformat()
+        if action == "watch_add":
+            raws = [x.strip() for x in one("stock").replace("，", ",").split(",") if x.strip()]
+            if not raws:
+                return False, "종목 이름이나 코드를 넣어 주세요."
+            added = []
+            for raw in raws:
+                st, why = pick_stock(conn, raw)
+                if not st:
+                    return False, why
+                conn.execute("INSERT OR IGNORE INTO legis_watch (code, name, added, baselined) VALUES (?,?,?,0)", (st[0], st[1], now))
+                added.append(st[1] or st[0])
+            conn.commit()
+            return True, f"관심 종목에 추가했어요: {', '.join(added)} (지금까지의 법안은 알리지 않고, 새로 생기거나 단계가 바뀔 때부터 알려요)"
+        if action == "watch_del":
+            conn.execute("DELETE FROM legis_watch WHERE code=?", (one("code"),))
+            conn.commit()
+            return True, "관심 종목에서 뺐어요."
+        if action == "watch_import":
+            names = dart_web.known_names(conn)
+            codes = []
+            try:
+                codes += [r[0] for r in conn.execute("SELECT code FROM scorecard_stock")]
+            except sqlite3.OperationalError:
+                pass
+            try:
+                codes += [r[0] for r in conn.execute("SELECT DISTINCT code FROM bill_links")]
+            except sqlite3.OperationalError:
+                pass
+            n = 0
+            for code in dict.fromkeys(codes):
+                cur = conn.execute("INSERT OR IGNORE INTO legis_watch (code, name, added, baselined) VALUES (?,?,?,0)", (code, names.get(code, ""), now))
+                n += cur.rowcount
+            conn.commit()
+            return True, f"'내 종목 점수'와 법안 감시 종목에서 {n}개를 관심 종목으로 가져왔어요." if n else "새로 가져올 종목이 없어요 (내 종목 점수에서 종목을 평가하면 여기로 가져올 수 있어요)."
+        if action in ("fb_no", "fb_yes", "fb_del"):
+            scope, ref = one("scope"), one("ref")
+            if scope not in ("concept", "bill") or not ref:
+                return False, "대상을 알 수 없어요."
+            if action == "fb_del":
+                conn.execute("DELETE FROM legis_feedback WHERE scope=? AND ref=? AND code=?", (scope, ref, one("code")))
+                conn.commit()
+                return True, "수정을 되돌렸어요."
+            if action == "fb_yes":
+                st, why = pick_stock(conn, one("stock"))
+                if not st:
+                    return False, why
+                code, name = st
+            else:
+                code, name = one("code"), one("name")
+                if not code:
+                    return False, "기업을 알 수 없어요."
+            conn.execute("INSERT OR REPLACE INTO legis_feedback VALUES (?,?,?,?,?,?)", (scope, ref, code, name, "yes" if action == "fb_yes" else "no", now))
+            conn.commit()
+            where = f"분야 '{ref}'의 모든 법안" if scope == "concept" else "이 법안"
+            return True, f"{name or code}: {where}에서 {'후보에 추가' if action == 'fb_yes' else '후보에서 제외'}했어요."
+        return False, "알 수 없는 동작이에요."
+    except Exception as e:
+        return False, f"{type(e).__name__}: {str(e)[:120]}"
+    finally:
+        conn.close()
+
+
+_LEGIS_JOB = {"thread": None}
 
 
 def legis_prepare():
@@ -1665,7 +1771,7 @@ def cmd_web(args):
                     update_info=update_info, check_update=check_update, start_update=start_update,
                     backup_list=backup_list, backup_busy=backup_busy, backup_start=backup_start,
                     backup_file=backup_file, krx_key=krx_key_now, save_krx_key=save_krx_key,
-                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
+                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
     serve(results_db(), host=args.host, port=args.port, child_env=child_env,
           get_key=lambda: read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", ""),
           save_key=save_key, settings_api=settings_api)
