@@ -314,7 +314,10 @@ def ext_check_card(S):
             '<form method="post" action="/settings/ext-check" class="filters" style="margin:8px 0 0">'
             f'<button name="src" value="krx"{"" if krx_ok else " disabled"}>KRX 확인</button>'
             f'<button name="src" value="lending"{"" if dg_ok else " disabled"}>대차거래 확인</button>'
-            '<button name="src" value="bonds">DART 채권·증자 확인</button></form>'
+            '<button name="src" value="bonds">DART 채권·증자 확인</button>'
+            '<button name="src" value="news">속보(뉴스) 확인</button>'
+            f'<button name="src" value="etf"{"" if krx_ok else " disabled"}>ETF 거래대금 확인</button>'
+            '<button name="src" value="ecos">회사채 금리(ECOS) 확인</button></form>'
             + ('' if krx_ok else '<div class="muted">KRX 키를 먼저 저장해 주세요.</div>')
             + ('' if dg_ok else '<div class="muted">공공데이터포털 키(DATA_GO_KR_KEY)가 없어서 대차거래는 확인할 수 없어요.</div>') + '</div>')
 
@@ -347,7 +350,8 @@ def view_ext_check(res):
                      + (f'<div class="muted">{info}</div>' if info else "")
                      + (f'<div class="warn" style="margin-top:4px">{escape(it["note"])}</div>' if it.get("note") else "")
                      + fields + sample + '</div>')
-    head = {"krx": "KRX Open API 연결 확인", "lending": "주식 대차거래 연결 확인", "bonds": "DART 채권·증자 공시 연결 확인"}[res["src"]]
+    head = {"krx": "KRX Open API 연결 확인", "lending": "주식 대차거래 연결 확인", "bonds": "DART 채권·증자 공시 연결 확인",
+            "news": "해외 통신 속보 연결 확인", "etf": "ETF 거래대금 연결 확인", "ecos": "회사채 금리(ECOS) 연결 확인"}[res["src"]]
     return page(head, f'<h2>{head}</h2>' + "".join(cards)
                 + '<p class="muted">✖가 있으면 이유를 적어 두었어요. 대차거래는 필드 이름을 이름 규칙으로 찾기 때문에, '
                   '\'역할별로 찾은 필드\'가 틀려 보이면 이 화면을 캡처해서 보내 주세요.</p>' + back)
@@ -1549,9 +1553,14 @@ def view_news(conn, q):
                       f'<div class="muted" style="font-size:12px">{escape(src_name)} · {when} (한국 시간) '
                       + "".join(f'<span class="chip">{escape(x)}</span> ' for x in tl) + '</div></div>')
         body = f'<div class="card">{items}</div>'
+    msg = q.get("msg", "")
+    refresh = ('<form method="post" action="/news/refresh" class="filters" style="margin:6px 0"><button>지금 받기</button>'
+               + (f' <span class="{"muted" if not msg.startswith("✖") else "warn"}">{escape(msg)}</span>' if msg else
+                  ' <span class="muted">서버가 설정한 간격마다 자동으로 받지만, 바로 확인하고 싶을 때 눌러요</span>')
+               + ' <a class="chip" href="/settings">연결 확인(설정)</a></form>')
     note = ('<div class="muted" style="font-size:12px">구글 뉴스 검색으로 제목·링크만 모았어요 (본문은 원문 사이트에서). 실시간이 아니라 몇 분~수십 분 늦을 수 있고, '
             '주제 표시는 제목 단어로 단순하게 나눈 거라 틀릴 수 있어요. 기사가 주가를 움직였다는 뜻이 아니에요.</div>')
-    return page("속보", hub_tabs_row("/news") + filt + body + note + news_impact_card(conn))
+    return page("속보", hub_tabs_row("/news") + refresh + filt + body + note + news_impact_card(conn))
 
 
 def news_impact_card(conn):
@@ -4351,13 +4360,17 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 n = min(int(self.headers.get("Content-Length") or 0), 4096)
                 form = parse_qs(self.rfile.read(n).decode("utf-8", "ignore"))
                 src = (form.get("src") or [""])[0]
-                if src not in ("krx", "lending", "bonds"):
+                if src not in ("krx", "lending", "bonds", "news", "etf", "ecos"):
                     return self._redirect("/settings")
                 try:
                     res = settings()["ext_check"](src)
                 except Exception as e:
                     res = {"src": src, "error": f"확인 중 오류: {type(e).__name__}: {str(e)[:120]}"}
                 return self._send(200, "text/html; charset=utf-8", view_ext_check(res))
+            if path == "/news/refresh" and settings_api:
+                S = settings()
+                ok, why = S["news_refresh"]() if "news_refresh" in S else (False, "이 서버 버전은 지금 받기를 지원하지 않아요")
+                return self._redirect("/news?" + urlencode({"msg": ("✔ " if ok else "✖ ") + why}))
             if path == "/settings/krx-key" and settings_api:
                 n = min(int(self.headers.get("Content-Length") or 0), 4096)
                 form = parse_qs(self.rfile.read(n).decode("utf-8", "ignore"))

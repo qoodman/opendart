@@ -104,3 +104,36 @@ def series(conn):
     except sqlite3.OperationalError:
         return []
     return [(d, 100.0 * e / (e + s)) for d, e, s in rows if e and s]
+
+
+def check(key, session=None, today=None):
+    """설정 → 연결 확인용: KRX ETF 일별매매정보(이용신청 여부)와 네이버 ETF 목록. [{op, ok, day, total, sample, note}]"""
+    today = today or dt.date.today()
+    items = []
+    it = dict(op=f"KRX ETF 일별매매정보 ({KRX_ETF_SERVICE})", ok=False, day="", total=0, sample=None, note="")
+    if not key:
+        it["note"] = "KRX 키가 없어요. 설정에서 먼저 저장해 주세요."
+    else:
+        try:
+            for day in krx_api.recent_days(today, n=5):
+                rows = krx_api.call(KRX_ETF_SERVICE, day, key, session=session)
+                if rows:
+                    it.update(ok=True, day=day, total=len(rows), sample=rows[0])
+                    break
+            else:
+                it.update(ok=True, note="호출은 됐는데 최근 5거래일 자료가 비어 있어요")
+        except krx_api.KrxError as e:
+            it["note"] = f"{e} — KRX 오픈API에서 'ETF 일별매매정보'를 이용신청하세요. 신청 전이어도 네이버로 오늘 값부터 쌓여요."
+        except Exception as e:
+            it["note"] = f"{type(e).__name__}: {str(e)[:120]}"
+    items.append(it)
+    it = dict(op="네이버 증권 ETF 목록 (키 불필요)", ok=False, day="", total=0, sample=None, note="")
+    try:
+        val, n = naver_total(session)
+        it.update(ok=bool(val), total=n, day="지금 시각 기준 당일 누적", sample={"ETF 수": n, "거래대금 합(원)": f"{val:,.0f}" if val else "-"})
+        if not val:
+            it["note"] = "목록은 받았는데 거래대금 필드(amonut)를 못 찾았어요"
+    except Exception as e:
+        it["note"] = f"{type(e).__name__}: {str(e)[:120]}"
+    items.append(it)
+    return items

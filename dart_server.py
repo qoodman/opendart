@@ -961,6 +961,37 @@ def calendar_tick(now):
            click=(url.rstrip("/") + "/calendar") if url else "", tags=("calendar",))
 
 
+def news_collect(alert=True):
+    """속보 제목을 받고 (alert이면) 속보·키워드 기사를 ntfy로 알림 → {기사, 새 기사, 검색 실패, 알림}"""
+    import news
+    res = news.sync(results_db())
+    res["알림"] = 0
+    if res.get("검색 실패") == len(news.FEEDS) or not alert or env("DART_NEWS_NOTIFY", "1") == "0":
+        return res
+    conn = sqlite3.connect(results_db())
+    try:
+        hits, total = news.pending_alerts(conn, env("DART_NEWS_KEYWORDS", ""))
+    finally:
+        conn.close()
+    if hits:
+        url = env("DASHBOARD_URL")
+        lines = [f"[{h[2] or '뉴스'}] {h[1][:90]}" for h in hits] + ([f"…외 {total - len(hits)}건"] if total > len(hits) else [])
+        notify(f"증시 속보 {total}건", "\n".join(lines), click=(url.rstrip("/") + "/news") if url else (hits[0][3] or ""), tags=("newspaper",))
+        res["알림"] = total
+    return res
+
+
+def news_refresh_web():
+    """속보 화면의 '지금 받기' 버튼: (성공 여부, 한 줄 결과)"""
+    try:
+        res = news_collect(alert=True)
+    except Exception as e:
+        return False, f"받는 중 오류: {type(e).__name__}: {str(e)[:100]}"
+    if res.get("검색 실패") and res["검색 실패"] == len(__import__("news").FEEDS):
+        return False, "검색이 전부 실패했어요 (설정 → 외부 데이터 연결 확인 → 속보 확인에서 이유를 볼 수 있어요)"
+    return True, f"기사 {res['기사']}건 확인 · 새 기사 {res['새 기사']}건 · 검색 실패 {res['검색 실패']} · 알림 {res['알림']}건"
+
+
 def news_tick(now):
     """10분마다 오는 tick에서, 설정한 간격(기본 20분)이 지났으면 해외 통신 속보 제목을 받고 속보·키워드 기사를 알림"""
     if env("DART_NEWS", "1") == "0":
@@ -977,22 +1008,10 @@ def news_tick(now):
     if now.timestamp() - last < every * 60 - 30:
         return
     state.write_text(str(now.timestamp()))
+    res = news_collect(alert=True)
     import news
-    res = news.sync(results_db())
     if res.get("검색 실패") == len(news.FEEDS):
         print("뉴스 검색이 전부 실패했어요 (네트워크 확인)", flush=True)
-        return
-    if env("DART_NEWS_NOTIFY", "1") == "0":
-        return
-    conn = sqlite3.connect(results_db())
-    try:
-        hits, total = news.pending_alerts(conn, env("DART_NEWS_KEYWORDS", ""))
-    finally:
-        conn.close()
-    if hits:
-        url = env("DASHBOARD_URL")
-        lines = [f"[{h[2] or '뉴스'}] {h[1][:90]}" for h in hits] + ([f"…외 {total - len(hits)}건"] if total > len(hits) else [])
-        notify(f"증시 속보 {total}건", "\n".join(lines), click=(url.rstrip("/") + "/news") if url else (hits[0][3] or ""), tags=("newspaper",))
 
 
 def cmd_tick(args):
@@ -1352,6 +1371,15 @@ def ext_check(src):
             return {"src": "bonds", "error": "DART 키가 아직 없어요. 설정에서 먼저 저장해 주세요."}
         import dart_bonds
         return {"src": "bonds", "items": dart_bonds.check(dk, str(data_dir() / "dart_cache"))}
+    if src == "news":
+        import news
+        return {"src": "news", "items": news.check()}
+    if src == "etf":
+        import etf_share
+        return {"src": "etf", "items": etf_share.check(krx_key_now())}
+    if src == "ecos":
+        import stock_market
+        return {"src": "ecos", "items": stock_market.check_credit(env_shared("ECOS_API_KEY"))}
     key = env_shared("DATA_GO_KR_KEY")
     if not key:
         return {"src": "lending", "error": "공공데이터포털 키(DATA_GO_KR_KEY)가 없어요. 서버 .env나 부동산 앱 .env에 넣어 주세요."}
@@ -1380,7 +1408,7 @@ def cmd_web(args):
                     update_info=update_info, check_update=check_update, start_update=start_update,
                     backup_list=backup_list, backup_busy=backup_busy, backup_start=backup_start,
                     backup_file=backup_file, krx_key=krx_key_now, save_krx_key=save_krx_key,
-                    ext_check=ext_check, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
+                    ext_check=ext_check, news_refresh=news_refresh_web, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
     serve(results_db(), host=args.host, port=args.port, child_env=child_env,
           get_key=lambda: read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", ""),
           save_key=save_key, settings_api=settings_api)

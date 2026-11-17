@@ -514,3 +514,37 @@ def regime(inds):
     if score <= -3:
         return "약세", score, n
     return "중립", score, n
+
+
+def check_credit(key, log=lambda m: None):
+    """설정 → 연결 확인용: ECOS에서 회사채 3년(AA-)·국고채 3년 표·항목을 찾고 최근 값을 읽는지. [{op, ok, day, total, sample, note}]"""
+    items = []
+    if not key:
+        return [dict(op="ECOS 키", ok=False, day="", total=0, sample=None, note="ECOS_API_KEY가 없어요 (이 앱 .env 또는 부동산 앱 .env).")]
+    try:
+        api = Ecos(key)
+        found = discover(api, log)
+    except Exception as e:
+        return [dict(op="ECOS 표 찾기", ok=False, day="", total=0, sample=None, note=f"{type(e).__name__}: {str(e)[:120]}")]
+    today = dt.date.today()
+    for t in ECOS_TARGETS:
+        if t.key not in ("ktb3", "corp3"):
+            continue
+        it = dict(op=f"{t.label}", ok=False, day="", total=0, sample=None, note="")
+        c = found.get(t.key)
+        if not c:
+            it["note"] = "ECOS에서 표·항목을 이름으로 못 찾았어요 (이름 규칙을 고쳐야 해요 — 이 화면을 캡처해서 보내 주세요)"
+            items.append(it)
+            continue
+        try:
+            rows = api.search(c["stat"], c["cycle"], (today - dt.timedelta(days=20)).strftime("%Y%m%d"), today.strftime("%Y%m%d"), c["item"])
+            last = rows[-1] if rows else {}
+            it.update(ok=bool(rows), total=len(rows), day=last.get("TIME", ""),
+                      sample={"통계표": f'{c["stat"]} {c["table"]}', "항목": c["item_name"], "항목코드": c["item"], "주기": c["cycle"],
+                              "최근 값": last.get("DATA_VALUE", "-")})
+            if not rows:
+                it["note"] = "표는 찾았는데 최근 20일 값이 없어요"
+        except Exception as e:
+            it["note"] = f"{type(e).__name__}: {str(e)[:120]}"
+        items.append(it)
+    return items

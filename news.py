@@ -153,3 +153,24 @@ def recent(conn, hours=48, topic="", source="", limit=200):
         kst = (dt.datetime.strptime(pub, "%Y-%m-%d %H:%M") + dt.timedelta(hours=9)).strftime("%m-%d %H:%M")
         out.append((title, src or feed, link, kst, tl, bool(br)))
     return out[:limit]
+
+
+def check(session=None):
+    """설정 → 연결 확인용: 검색어(언론사)별로 실제로 기사가 받아지는지. [{op, ok, day, total, sample, note}]"""
+    items = []
+    for name, q, hl, gl, ceid in FEEDS:
+        it = dict(op=f"{name} — 구글 뉴스 검색 ({q[:48]}…)", ok=False, day="", total=0, sample=None, note="")
+        try:
+            arts = fetch(q, hl, gl, ceid, session)
+            it.update(ok=True, total=len(arts))
+            if arts:
+                head, src, link, pub = max(arts, key=lambda a: a[3])
+                kst = (dt.datetime.strptime(pub, "%Y-%m-%d %H:%M") + dt.timedelta(hours=9)).strftime("%Y-%m-%d %H:%M")
+                it.update(day=kst + " (한국 시간, 가장 최근 기사)", sample={"제목": head, "언론사": src, "링크": link, "발행(UTC)": pub,
+                                                                    "주제": ", ".join(topics_of(head)) or "-", "속보": "예" if is_breaking(head) else "아니오"})
+            else:
+                it["note"] = "검색은 되는데 최근 하루 기사가 없어요 (검색어가 너무 좁거나 구글이 결과를 비웠을 수 있어요)"
+        except Exception as e:
+            it["note"] = f"{type(e).__name__}: {str(e)[:120]}"
+        items.append(it)
+    return items
