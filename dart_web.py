@@ -1603,6 +1603,46 @@ def news_impact_card(conn):
     return head + body + '</div>'
 
 
+def industry_line(conn, a, b):
+    """하락 점검: 기간 a→b 업종별 기여도 한 줄 (업종 매핑이 있을 때)"""
+    import drop_diag as dd
+    r = dd.by_industry(conn, a, b)
+    if not r:
+        return ""
+    fmt = lambda xs: " · ".join(f"{escape(n)} {v:+.2f}" for n, v in xs) or "-"
+    return (f'<div class="muted" style="font-size:13px">업종별 — 가장 끌어내린(%p): {fmt(r["down"])}</div>'
+            f'<div class="muted" style="font-size:13px">업종별 — 가장 받쳐 준(%p): {fmt(r["up"][:3])}'
+            + (f' · 업종 분류 없음 {r["unmapped"]:+.2f}' if abs(r["unmapped"]) >= 0.005 else "") + '</div>')
+
+
+def history_card(conn):
+    """하락 점검: 과거 코스피가 비슷하게 빠진 뒤의 기록 (KOSPI 일별 종가, 앱이 받아 둔 기간)"""
+    try:
+        import drawdown_history as dh
+        import stock_market
+        res = dh.analyze(list(stock_market.series(conn, "idx:KOSPI")))
+    except Exception:
+        return ""
+    if not res:
+        return ('<div class="card"><b>과거에 비슷하게 빠진 뒤엔?</b><div class="muted">코스피 기록이 아직 짧아요 (1년 반 이상 필요). 지금 수집 → 시장·정책만을 눌러 주세요.</div></div>')
+    cur, lv, eps, sm = res["current"], res["level"], res["episodes"], res["summary"]
+    near = "" if abs(cur) >= lv else f' <span class="muted">(지금 낙폭은 {cur:.1f}%라 가장 얕은 기준 -{lv}%로 봤어요)</span>'
+    if not eps:
+        return f'<div class="card"><b>과거에 비슷하게 빠진 뒤엔?</b><div class="muted">{res["first"]} 이후 -{lv}%를 넘은 사례가 없어요.</div></div>'
+    trs = ""
+    for e in eps:
+        cells = "".join(f'<td>{gap_pct(e["fwd"][h] / 100) if h in e["fwd"] else "-"}</td>' for h, _ in dh.HORIZONS)
+        trs += f'<tr><td>{e["date"]}</td><td>{e["dd"]:.1f}%</td>{cells}<td>{"-" if e["more"] is None else gap_pct(e["more"] / 100)}</td></tr>'
+    med = "".join(f'<td><b>{"-" if sm[h]["median"] is None else gap_pct(sm[h]["median"] / 100)}</b><br><span class="muted">{sm[h]["up"]:.0f}% 상승</span></td>' for h, _ in dh.HORIZONS)
+    more = sm["more"]
+    return ('<div class="card"><b>과거에 비슷하게 빠진 뒤엔?</b>'
+            f'<div class="muted">코스피가 최근 250거래일 고점 대비 -{lv}%를 처음 넘어선 날(회복 후 다시 빠진 경우만 새 사례)을 모아, 그날 이후 수익률과 6개월 안 추가 하락을 봤어요 ({res["first"]} ~ {res["last"]}).{near}</div>'
+            f'<div class="scroll"><table><tr><th>그날</th><th>그날 낙폭</th>{"".join(f"<th>+{l}</th>" for _, l in dh.HORIZONS)}<th>6개월 안 추가 하락</th></tr>{trs}'
+            f'<tr><td colspan="2"><b>중앙값</b></td>{med}<td><b>{"-" if more["median"] is None else gap_pct(more["median"] / 100)}</b></td></tr></table></div>'
+            f'<div class="muted" style="font-size:12px;margin-top:4px">사례가 {len(eps)}개뿐이고 원인(금융위기·코로나·금리 충격 등)이 제각각이라 평균을 믿을 근거가 못 돼요. '
+            '처음 넘어선 날 이후라서 단기 수익률이 낮게 나오기 쉬운 구조이기도 해요. 과거 기록일 뿐 앞으로를 보장하지 않고, 사고팔 시점을 알려주지 않아요.</div></div>')
+
+
 def view_diag(conn, q):
     """시장 → 하락 점검: 낙폭, 누가 끌어내렸나(시총 기여도), 금리·외국인·환율 한 화면. 원인을 단정하지 않고 사실만 모음"""
     import deriv_bond as dvb
@@ -1634,7 +1674,8 @@ def view_diag(conn, q):
                       f'<div>코스피 시총 변화 <b class="{"down" if r["total"] < 0 else "up"}">{r["total"]:+.2f}%</b> = '
                       f'삼성전자·SK하이닉스 {r["semi"]:+.2f}%p + 그 외 {r["other"]:+.2f}%p</div>'
                       f'<div class="muted" style="font-size:13px">가장 끌어내린 종목(%p): {fmt(r["down"][:6])}</div>'
-                      f'<div class="muted" style="font-size:13px">가장 받쳐 준 종목(%p): {fmt(r["up"][:4])}</div></div>')
+                      f'<div class="muted" style="font-size:13px">가장 받쳐 준 종목(%p): {fmt(r["up"][:4])}</div>'
+                      + industry_line(conn, a, b) + '</div>')
         ct = ('<div class="card"><b>누가 끌어내렸나 (시가총액 기여도)</b>'
               '<div class="muted">종목 시가총액 변화 ÷ 시작일 코스피 전체 시가총액. 공식 지수와는 유동주식 비율 등으로 조금 달라요. '
               '앱이 받아 둔 KRX 시세(약 25거래일) 안에서만 계산해요.</div>' + (parts or '<div class="muted">계산할 자료가 부족해요.</div>') + '</div>')
@@ -1660,7 +1701,7 @@ def view_diag(conn, q):
               '<div class="muted">자료가 아직 없어요 (지금 수집 → 시장·정책만).</div>') + '</div>')
     note = ('<div class="muted" style="font-size:12px">이 화면은 누가 얼마나 빠졌고 어떤 지표가 같이 움직이는지 사실만 모아요. 하락의 원인을 단정하거나 '
             '사고팔 시점을 알려주지 않아요. 기사로 본 원인(AI 규제·금리·외국인 매도)은 시장 → 속보 탭에서 확인하세요.</div>')
-    return page("하락 점검", hub_tabs_row("/diag") + dd_card + ct + chk + note)
+    return page("하락 점검", hub_tabs_row("/diag") + dd_card + ct + history_card(conn) + chk + note)
 
 
 def view_calendar(conn, q):

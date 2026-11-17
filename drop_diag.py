@@ -65,3 +65,31 @@ def drawdown(points, lookback=250):
     hd, hv = max(pts, key=lambda x: x[1])
     d, v = pts[-1]
     return dict(last=v, last_date=d, high=hv, high_date=hd, dd=(v / hv - 1) * 100)
+
+
+def by_industry(conn, start, end, top=6):
+    """업종별 기여도(%p). industry_map(네이버 업종)이 있을 때만. {down:[(업종, %p)], up:[(업종, %p)], unmapped(%p), mapped_share(%)} 또는 None"""
+    try:
+        import industry
+        m = industry.mapping(conn)
+    except Exception:
+        return None
+    a, b = _caps(conn, start), _caps(conn, end)
+    base = sum(x for _, x in a.values())
+    if not m or not a or not b or base <= 0:
+        return None
+    agg, unmapped, mapped_cap = {}, 0.0, 0.0
+    for c in a:
+        if c not in b:
+            continue
+        pp = (b[c][1] - a[c][1]) / base * 100
+        g = m.get(c)
+        if g:
+            agg[g] = agg.get(g, 0.0) + pp
+            mapped_cap += a[c][1]
+        else:
+            unmapped += pp
+    if not agg:
+        return None
+    by = sorted(agg.items(), key=lambda x: x[1])
+    return dict(down=[x for x in by[:top] if x[1] < 0], up=[x for x in reversed(by[-top:]) if x[1] > 0], unmapped=unmapped, mapped_share=100.0 * mapped_cap / base)
