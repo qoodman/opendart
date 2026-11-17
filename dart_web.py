@@ -1551,7 +1551,47 @@ def view_news(conn, q):
         body = f'<div class="card">{items}</div>'
     note = ('<div class="muted" style="font-size:12px">구글 뉴스 검색으로 제목·링크만 모았어요 (본문은 원문 사이트에서). 실시간이 아니라 몇 분~수십 분 늦을 수 있고, '
             '주제 표시는 제목 단어로 단순하게 나눈 거라 틀릴 수 있어요. 기사가 주가를 움직였다는 뜻이 아니에요.</div>')
-    return page("속보", hub_tabs_row("/news") + filt + body + note)
+    return page("속보", hub_tabs_row("/news") + filt + body + note + news_impact_card(conn))
+
+
+def news_impact_card(conn):
+    """속보 화면 아래: 주제별로 기사가 있던 날과 없던 날의 코스피·S&P500 움직임 비교 (기사가 쌓인 기간 안에서)"""
+    try:
+        import news
+        import news_impact as ni
+        import stock_market
+        rows = conn.execute("SELECT pub, topic, breaking FROM news_items").fetchall()
+        rows = [(p, [x for x in (t or "").split(",") if x], b) for p, t, b in rows]
+        mk = [("코스피", "KOSPI", list(stock_market.series(conn, "idx:KOSPI"))), ("S&P500", "SPX", list(stock_market.series(conn, "idx:SPX")))]
+    except Exception:
+        return ""
+    head = ('<div class="card"><b>뉴스가 있던 날 vs 없던 날, 지수는 어땠나</b>'
+            '<div class="muted">주제별로 그 기사가 나온 날의 지수 변화를 모아 기사가 없던 날과 비교해요. 일봉이라 기사가 원인인지 이미 난 가격 변화를 전한 건지는 가릴 수 없고(역인과), '
+            f'같은 날 여러 주제가 겹쳐요. 기사가 있던 날이 {ni.MIN_DAYS}일 미만이면 숫자를 내지 않아요. 인과가 아니라 \'같이 크게 움직였나\'만 보는 참고 자료예요.</div>')
+    body = ""
+    order = list(news.TOPICS) + ["속보·긴급"]
+    for label, key, pts in mk:
+        res = ni.analyze(rows, pts, key)
+        if not res:
+            body += f'<div style="margin-top:8px"><b>{label}</b> <span class="muted">지수 기록이나 기사가 아직 부족해요</span></div>'
+            continue
+        lo, hi = res["기간"]
+        base = res["전체"]
+        trs = ""
+        for tp in order:
+            st = res["주제"].get(tp)
+            if not st:
+                continue
+            if not st["enough"]:
+                trs += f'<tr><td>{escape(tp)}</td><td colspan="4" class="muted">기사가 있던 날 {st["event"]["n"] if st["event"] else 0}일 — 더 쌓이면 보여요</td></tr>'
+                continue
+            e, r = st["event"], st["rest"]
+            trs += (f'<tr><td>{escape(tp)}</td><td>{e["n"]}일</td><td>{e["mean_abs"]:.2f}% <span class="muted">(없던 날 {r["mean_abs"]:.2f}%)</span></td>'
+                    f'<td>{gap_pct(e["mean"] / 100)} <span class="muted">({gap_pct(r["mean"] / 100)})</span></td><td>{e["big"]:.0f}% <span class="muted">({r["big"]:.0f}%)</span></td></tr>')
+        body += (f'<div style="margin-top:10px"><b>{label}</b> <span class="muted">{lo} ~ {hi}, 거래일 {base["n"]}일 평균 움직임 {base["mean_abs"]:.2f}%</span>'
+                 '<div class="scroll"><table><tr><th>주제</th><th>기사 있던 날</th><th>평균 |변화| (없던 날)</th><th>평균 변화 (없던 날)</th><th>±1% 넘은 날 (없던 날)</th></tr>'
+                 f'{trs}</table></div></div>')
+    return head + body + '</div>'
 
 
 def view_calendar(conn, q):
