@@ -1678,7 +1678,7 @@ def view_diag(conn, q):
                       + industry_line(conn, a, b) + '</div>')
         ct = ('<div class="card"><b>누가 끌어내렸나 (시가총액 기여도)</b>'
               '<div class="muted">종목 시가총액 변화 ÷ 시작일 코스피 전체 시가총액. 공식 지수와는 유동주식 비율 등으로 조금 달라요. '
-              '앱이 받아 둔 KRX 시세(약 25거래일) 안에서만 계산해요.</div>' + (parts or '<div class="muted">계산할 자료가 부족해요.</div>') + '</div>')
+              '앱이 받아 둔 KRX 시세(약 25거래일) 안에서만 계산해요. "받아 둔 시세 중 고점·첫날"은 내 보유 종목이 아니라 그 저장 기간 안의 기준일이에요 (위쪽 1년 고점과는 달라요).</div>' + (parts or '<div class="muted">계산할 자료가 부족해요.</div>') + '</div>')
     # 3) 금리·외국인·환율·신용
     sigs = {s["id"]: s for s in dvb.signals(conn)}
     inds = {i.key: i for i in stock_market.indicators(conn)}
