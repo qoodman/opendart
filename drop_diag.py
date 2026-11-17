@@ -38,7 +38,7 @@ def contrib(conn, start, end, top=8):
 
 
 def windows(conn):
-    """[(라벨, 시작일, 끝일)] — 1거래일 · 5거래일 · 보유 기간 중 시총 고점부터 · 보유 시작부터"""
+    """[(라벨, 시작일, 끝일)] — 1거래일 · 5거래일 · 앱이 받아 둔 시세 중 시총 고점부터 · 받아 둔 시세 첫날부터 (내 보유 종목과 무관)"""
     ds = days(conn)
     if len(ds) < 2:
         return []
@@ -51,9 +51,9 @@ def windows(conn):
         tot[d] = sum(m for _, m in _caps(conn, d).values())
     peak = max(tot, key=tot.get)
     if peak != end and peak not in (ds[-2], ds[-6] if len(ds) >= 6 else None):
-        out.append((f"보유 기간 고점({peak[4:6]}/{peak[6:]})부터", peak, end))
+        out.append((f"받아 둔 시세 중 시총 고점({peak[4:6]}/{peak[6:]})부터", peak, end))
     if ds[0] not in (peak, ds[-2], ds[-6] if len(ds) >= 6 else None):
-        out.append((f"보유 시작({ds[0][4:6]}/{ds[0][6:]})부터", ds[0], end))
+        out.append((f"받아 둔 시세의 첫날({ds[0][4:6]}/{ds[0][6:]})부터", ds[0], end))
     return out
 
 
