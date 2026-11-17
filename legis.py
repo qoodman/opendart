@@ -345,7 +345,8 @@ def prepare(db_path, assembly_key, law_oc, status_path, text_limit=30, log=print
     import bill_feed
     names = ["테마·업종 자료", "국회 법안 목록", "제안이유 본문", "공포일(법제처)", "영향 기업 계산"]
     steps = [dict(name=n, state="wait", msg="") for n in names]
-    st = dict(running=True, started=time.strftime("%Y-%m-%d %H:%M:%S"), finished="", steps=steps)
+    import os
+    st = dict(running=True, pid=os.getpid(), started=time.strftime("%Y-%m-%d %H:%M:%S"), finished="", steps=steps)
 
     def save():
         try:
@@ -381,7 +382,13 @@ def prepare(db_path, assembly_key, law_oc, status_path, text_limit=30, log=print
             raise RuntimeError(f"목록은 받았는데 최근 법안이 0건이에요 (전체 {r.get('전체')}건, 정렬 {r.get('순서')}) — 설정 → 법안·종목 확인의 응답을 캡처해 주세요")
         return r
     run(1, feed)
-    run(2, lambda: fetch_texts(db_path, text_limit, log=log))
+    def texts():
+        r = fetch_texts(db_path, text_limit, log=log)
+        if r["대상"] and not r["성공"] and r["실패"]:
+            raise RuntimeError(f"제안이유를 한 건도 못 받았어요 ({r['실패']}건 실패) — 국회 의안정보 페이지에 접속하지 못했거나 페이지 모양이 달라요. "
+                               "본문 없이도 제목으로 후보를 찾고, 법안 상세에서 내용을 붙여 넣을 수 있어요")
+        return r
+    run(2, texts)
     run(3, lambda: sync_promul(db_path, law_oc, log=log))
     run(4, lambda: refresh_cache(db_path, log=log))
     st["running"] = False
@@ -390,9 +397,44 @@ def prepare(db_path, assembly_key, law_oc, status_path, text_limit=30, log=print
     return st
 
 
+def _pid_alive(pid):
+    import os
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if os.path.isdir("/proc"):
+        try:                                   # 끝났는데 아직 회수되지 않은 좀비('Z')는 죽은 것으로 침
+            with open(f"/proc/{pid}/stat", encoding="utf-8") as f:
+                return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+        except (OSError, IndexError):
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
 def read_status(status_path):
+    """준비 상태 파일 읽기. '진행 중'으로 적혀 있어도 그 작업 프로세스가 죽었으면(서버 재시작 등) 중단된 것으로 고쳐서 돌려줌
+    (안 그러면 화면이 영원히 '진행 중'으로 남아 계속 새로고침하고 버튼도 막혀요)"""
     try:
         with open(status_path, encoding="utf-8") as f:
-            return json.load(f)
+            st = json.load(f)
     except (OSError, ValueError):
         return None
+    if st.get("running"):
+        alive = _pid_alive(st.get("pid"))
+        if not alive and not st.get("pid"):                    # 예전 버전이 적은 상태: 시작한 지 20분이 넘으면 죽은 것으로 봄
+            try:
+                alive = 0 <= time.time() - time.mktime(time.strptime(st.get("started", ""), "%Y-%m-%d %H:%M:%S")) < 1200
+            except (ValueError, TypeError, OverflowError):
+                alive = False
+        if not alive:
+            st["running"] = False
+            st["stale"] = True
+            for stp in st.get("steps", []):
+                if stp.get("state") in ("run", "wait"):
+                    stp["state"], stp["msg"] = "fail", "중단됐어요 (서버가 재시작되었거나 작업이 끊겼어요) — 다시 준비하기를 눌러 주세요"
+    return st

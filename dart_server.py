@@ -731,32 +731,42 @@ def run_market_policy(log=print):
     return out
 
 
-_LEGIS_JOB = {"thread": None}
-
-
 def legis_prepare():
-    """입법 영향 탭의 '지금 준비하기': 테마·업종 → 국회 법안 목록 → 제안이유 → 공포일 → 영향 기업 계산을 백그라운드에서 돌림. (성공 여부, 안내)"""
-    import threading
+    """입법 영향 탭의 '지금 준비하기': 테마·업종 → 국회 법안 목록 → 제안이유 → 공포일 → 영향 기업 계산을 **별도 프로세스(낮은 우선순위)**로 돌림.
+    대시보드 안에서 돌리면 작은 서버에서 화면이 멈추고, 대시보드가 재시작될 때 같이 죽기 때문. (성공 여부, 안내)"""
+    import subprocess
     import legis
-    t = _LEGIS_JOB["thread"]
-    if t is not None and t.is_alive():
+    status = data_dir() / "legis_status.json"
+    st = legis.read_status(str(status))
+    if st and st.get("running"):
         return False, "이미 준비하는 중이에요. 아래 진행 상황을 확인하세요."
-    status = str(data_dir() / "legis_status.json")
-    db, key, oc = str(results_db()), env_shared("ASSEMBLY_API_KEY"), env_shared("LAW_OC")
 
-    def work():
+    def lower_priority():
         try:
-            legis.prepare(db, key, oc, status)
-        except Exception as e:
-            try:
-                Path(status).write_text(json.dumps({"running": False, "finished": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                                    "steps": [{"name": "전체", "state": "fail", "msg": f"{type(e).__name__}: {str(e)[:200]}"}]}, ensure_ascii=False), encoding="utf-8")
-            except OSError:
-                pass
-    t = threading.Thread(target=work, daemon=True)
-    _LEGIS_JOB["thread"] = t
-    t.start()
-    return True, "준비를 시작했어요. 처음에는 테마·업종을 받느라 5~8분 걸려요. 이 화면이 자동으로 새로고침돼요."
+            os.nice(10)
+        except OSError:
+            pass
+    try:
+        logf = open(data_dir() / "legis_prepare.log", "ab")
+        proc = subprocess.Popen([sys.executable, str(ROOT / "dart_server.py"), "legis-prepare"], cwd=str(ROOT), stdout=logf, stderr=subprocess.STDOUT,
+                                start_new_session=True, preexec_fn=lower_priority)
+    except Exception as e:
+        return False, f"준비를 시작하지 못했어요: {type(e).__name__}: {str(e)[:100]}"
+    threading.Thread(target=proc.wait, daemon=True).start()      # 끝나면 회수해서 좀비가 남지 않게
+    try:      # 프로세스가 상태 파일을 쓰기 전에도 '진행 중'으로 보이게 먼저 적어 둠
+        status.write_text(json.dumps({"running": True, "pid": proc.pid, "started": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "finished": "",
+                                      "steps": [{"name": n, "state": "wait", "msg": ""} for n in ("테마·업종 자료", "국회 법안 목록", "제안이유 본문", "공포일(법제처)", "영향 기업 계산")]},
+                                     ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+    return True, "준비를 시작했어요 (별도 프로세스, 화면은 그대로 쓸 수 있어요). 처음에는 테마·업종을 받느라 5~8분 걸려요."
+
+
+def cmd_legis_prepare(args):
+    """(서버 내부용) legis_prepare()가 띄우는 별도 프로세스"""
+    import legis
+    legis.prepare(str(results_db()), env_shared("ASSEMBLY_API_KEY"), env_shared("LAW_OC"), str(data_dir() / "legis_status.json"), log=lambda m: print(m, flush=True))
+    return 0
 
 
 def bill_watch_run(log=print):
@@ -1677,6 +1687,7 @@ def main(argv=None):
     w.add_argument("--host", default=env("DART_WEB_HOST", "127.0.0.1"))
     w.add_argument("--port", type=int, default=int(env("DART_WEB_PORT", "8766")))
     sub.add_parser("tick", help="자동 수집 시각이면 수집 (타이머용)")
+    sub.add_parser("legis-prepare", help="(내부용) 입법 영향 기업 준비 작업")
     sub.add_parser("update", help="최신 코드 받아 설치")
     sub.add_parser("net-check")
     sub.add_parser("notify-test")
@@ -1692,7 +1703,7 @@ def main(argv=None):
     a = p.parse_args(argv)
     return {"run": cmd_run, "web": cmd_web, "net-check": cmd_net_check, "notify-test": cmd_notify_test,
             "status": cmd_status, "set-env": cmd_set_env, "hk-check": cmd_hk_check, "reports-check": cmd_hk_check, "market-check": cmd_market_check, "parse-check": cmd_parse_check,
-            "tick": cmd_tick, "update": cmd_update}[a.cmd](a)
+            "tick": cmd_tick, "update": cmd_update, "legis-prepare": cmd_legis_prepare}[a.cmd](a)
 
 
 if __name__ == "__main__":

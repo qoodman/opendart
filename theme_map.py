@@ -88,8 +88,39 @@ def sync(db_path, log=print, session=None, today=None, force=False):
         conn.close()
 
 
+_LOAD_CACHE = {"sig": None, "data": None}
+
+
+def _sig(conn):
+    """DB가 바뀌었는지 싸게 알아보는 지문 (파일 경로 + 각 표의 개수·갱신일·시세 기준일)"""
+    try:
+        path = conn.execute("PRAGMA database_list").fetchone()[2]
+    except Exception:
+        path = ""
+    parts = [path]
+    for sql in ("SELECT COUNT(*) FROM theme_stocks", "SELECT value FROM theme_meta WHERE key='synced'",
+                "SELECT COUNT(*) FROM industry_map", "SELECT value FROM industry_meta WHERE key='synced'",
+                "SELECT MAX(bas_dd) FROM krx_daily"):
+        try:
+            r = conn.execute(sql).fetchone()
+            parts.append(r[0] if r else None)
+        except sqlite3.OperationalError:
+            parts.append(None)
+    return tuple(parts)
+
+
 def load(conn):
-    """→ {"테마": {이름: [코드...]}, "업종": {이름: [코드...]}, "이름": {코드: 종목명}}. 표가 없으면 빈 값"""
+    """→ {"테마": {이름: [코드...]}, "업종": {이름: [코드...]}, "이름": {코드: 종목명}}. 표가 없으면 빈 값.
+    같은 DB 상태면 이전에 읽은 것을 그대로 돌려줌 (그 위에 계산해 둔 준비 값도 함께 재사용됨)"""
+    sig = _sig(conn)
+    if _LOAD_CACHE["sig"] == sig and _LOAD_CACHE["data"] is not None:
+        return _LOAD_CACHE["data"]
+    data = _load(conn)
+    _LOAD_CACHE.update(sig=sig, data=data)
+    return data
+
+
+def _load(conn):
     out = {"테마": {}, "업종": {}, "이름": {}, "번호": {}}
     try:
         nm = {n: name for n, name in conn.execute("SELECT no, name FROM theme_names")}

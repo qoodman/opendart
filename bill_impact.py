@@ -79,8 +79,55 @@ def _theme_name_tokens(name):
     return [p for p in parts if len(_norm(p)) >= 2 and re.search(r"[가-힣A-Za-z]", p)]
 
 
+_CONCEPT_RE = None
+
+
+def _concepts():
+    """CONCEPTS의 정규식을 한 번만 컴파일"""
+    global _CONCEPT_RE
+    if _CONCEPT_RE is None:
+        _CONCEPT_RE = [(n, re.compile(t), [re.compile(r) for r in p], [re.compile(r) for r in sec], [re.compile(r) for r in ind])
+                       for n, t, p, sec, ind in CONCEPTS]
+    return _CONCEPT_RE
+
+
+def _prep(data):
+    """테마·업종 자료에서 법안마다 되풀이되던 계산을 한 번만 (data 안에 저장해 재사용):
+    이름 토큰, 개념별로 맞는 테마·업종, 기업명 정규화, 그룹 크기"""
+    pr = data.get("_prep")
+    if pr is not None:
+        return pr
+    toks = []
+    for kind, table in (("테마", data["테마"]), ("업종", data["업종"])):
+        for name in table:
+            ts = [(tok, _norm(tok)) for tok in _theme_name_tokens(name) if len(_norm(tok)) >= 2]
+            if ts:
+                toks.append((kind, name, ts))
+    concept_groups = []
+    for cname, trig, primary, secondary, inds in _concepts():
+        prim, sec_, ind_ = [], [], []
+        for name in data["테마"]:
+            if any(r.search(name) for r in primary):
+                prim.append(name)
+            elif any(r.search(name) for r in secondary):
+                sec_.append(name)
+        for name in data["업종"]:
+            if any(r.search(name) for r in inds):
+                ind_.append(name)
+        concept_groups.append((cname, trig, prim, sec_, ind_))
+    mention = []
+    for code, nm in data["이름"].items():
+        n = _norm(nm)
+        if len(n) >= 3 and n not in STOP_NAMES:
+            mention.append((code, nm, n))
+    sizes = {("테마", n): len(c) for n, c in data["테마"].items()} | {("업종", n): len(c) for n, c in data["업종"].items()}
+    pr = dict(toks=toks, concept_groups=concept_groups, mention=mention, sizes=sizes)
+    data["_prep"] = pr
+    return pr
+
+
 def analyze(conn, title, text="", top=20, data=None):
-    """→ dict(concepts, groups, stocks, has_text, note)
+    """→ dict(concepts, groups, members, stocks, has_text, note)
     concepts: [(개념, [맞은 문구])]   groups: [(종류, 이름, 근거 문구, 종목 수, 점수)]
     stocks: [{code, name, score, evidence:[문구...], groups:[이름...]}] 점수 높은 순"""
     data = data or theme_map.load(conn)
@@ -90,36 +137,33 @@ def analyze(conn, title, text="", top=20, data=None):
     if not data["테마"] and not data["업종"]:
         out["note"] = "테마·업종 자료가 아직 없어요 (지금 수집 → 시장·정책만, 또는 설정에서 테마 받기)"
         return out
+    pr = _prep(data)
     ev = {}                                  # (종류, 이름) → [(가중치, 근거)]
 
     def add(kind, name, weight, why):
         ev.setdefault((kind, name), []).append((weight, why))
     # ② 이름 일치: 긴 이름은 강하게, 짧은 일반어('안전'·'증권' 같은 2글자)는 약하게
-    for kind, table in (("테마", data["테마"]), ("업종", data["업종"])):
-        for name in table:
-            for tok in _theme_name_tokens(name):
-                n = len(_norm(tok))
-                if n >= 2 and _norm(tok) in nb:
-                    w = (3.0 if n >= 3 else 1.5) * (1.0 if kind == "테마" else 0.7)
-                    add(kind, name, w, f"'{tok}' 문구")
-                    break
+    for kind, name, ts in pr["toks"]:
+        for tok, n_tok in ts:
+            if n_tok in nb:
+                n = len(n_tok)
+                add(kind, name, (3.0 if n >= 3 else 1.5) * (1.0 if kind == "테마" else 0.7), f"'{tok}' 문구")
+                break
     # ③ 개념 사전: 주요 테마 3.0 · 보조 1.2 · 업종 1.0 (맞은 문구가 여러 가지면 최대 30% 가산)
-    for cname, trig, primary, secondary, inds in CONCEPTS:
-        hits = sorted({m.group(0) for m in re.finditer(trig, body)})
+    for cname, trig, prim, sec_, ind_ in pr["concept_groups"]:
+        hits = sorted({m.group(0) for m in trig.finditer(body)})
         if not hits:
             continue
         out["concepts"].append((cname, hits[:6]))
         strength = min(1.3, 1.0 + 0.1 * (len(hits) - 1))
         why = f"개념 '{cname}' ({', '.join(hits[:3])})"
-        for name in data["테마"]:
-            if any(re.search(r, name) for r in primary):
-                add("테마", name, 3.0 * strength, why)
-            elif any(re.search(r, name) for r in secondary):
-                add("테마", name, 1.2 * strength, why)
-        for name in data["업종"]:
-            if any(re.search(r, name) for r in inds):
-                add("업종", name, 1.0 * strength, why)
-    sizes = {("테마", n): len(c) for n, c in data["테마"].items()} | {("업종", n): len(c) for n, c in data["업종"].items()}
+        for name in prim:
+            add("테마", name, 3.0 * strength, why)
+        for name in sec_:
+            add("테마", name, 1.2 * strength, why)
+        for name in ind_:
+            add("업종", name, 1.0 * strength, why)
+    sizes = pr["sizes"]
     stock = {}
     for (kind, name), items in ev.items():
         items.sort(key=lambda x: -x[0])
@@ -138,9 +182,8 @@ def analyze(conn, title, text="", top=20, data=None):
         s["score"] = g[0] + 0.2 * sum(g[1:3])
         s["evidence"] = [x[1] for x in s["gws"][:3]]
     # ① 기업명 언급
-    for code, nm in data["이름"].items():
-        n = _norm(nm)
-        if len(n) >= 3 and n not in STOP_NAMES and n in nb:
+    for code, nm, n in pr["mention"]:
+        if n in nb:
             s = stock.setdefault(code, dict(code=code, name=nm, gws=[], evidence=[], groups=[], score=0.0))
             s["score"] += 6.0
             s["evidence"].insert(0, f"법안 문구에 기업명 '{nm}'이 나와요")
