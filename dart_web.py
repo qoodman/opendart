@@ -1560,7 +1560,7 @@ def view_news(conn, q):
                + ' <a class="chip" href="/settings">연결 확인(설정)</a></form>')
     note = ('<div class="muted" style="font-size:12px">구글 뉴스 검색으로 제목·링크만 모았어요 (본문은 원문 사이트에서). 실시간이 아니라 몇 분~수십 분 늦을 수 있고, '
             '주제 표시는 제목 단어로 단순하게 나눈 거라 틀릴 수 있어요. 기사가 주가를 움직였다는 뜻이 아니에요.</div>')
-    return page("속보", hub_tabs_row("/news") + refresh + filt + body + note + news_impact_card(conn))
+    return page("속보", refresh + filt + body + note + news_impact_card(conn))
 
 
 def news_impact_card(conn):
@@ -1701,7 +1701,7 @@ def view_diag(conn, q):
               '<div class="muted">자료가 아직 없어요 (지금 수집 → 시장·정책만).</div>') + '</div>')
     note = ('<div class="muted" style="font-size:12px">이 화면은 누가 얼마나 빠졌고 어떤 지표가 같이 움직이는지 사실만 모아요. 하락의 원인을 단정하거나 '
             '사고팔 시점을 알려주지 않아요. 기사로 본 원인(AI 규제·금리·외국인 매도)은 시장 → 속보 탭에서 확인하세요.</div>')
-    return page("하락 점검", hub_tabs_row("/diag") + dd_card + ct + history_card(conn) + chk + note)
+    return page("하락 점검", dd_card + ct + history_card(conn) + chk + note)
 
 
 def view_calendar(conn, q):
