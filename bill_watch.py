@@ -468,6 +468,22 @@ def check(assembly_key, conn=None, session=None):
         except Exception as e:
             it["note"] = f"{type(e).__name__}: {str(e)[:140]}"
     items.append(it)
+    it = dict(op="국회 발의법률안 전체 목록 (법안 조회용)", ok=False, day="", total=0, sample=None, note="")
+    if assembly_key:
+        try:
+            import bill_feed
+            api = sp.Client("", "", assembly_key)
+            rows, info = bill_feed.fetch_recent(api, 30, max_pages=3)
+            it.update(ok=bool(rows), total=info["total"], day=max((bill_feed._dt(r) for r in rows), default=""),
+                      sample={"22대 전체 법안 수": info["total"], "목록 순서": info["order"], "최근 30일(앞 3쪽 안)": len(rows),
+                              "가장 최근 법안": (rows[0].get("BILL_NAME") if rows else "-")})
+            if not rows:
+                it["note"] = "목록은 받았는데 최근 30일 법안이 없어요 (정렬 방식이나 기간을 확인해야 해요 — 이 화면을 캡처해서 보내 주세요)"
+        except Exception as e:
+            it["note"] = f"{type(e).__name__}: {str(e)[:140]}"
+    else:
+        it["note"] = "열린국회정보 키가 없어요"
+    items.append(it)
     it = dict(op="법안 상세 페이지에서 제안이유 읽기", ok=False, day="", total=0, sample=None, note="")
     if first and first.get("DETAIL_LINK"):
         try:
@@ -493,6 +509,15 @@ def check(assembly_key, conn=None, session=None):
         it["note"] = "종목 정보를 못 받았어요"
     items.append(it)
     if conn is not None:
+        try:
+            nt = conn.execute("SELECT COUNT(*) FROM theme_names").fetchone()[0]
+            ns = conn.execute("SELECT COUNT(DISTINCT code) FROM theme_stocks").fetchone()[0]
+            ni = conn.execute("SELECT COUNT(*) FROM industry_map").fetchone()[0]
+            items.append(dict(op="테마·업종 자료 (법안 → 기업 짐작에 씀)", ok=nt > 0 and ni > 0, day="", total=nt,
+                              sample={"테마": nt, "테마에 든 종목": ns, "업종에 매핑된 종목": ni},
+                              note="" if nt and ni else "아직 없어요. 지금 수집 → 시장·정책만을 한 번 돌려 주세요."))
+        except sqlite3.OperationalError:
+            items.append(dict(op="테마·업종 자료 (법안 → 기업 짐작에 씀)", ok=False, day="", total=0, sample=None, note="아직 없어요. 지금 수집 → 시장·정책만을 한 번 돌려 주세요."))
         try:
             n_r, n_l, n_t = (conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in ("bill_rules", "bill_links", "bill_text"))
             items.append(dict(op="이 앱에 저장된 감시 현황", ok=True, day="", total=n_l, sample={"감시 규칙": n_r, "연결된 법안": n_l, "본문을 읽은 법안": n_t}, note=""))

@@ -150,6 +150,10 @@ SETTINGS_SPEC = [
      "감시 규칙(예: 글로벌텍스프리)에 맞는 국회 법안을 받아 종목에 연결하고, 연결 종목 주가를 받아 단계별 반응을 계산합니다."),
     ("알림", "DART_BILL_NOTIFY", "관심 법안 소식 알림", "bool", "1",
      "감시 규칙·직접 연결한 법안이 종목에 새로 연결되거나 새 단계(소관위·법사위·본회의 처리)에 들어가면 알립니다. 규칙을 처음 돌릴 때는 알림이 없습니다."),
+    ("시장·정책", "DART_THEMES", "테마·업종 받기 (법안 → 기업 짐작)", "bool", "1",
+     "네이버 증권 테마 265개의 구성 종목을 주 1회 받습니다 (호출 300번 안팎, 키 불필요). 법안 조회에서 영향 기업 후보를 찾는 데 씁니다."),
+    ("시장·정책", "DART_BILL_FEED", "국회 발의법률안 전체 받기 (법안 조회)", "bool", "1",
+     "열린국회정보 키가 있으면 22대 국회 발의법률안 중 최근 120일치를 저장합니다 (한 번에 최대 45쪽)."),
     ("시장·정책", "DART_ETF_SHARE", "ETF 거래대금 비중 받기 (시장 지표)", "bool", "1",
      "KRX 키가 있어야 합니다. KRX 'ETF 일별매매정보'를 이용신청하면 과거까지 채우고, 아니면 장 마감 뒤(16시 이후) 수집한 날부터 쌓입니다."),
     ("시장·정책", "DART_NEWS", "해외 통신 속보 제목 받기 (로이터·AP·블룸버그·연합)", "bool", "1",
@@ -674,6 +678,20 @@ def run_market_policy(log=print):
         except Exception as e:
             out["policy"] = f"실패: {e}"
             log(f"정책 소식 실패: {e}")
+    if env("DART_THEMES", "1") != "0":          # 법안 → 기업 짐작에 쓰는 테마(265개) → 종목 (네이버, 주 1회)
+        try:
+            import theme_map
+            out["themes"] = theme_map.sync(results_db(), log=log)
+        except Exception as e:
+            out["themes"] = f"실패: {e}"
+            log(f"테마 받기 실패: {e}")
+    if env("DART_BILL_FEED", "1") != "0":       # 국회 발의법률안 최근 것 전체 (법안 조회 탭)
+        try:
+            import bill_feed
+            out["bill_feed"] = bill_feed.sync(results_db(), env_shared("ASSEMBLY_API_KEY"), log=log)
+        except Exception as e:
+            out["bill_feed"] = f"실패: {e}"
+            log(f"법안 목록 받기 실패: {e}")
     if env("DART_BILL_WATCH", "1") != "0":     # 법안 ↔ 종목 감시 규칙: 국회 법안을 받아 연결하고 연결 종목 주가를 받음
         try:
             out["bill_watch"] = bill_watch_run(log)
@@ -690,8 +708,14 @@ def run_market_policy(log=print):
 
 def bill_watch_run(log=print):
     """법안 감시를 지금 돌리고, 새 연결·새 단계가 있으면 알림 → 요약 dict"""
+    import bill_feed
     import bill_watch
+    try:
+        feed = bill_feed.sync(results_db(), env_shared("ASSEMBLY_API_KEY"), log=log)
+    except Exception as e:
+        feed = {"실패": str(e)[:60]}
     res = bill_watch.sync(results_db(), env_shared("ASSEMBLY_API_KEY"), log=log)
+    res["목록"] = feed
     msgs = res.pop("알림", [])
     if msgs and env("DART_BILL_NOTIFY", "1") != "0":
         url = env("DASHBOARD_URL")
@@ -726,7 +750,8 @@ def bills_action(action, form):
         bill_watch.ensure(conn)
         if action == "refresh":
             res = bill_watch_run()
-            return True, (f"법안 {res.get('법안', 0)}건 확인 · 새 연결 {res.get('새연결', 0)} · 본문 {res.get('본문', 0)} · 주가 {res.get('주가', 0)} · 알림 {res.get('알림 수', 0)}건")
+            feed = res.get("목록", {})
+            return True, (f"법안 목록 최근 {feed.get('최근', '?')}건(새 {feed.get('새', '?')}) · 감시 법안 {res.get('법안', 0)}건 확인 · 새 연결 {res.get('새연결', 0)} · 본문 {res.get('본문', 0)} · 주가 {res.get('주가', 0)} · 알림 {res.get('알림 수', 0)}건")
         if action == "add_rule":
             name = one("name")
             laws = [x.strip() for x in one("laws").replace("，", ",").split(",") if x.strip()]
@@ -763,6 +788,27 @@ def bills_action(action, form):
         if action == "unlink":
             bill_watch.unlink(conn, one("bill"), one("code"))
             return True, "연결을 풀었어요."
+        if action == "fetch_text":
+            key = one("bill")
+            row = conn.execute("SELECT url FROM policy_items WHERE key=?", (key,)).fetchone()
+            if not row or not row[0]:
+                return False, "이 법안의 국회 주소가 없어요. 내용을 직접 붙여 넣어 주세요."
+            try:
+                txt = bill_watch.fetch_text(row[0])
+            except Exception as e:
+                return False, f"국회 페이지를 읽지 못했어요 ({type(e).__name__}). 내용을 직접 붙여 넣어 주세요."
+            if not txt:
+                return False, "페이지는 열렸는데 제안이유를 못 찾았어요. 내용을 직접 붙여 넣어 주세요."
+            conn.execute("INSERT OR REPLACE INTO bill_text VALUES (?,?,?)", (key, dt.date.today().isoformat(), txt))
+            conn.commit()
+            return True, f"제안이유 {len(txt)}자를 가져왔어요."
+        if action == "save_text":
+            key, txt = one("bill"), (form.get("text") or "").strip()[:4000]
+            if not key or not txt:
+                return False, "붙여 넣을 내용을 넣어 주세요."
+            conn.execute("INSERT OR REPLACE INTO bill_text VALUES (?,?,?)", (key, dt.date.today().isoformat(), txt))
+            conn.commit()
+            return True, "내용을 저장하고 다시 분석했어요."
         return False, "알 수 없는 동작이에요."
     except Exception as e:
         return False, f"{type(e).__name__}: {str(e)[:120]}"

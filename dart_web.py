@@ -1824,8 +1824,8 @@ def _link_form(key, label="연결"):
             f'<button>{label}</button></form>')
 
 
-def view_bills(conn, q):
-    """시장 → 법안·종목: 법안을 개별 종목에 연결하고, 법안 단계별로 그 종목이 지수보다 얼마나 움직였나를 봄"""
+def bills_watch_html(conn, q):
+    """시장 → 법안·종목 → 내 종목 감시: 법안을 개별 종목에 연결하고, 법안 단계별로 그 종목이 지수보다 얼마나 움직였나를 봄"""
     import bill_watch as bw
     import stock_market
     msg = q.get("msg", "")
@@ -1929,7 +1929,188 @@ def view_bills(conn, q):
         sr = sr or '<div class="muted" style="margin-top:6px">받아 둔 법안 중에 없어요. 법 이름을 감시 규칙에 넣고 \'지금 확인\'을 눌러 받아 보세요.</div>'
     search_card = ('<div class="card"><b>받아 둔 법안 검색</b><form method="get" action="/bills" class="filters" style="margin:6px 0 0">'
                    f'<input type="text" name="q" value="{escape(kw)}" placeholder="법안 제목 일부 (예: 조세특례)" style="flex:1 1 180px"><button>검색</button></form>{sr}</div>')
-    return page("법안·종목", head + cards + rules_card + cand_card + search_card)
+    return head + cards + rules_card + cand_card + search_card
+
+
+def _mcap_text(v):
+    if not v:
+        return "-"
+    return f"{v / 1e12:.1f}조" if v >= 1e12 else f"{v / 1e8:,.0f}억"
+
+
+def _impact_html(res, bill_key=""):
+    """bill_impact.analyze 결과 → 개념·테마·업종·기업 표 (bill_key가 있으면 '연결' 버튼)"""
+    out = ""
+    if res.get("note"):
+        out += f'<div class="muted" style="margin:6px 0">{escape(res["note"])}</div>'
+    if res["concepts"]:
+        out += ('<div style="margin:6px 0"><b style="font-size:13px">법안에서 읽은 개념</b> '
+                + " ".join(f'<span class="chip" title="{escape(", ".join(h))}">{escape(c)}</span>' for c, h in res["concepts"]) + '</div>')
+    if res["groups"]:
+        gr = "".join(f'<tr><td>{escape(k)}</td><td>{escape(n)}</td><td class="muted">{escape(w)}</td><td>{c}</td></tr>' for k, n, w, c, _ in res["groups"][:14])
+        out += ('<details style="margin:6px 0"><summary><b style="font-size:13px">관련 테마·업종 ' + f'{len(res["groups"])}개</b></summary>'
+                f'<div class="scroll"><table><tr><th>종류</th><th>이름</th><th>근거</th><th>종목 수</th></tr>{gr}</table></div></details>')
+    if res.get("members"):
+        li = ""
+        for m in res["members"]:
+            li += (f'<div style="margin:6px 0"><b style="font-size:13px">{escape(m["kind"])} {escape(m["name"])}</b> <span class="muted" style="font-size:12px">({m["size"]}종목 · {escape(m["why"])})</span><div style="font-size:13px">'
+                   + " · ".join(f'<a href="{naver_link(c)}" target="_blank" rel="noopener noreferrer">{escape(n)}</a>' for c, n in m["stocks"]) + '</div></div>')
+        out += ('<details open style="margin:8px 0"><summary><b>가장 잘 맞는 작은 테마·업종의 종목 전체</b> <span class="muted" style="font-size:12px">(점수 순위에서 밀려도 놓치지 않게)</span></summary>' + li + '</details>')
+    if res["stocks"]:
+        mc = {}
+        try:
+            mc = {c: m for c, m in _CTX_MCAP.get("m", {}).items()}
+        except Exception:
+            pass
+        trs = ""
+        for s in res["stocks"]:
+            form = (f'<form method="post" action="/bills/link" style="margin:0"><input type="hidden" name="bill" value="{escape(bill_key)}">'
+                    f'<input type="hidden" name="stock" value="{escape(s["code"])}"><button style="padding:0 6px">연결</button></form>') if bill_key else ""
+            trs += (f'<tr><td><a href="{naver_link(s["code"])}" target="_blank" rel="noopener noreferrer">{escape(s["name"])}</a><br><span class="muted" style="font-size:11px">{escape(s["code"])}</span></td>'
+                    f'<td><b>{s["score"]:.1f}</b></td><td style="font-size:13px">{"<br>".join(escape(e) for e in s["evidence"])}</td>'
+                    f'<td>{_mcap_text(mc.get(s["code"]))}</td><td>{form}</td></tr>')
+        out += ('<div style="margin-top:8px"><b>영향을 받을 수 있는 기업 후보</b> <span class="muted" style="font-size:12px">(점수는 순서를 보는 용도, 호재·악재 판단 아님)</span>'
+                f'<div class="scroll"><table><tr><th>기업</th><th>점수</th><th>근거</th><th>시총</th><th></th></tr>{trs}</table></div></div>')
+    return out
+
+
+_CTX_MCAP = {}
+
+
+def _bill_status_kind(status):
+    st = status or ""
+    if any(w in st for w in ("원안가결", "수정가결", "가결")) and "폐기" not in st:
+        return "통과"
+    if any(w in st for w in ("폐기", "철회", "부결")):
+        return "폐기"
+    return "심사 중"
+
+
+def _bills_tabs(t):
+    return '<div style="margin:0 0 8px">' + " ".join(
+        (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}</b>' if k == t else f'<a class="chip" href="/bills?t={k}">{v}</a>')
+        for k, v in (("list", "법안 조회"), ("find", "내용으로 기업 찾기"), ("watch", "내 종목 감시"))) + '</div>'
+
+
+def view_bills(conn, q):
+    """시장 → 법안·종목: 법안 조회 → 영향 기업 후보 / 내용을 붙여 넣어 기업 찾기 / 내 종목 감시"""
+    import bill_impact as bi
+    import bill_watch as bw
+    import theme_map
+    t = q.get("t") if q.get("t") in ("list", "find", "watch", "bill") else "list"
+    msg = q.get("msg", "")
+    flash = f'<div class="card {"warn" if msg.startswith("✖") else ""}">{escape(msg)}</div>' if msg else ""
+    if t == "watch":
+        return page("법안·종목", _bills_tabs(t) + flash + bills_watch_html(conn, q))
+    try:
+        _CTX_MCAP["m"] = {c: m for c, m in conn.execute("SELECT code, mktcap FROM krx_daily WHERE bas_dd=(SELECT MAX(bas_dd) FROM krx_daily)")}
+    except sqlite3.OperationalError:
+        _CTX_MCAP["m"] = {}
+    data = theme_map.load(conn)
+    no_theme = not data["테마"] and not data["업종"]
+    warn = ('<div class="card warn">테마·업종 자료가 아직 없어서 기업을 짐작할 수 없어요. 서버에서 업데이트한 뒤 <b>지금 수집 → 시장·정책만</b>을 한 번 돌려 주세요 (테마 265개·업종 79개를 받아요).</div>'
+            if no_theme else "")
+    if t == "find":
+        text = (q.get("text") or "").strip()
+        title = (q.get("title") or "").strip()
+        form = ('<div class="card"><b>법안 내용으로 영향 기업 찾기</b>'
+                '<div class="muted">법안 제목과 제안이유(또는 뉴스·요약)를 붙여 넣으면, 그 내용에 나오는 말을 테마·업종·기업명과 이어서 영향을 받을 수 있는 기업 후보를 보여 줘요. '
+                '국회 사이트에서 본문을 자동으로 못 읽을 때나, 아직 발의 전인 법안 내용을 미리 볼 때 써요.</div>'
+                '<form method="get" action="/bills" style="margin-top:6px"><input type="hidden" name="t" value="find">'
+                f'<label class="set">법안 제목 (선택)</label><input type="text" name="title" value="{escape(title)}" style="width:100%">'
+                f'<label class="set">제안이유·주요내용</label><textarea name="text" rows="7" style="width:100%" placeholder="예: 외국인관광객이 미용성형 의료용역을 제공받는 경우 부가가치세 환급특례의 적용기한을 연장…">{escape(text)}</textarea>'
+                '<button style="margin-top:6px">기업 찾기</button></form></div>')
+        res = _impact_html(bi.analyze(conn, title, text, data=data)) if (title or text) and not no_theme else ""
+        return page("법안·종목", _bills_tabs(t) + flash + warn + form + (f'<div class="card">{res}</div>' if res else ""))
+    if t == "bill":
+        key = q.get("key", "")
+        row = conn.execute("SELECT title, date, url, status, topics FROM policy_items WHERE key=?", (key,)).fetchone() if key else None
+        if not row:
+            return page("법안·종목", _bills_tabs("list") + '<div class="card">법안을 찾지 못했어요.</div>')
+        title, date, url, status, topics = row
+        txt_row = conn.execute("SELECT text FROM bill_text WHERE bill_key=?", (key,)).fetchone() if has_table(conn, "bill_text") else None
+        text = (txt_row[0] if txt_row else "") or ""
+        tl = "".join(f'<span class="chip">{escape(s)} {escape(d)}</span> ' for d, s in bw.tracks(conn, key))
+        t_html = f'<a href="{escape(url)}" target="_blank" rel="noopener noreferrer">{escape(title)}</a>' if url else escape(title)
+        text_html = (f'<details open><summary><b style="font-size:13px">제안이유·주요내용 (국회 의안정보)</b></summary><div style="margin-top:4px;font-size:14px">{escape(text[:900])}{"…" if len(text) > 900 else ""}</div></details>'
+                     if text else '<div class="muted">제안이유 본문이 없어요. 아래 버튼으로 국회 페이지에서 가져오거나, 내용을 직접 붙여 넣으면 더 정확해져요.</div>')
+        tools = ('<div style="margin-top:8px"><form method="post" action="/bills/fetch_text" class="filters" style="margin:0 0 6px">'
+                 f'<input type="hidden" name="bill" value="{escape(key)}"><button>제안이유 가져오기 (국회 페이지)</button></form>'
+                 '<details><summary class="muted">내용을 직접 붙여 넣기</summary>'
+                 f'<form method="post" action="/bills/save_text"><input type="hidden" name="bill" value="{escape(key)}">'
+                 '<textarea name="text" rows="6" style="width:100%" placeholder="제안이유 및 주요내용"></textarea><button style="margin-top:4px">저장하고 다시 분석</button></form></details></div>')
+        linked = conn.execute("SELECT l.code, COALESCE(s.name, l.code) FROM bill_links l LEFT JOIN bill_stocks s ON s.code=l.code WHERE l.bill_key=?", (key,)).fetchall() if has_table(conn, "bill_links") else []
+        lk = ('<div style="margin-top:6px"><b style="font-size:13px">연결된 종목</b> ' + " ".join(
+            f'<span class="chip">{escape(n)}</span>' for _, n in linked) + ' <a class="chip" href="/bills?t=watch">반응 보기(내 종목 감시)</a></div>') if linked else ""
+        head = (f'<div class="card"><div class="muted" style="font-size:12px"><a href="/bills">← 법안 조회</a></div><div style="margin-top:4px"><b>{t_html}</b></div>'
+                f'<div class="muted" style="font-size:13px">{escape(date or "")} · {escape(status or "")}</div>'
+                f'<div style="margin-top:4px">{tl}</div>{lk}{text_html}{tools}</div>')
+        res = _impact_html(bi.analyze(conn, title, text, data=data), key) if not no_theme else ""
+        return page("법안·종목", _bills_tabs("list") + flash + warn + head + (f'<div class="card">{res}</div>' if res else "")
+                    + '<div class="muted" style="font-size:12px">후보는 법안 문구와 테마·업종 이름·개념 사전을 이은 짐작이에요. 같은 법안이 기업마다 호재일 수도 악재일 수도 있어서 방향은 판단하지 않아요. '
+                      '\'연결\'을 누르면 그 종목에 법안을 이어 단계별 주가 반응을 볼 수 있어요.</div>')
+    # 목록
+    kw = (q.get("kw") or "").strip()
+    days = q.get("d") if q.get("d") in ("30", "90", "180", "0") else "90"
+    st = q.get("s") if q.get("s") in ("통과", "심사 중", "폐기") else ""
+    only_mkt = q.get("m") == "1"
+    page_no = max(0, int(q.get("p", "0") or 0)) if str(q.get("p", "0")).isdigit() else 0
+    where, args = ["kind='법안'", "key!='_meta'"], []
+    if kw:
+        where.append("title LIKE ?")
+        args.append(f"%{kw}%")
+    if days != "0":
+        where.append("date >= ?")
+        args.append((dt.date.today() - dt.timedelta(days=int(days))).isoformat())
+    if only_mkt:
+        where.append("topics != '[]' AND topics != ''")
+    try:
+        rows = conn.execute(f"SELECT key, title, date, url, status, topics FROM policy_items WHERE {' AND '.join(where)} ORDER BY date DESC", args).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    if st:
+        rows = [r for r in rows if _bill_status_kind(r[4]) == st]
+    total = len(rows)
+    per = 30
+    rows = rows[page_no * per: (page_no + 1) * per]
+    texts = {}
+    if has_table(conn, "bill_text"):
+        texts = {k: tx for k, tx in conn.execute("SELECT bill_key, text FROM bill_text WHERE text != ''")}
+    items = ""
+    for key, title, date, url, status, topics in rows:
+        try:
+            tps = json.loads(topics or "[]")
+        except ValueError:
+            tps = []
+        pre = ""
+        if not no_theme:
+            r = bi.analyze(conn, title, texts.get(key, ""), top=4, data=data)
+            if r["stocks"] and (texts.get(key) or r["concepts"]):
+                pre = ('<div style="font-size:13px;margin-top:2px">후보: ' + ", ".join(escape(s["name"]) for s in r["stocks"][:4])
+                       + f' <span class="muted">({"본문" if texts.get(key) else "제목"} 기준)</span></div>')
+        kind = _bill_status_kind(status)
+        items += (f'<div style="margin:10px 0"><div><a href="/bills?t=bill&key={quote(key)}"><b>{escape(title[:80])}</b></a></div>'
+                  f'<div class="muted" style="font-size:12px">{escape(date or "")} · <span class="chip {"up" if kind == "통과" else "down" if kind == "폐기" else ""}">{kind}</span> '
+                  + "".join(f'<span class="chip">{escape(x)}</span> ' for x in tps[:3]) + f'</div>{pre}</div>')
+
+    def sel(name, opts, cur):
+        return f'<select name="{name}">' + "".join(f'<option value="{v}"{" selected" if v == cur else ""}>{l}</option>' for v, l in opts) + '</select>'
+    form = ('<form method="get" action="/bills" class="filters" style="margin:6px 0 0"><input type="hidden" name="t" value="list">'
+            f'<input type="text" name="kw" value="{escape(kw)}" placeholder="법안 제목 일부 (예: 조세특례, 상법)" style="flex:1 1 170px">'
+            + sel("d", (("30", "최근 30일"), ("90", "최근 90일"), ("180", "최근 180일"), ("0", "전체")), days)
+            + sel("s", (("", "상태 전체"), ("심사 중", "심사 중"), ("통과", "통과"), ("폐기", "폐기")), st)
+            + f'<label style="white-space:nowrap"><input type="checkbox" name="m" value="1"{" checked" if only_mkt else ""}> 시장 관련만</label><button>조회</button></form>')
+    nav = ""
+    if total > per:
+        base = {"t": "list", "kw": kw, "d": days, "s": st, "m": "1" if only_mkt else ""}
+        prev = f'<a class="chip" href="/bills?{urlencode({**base, "p": page_no - 1})}">← 이전</a> ' if page_no > 0 else ""
+        nxt = f'<a class="chip" href="/bills?{urlencode({**base, "p": page_no + 1})}">다음 →</a>' if (page_no + 1) * per < total else ""
+        nav = f'<div style="margin-top:6px">{prev}<span class="muted">{page_no * per + 1}~{min(total, (page_no + 1) * per)} / {total}건</span> {nxt}</div>'
+    head = ('<div class="card"><b>법안 조회</b>'
+            '<div class="muted">국회 발의법률안을 조회하고, 법안을 누르면 그 법안이 영향을 줄 수 있는 기업 후보를 근거와 함께 보여 줘요. 목록의 \'후보\'는 간단 미리보기고, 법안 제목이 평범하면 본문이 있어야 정확해요.</div>'
+            '<form method="post" action="/bills/refresh" class="filters" style="margin:6px 0 0"><button>국회에서 새로 받기</button></form>' + form + '</div>')
+    body = f'<div class="card">{items or "<div class=muted>조건에 맞는 법안이 없어요. 받아 둔 법안이 없다면 위 버튼이나 수집을 먼저 돌려 주세요.</div>"}{nav}</div>'
+    return page("법안·종목", _bills_tabs("list") + flash + warn + head + body)
 
 
 def view_calendar(conn, q):
@@ -4702,13 +4883,14 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 return self._send(200, "text/html; charset=utf-8", view_ext_check(res))
             if path.startswith("/bills/") and settings_api:
                 act = path[len("/bills/"):]
-                if act not in ("refresh", "add_rule", "del_rule", "link", "unlink"):
+                if act not in ("refresh", "add_rule", "del_rule", "link", "unlink", "fetch_text", "save_text"):
                     return self._redirect("/bills")
-                n = min(int(self.headers.get("Content-Length") or 0), 8192)
+                n = min(int(self.headers.get("Content-Length") or 0), 65536)
                 form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore")).items()}
                 S = settings()
                 ok, why = S["bills_action"](act, form) if "bills_action" in S else (False, "이 서버 버전은 지원하지 않아요")
-                return self._redirect("/bills?" + urlencode({"msg": ("✔ " if ok else "✖ ") + why}))
+                back = {"t": "bill", "key": form.get("bill", "")} if act in ("fetch_text", "save_text") or (act == "link" and form.get("bill", "").startswith("bill:") and (self.headers.get("Referer") or "").find("t=bill") >= 0) else {}
+                return self._redirect("/bills?" + urlencode({**back, "msg": ("✔ " if ok else "✖ ") + why}))
             if path == "/news/refresh" and settings_api:
                 S = settings()
                 ok, why = S["news_refresh"]() if "news_refresh" in S else (False, "이 서버 버전은 지금 받기를 지원하지 않아요")

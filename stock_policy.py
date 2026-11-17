@@ -118,6 +118,26 @@ def _err(e):
     return _SECRET.sub(r"\1***", " ".join(str(e).split()) or type(e).__name__)[:260]
 
 
+def _find_total(data):
+    """열린국회정보 응답 머리말의 전체 건수 (없으면 None)"""
+    found = []
+
+    def walk(x):
+        if isinstance(x, dict):
+            if "list_total_count" in x:
+                try:
+                    found.append(int(x["list_total_count"]))
+                except (TypeError, ValueError):
+                    pass
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+    walk(data)
+    return found[0] if found else None
+
+
 def _find_rows(data):
     """열린국회정보 응답 안의 row 목록과 결과 코드"""
     rows, code = [], ""
@@ -212,6 +232,17 @@ class Client:
                         "effective": _norm_date(g("시행일자")), "kind": g("제개정구분명", "제개정구분"),
                         "org": g("소관부처명")})
         return out
+
+    def bills_page(self, keyword="", page=1, size=100):
+        """한 쪽 → (rows, 전체 건수). keyword가 비면 22대 국회 법안 전체"""
+        params = {"KEY": self.assembly_key, "Type": "json", "pIndex": page, "pSize": size, "AGE": ASSEMBLY_AGE}
+        if keyword:
+            params["BILL_NAME"] = keyword
+        data = self._get(BILL_URL, params).json()
+        rows, code = _find_rows(data)
+        if code and not str(code).endswith(("000", "200")):
+            raise ValueError(f"열린국회정보 오류: {code}")
+        return rows, _find_total(data)
 
     def bills(self, keyword, page=1):
         r = self._get(BILL_URL, {"KEY": self.assembly_key, "Type": "json", "pIndex": page, "pSize": 100,
