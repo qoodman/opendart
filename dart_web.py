@@ -317,7 +317,8 @@ def ext_check_card(S):
             '<button name="src" value="bonds">DART 채권·증자 확인</button>'
             '<button name="src" value="news">속보(뉴스) 확인</button>'
             f'<button name="src" value="etf"{"" if krx_ok else " disabled"}>ETF 거래대금 확인</button>'
-            '<button name="src" value="ecos">회사채 금리(ECOS) 확인</button></form>'
+            '<button name="src" value="ecos">회사채 금리(ECOS) 확인</button>'
+            '<button name="src" value="policy">정책·법안 확인</button></form>'
             + ('' if krx_ok else '<div class="muted">KRX 키를 먼저 저장해 주세요.</div>')
             + ('' if dg_ok else '<div class="muted">공공데이터포털 키(DATA_GO_KR_KEY)가 없어서 대차거래는 확인할 수 없어요.</div>') + '</div>')
 
@@ -351,7 +352,7 @@ def view_ext_check(res):
                      + (f'<div class="warn" style="margin-top:4px">{escape(it["note"])}</div>' if it.get("note") else "")
                      + fields + sample + '</div>')
     head = {"krx": "KRX Open API 연결 확인", "lending": "주식 대차거래 연결 확인", "bonds": "DART 채권·증자 공시 연결 확인",
-            "news": "해외 통신 속보 연결 확인", "etf": "ETF 거래대금 연결 확인", "ecos": "회사채 금리(ECOS) 연결 확인"}[res["src"]]
+            "news": "해외 통신 속보 연결 확인", "etf": "ETF 거래대금 연결 확인", "ecos": "회사채 금리(ECOS) 연결 확인", "policy": "정책·법안 연결 확인"}[res["src"]]
     return page(head, f'<h2>{head}</h2>' + "".join(cards)
                 + '<p class="muted">✖가 있으면 이유를 적어 두었어요. 대차거래는 필드 이름을 이름 규칙으로 찾기 때문에, '
                   '\'역할별로 찾은 필드\'가 틀려 보이면 이 화면을 캡처해서 보내 주세요.</p>' + back)
@@ -4565,7 +4566,7 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 n = min(int(self.headers.get("Content-Length") or 0), 4096)
                 form = parse_qs(self.rfile.read(n).decode("utf-8", "ignore"))
                 src = (form.get("src") or [""])[0]
-                if src not in ("krx", "lending", "bonds", "news", "etf", "ecos"):
+                if src not in ("krx", "lending", "bonds", "news", "etf", "ecos", "policy"):
                     return self._redirect("/settings")
                 try:
                     res = settings()["ext_check"](src)

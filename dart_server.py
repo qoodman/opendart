@@ -1408,6 +1408,18 @@ def ext_check(src):
             return {"src": "bonds", "error": "DART 키가 아직 없어요. 설정에서 먼저 저장해 주세요."}
         import dart_bonds
         return {"src": "bonds", "items": dart_bonds.check(dk, str(data_dir() / "dart_cache"))}
+    if src == "policy":
+        import stock_policy
+
+        def source(k):
+            return "이 앱" if env(k) else "부동산 앱" if env_shared(k) else "없음"
+        conn = sqlite3.connect(results_db())
+        try:
+            return {"src": "policy", "items": stock_policy.check(
+                env_shared("DATA_GO_KR_KEY"), env_shared("LAW_OC"), env_shared("ASSEMBLY_API_KEY"),
+                {k: source(k) for k in ("DATA_GO_KR_KEY", "LAW_OC", "ASSEMBLY_API_KEY")}, conn)}
+        finally:
+            conn.close()
     if src == "news":
         import news
         return {"src": "news", "items": news.check()}

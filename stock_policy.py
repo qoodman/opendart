@@ -334,3 +334,60 @@ def new_items(conn, since):
                             "ORDER BY date DESC", (since,)).fetchall()
     except sqlite3.OperationalError:
         return []
+
+
+def check(press_key="", law_oc="", assembly_key="", sources=None, conn=None):
+    """설정 → 연결 확인용: 정책브리핑·법제처·열린국회정보가 실제로 되는지와, 이미 저장된 정책·법안 수. [{op, ok, day, total, sample, note}]
+    sources: {키 이름: '이 앱' | '부동산 앱' | '없음'} (값은 보여 주지 않고 어디서 읽었는지만)"""
+    sources = sources or {}
+    api = Client(press_key, law_oc, assembly_key)
+    items = []
+
+    def where(k):
+        return f" (키: {sources.get(k, '?')})"
+
+    it = dict(op="정책브리핑 보도자료" + where("DATA_GO_KR_KEY"), ok=False, day="", total=0, sample=None, note="")
+    if not press_key:
+        it["note"] = "공공데이터포털 키(DATA_GO_KR_KEY)가 없어요"
+    else:
+        try:
+            rows = api.press_range(3, PRESS_API)
+            it.update(ok=True, total=len(rows), sample=rows[0] if rows else None, day=(rows[0].get("date", "") if rows else ""))
+            if not rows:
+                it["note"] = "받을 수는 있는데 최근 3일 자료가 비어 있어요"
+        except Exception as e:
+            it["note"] = f"{type(e).__name__}: {str(e)[:140]}"
+    items.append(it)
+    it = dict(op="법제처 법령(상법)" + where("LAW_OC"), ok=False, day="", total=0, sample=None, note="")
+    if not law_oc:
+        it["note"] = "법제처 인증값(LAW_OC)이 없어요"
+    else:
+        try:
+            rows = api.laws("상법")
+            it.update(ok=True, total=len(rows), sample=rows[0] if rows else None)
+            if not rows:
+                it["note"] = "받을 수는 있는데 결과가 비어 있어요"
+        except Exception as e:
+            it["note"] = f"{type(e).__name__}: {str(e)[:140]}"
+    items.append(it)
+    it = dict(op="열린국회정보 발의법률안(상법)" + where("ASSEMBLY_API_KEY"), ok=False, day="", total=0, sample=None, note="")
+    if not assembly_key:
+        it["note"] = "열린국회정보 키(ASSEMBLY_API_KEY)가 없어요"
+    else:
+        try:
+            rows = api.bills("상법")
+            it.update(ok=True, total=len(rows), sample=rows[0] if rows else None, day=(rows[0].get("PROPOSE_DT", "") if rows else ""))
+            if not rows:
+                it["note"] = "받을 수는 있는데 결과가 비어 있어요"
+        except Exception as e:
+            it["note"] = f"{type(e).__name__}: {str(e)[:140]}"
+    items.append(it)
+    if conn is not None:
+        try:
+            by = dict(conn.execute("SELECT kind, COUNT(*) FROM policy_items WHERE key!='_meta' GROUP BY kind").fetchall())
+            last = conn.execute("SELECT MAX(date) FROM policy_items WHERE key!='_meta' AND kind='법안'").fetchone()[0]
+            items.append(dict(op="이 앱에 이미 저장된 정책·법안", ok=bool(by), day=last or "", total=sum(by.values()), sample=by or None,
+                              note="" if by else "아직 저장된 게 없어요. 지금 수집 → 시장·정책만을 눌러 주세요."))
+        except sqlite3.OperationalError:
+            items.append(dict(op="이 앱에 이미 저장된 정책·법안", ok=False, day="", total=0, sample=None, note="정책 표가 아직 없어요 (수집 전)"))
+    return items
