@@ -1657,12 +1657,92 @@ def lights_card(conn):
         f'<div style="margin:8px 0"><div class="row"><b>{escape(x["name"])}</b><span class="chip {cls[x["state"]]}">{dd.STATE_TXT[x["state"]]}</span></div>'
         f'<div>{escape(x["evidence"])}</div><div class="muted" style="font-size:12px">기준: {escape(x["rule"])}</div></div>' for x in ls)
     head = (f'지금 켜진 신호 <b>{len(on)}개</b> / 확인 가능 {len(known)}개 ' + ("— " + " · ".join(escape(x["name"]) for x in on) if on else ""))
+    hist = dd.history(conn, 30)
+    if len(hist) >= 2:
+        dots = {"on": ("#e5534b", "켜짐"), "watch": ("#d4a72c", "주의"), "off": ("#3fb950", "꺼짐"), "na": ("#8b949e", "자료 없음")}
+        trs = ""
+        for x in ls:
+            cells = "".join(f'<span title="{d} {dots[st.get(x["id"], "na")][1]}" style="display:inline-block;width:8px;height:14px;margin-right:1px;'
+                            f'background:{dots[st.get(x["id"], "na")][0]}"></span>' for d, st in hist)
+            trs += f'<div style="margin:3px 0"><span style="display:inline-block;width:92px;font-size:13px">{escape(x["name"])}</span>{cells}</div>'
+        hist_html = (f'<div style="margin-top:10px"><b style="font-size:13px">최근 {len(hist)}일 신호 기록</b> <span class="muted" style="font-size:12px">(빨강 켜짐 · 노랑 주의 · 초록 꺼짐 · 회색 자료 없음, 오른쪽이 최근)</span>{trs}</div>')
+    else:
+        hist_html = '<div class="muted" style="font-size:12px;margin-top:8px">신호 기록은 시장·정책 수집 때마다 하루 한 줄씩 쌓여요. 이틀 이상 쌓이면 여기에 보여요.</div>'
     return ('<div class="card"><b>원인 신호등</b>'
             f'<div style="margin-top:4px">{head}</div>'
-            f'{rows}'
-            '<div class="muted" style="font-size:12px">기준은 단순한 값이라 틀릴 수 있어요. 신호가 여러 개 동시에 켜지는 게 보통이고, 원인마다 살펴볼 것이 달라요 '
-            '(금리 → 이자 부담·금리 방향 신호, 쏠림 → 업종 비중과 실적, 외국인 → 빌린 돈·강제 매도 여부, 환율·신용 → 자금 흐름). '
+            f'{rows}{hist_html}'
+            '<div class="muted" style="font-size:12px;margin-top:6px">기준은 단순한 값이라 틀릴 수 있어요. 신호가 여러 개 동시에 켜지는 게 보통이고, 원인마다 살펴볼 것이 달라요 '
+            '(금리 → 이자 부담·금리 방향 신호, 쏠림 → 업종 비중과 실적, 외국인 → 빌린 돈·강제 매도 여부, 환율·신용 → 자금 흐름, 정책·법안 → 어떤 법안이 어느 단계인지와 시행 시기). '
             '이 카드는 지금 어떤 신호가 켜져 있는지만 알려 주고, 어떻게 대처할지는 말하지 않아요. 내 보유 기간·레버리지·비중이 대처를 더 크게 좌우해요.</div></div>')
+
+
+def lead_card(conn):
+    """하락 점검: 과거 코스피가 -15%를 처음 넘어선 날, 자료가 있는 신호(금리·환율·신용)가 켜져 있었나"""
+    try:
+        import drop_diag as dd
+        rows = dd.lead_table(conn, 15)
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    names = {"rate": "금리", "fx": "환율", "credit": "신용"}
+    trs = ""
+    for r in rows:
+        cells = ""
+        for sid in ("rate", "fx", "credit"):
+            v = r["lights"].get(sid)
+            if v is None:
+                cells += '<td class="muted">자료 없음</td>'
+            else:
+                st, first = v
+                cells += f'<td>{dd.STATE_TXT[st]}' + (f'<br><span class="muted">{first[5:]}부터 켜짐</span>' if first else "") + '</td>'
+        trs += f'<tr><td>{r["date"]}<br><span class="muted">{r["dd"]:.0f}%</span></td>{cells}</tr>'
+    return ('<div class="card"><b>과거 하락 때는 어떤 신호가 먼저 켜졌나</b>'
+            '<div class="muted">코스피가 고점 대비 -15%를 처음 넘어선 날의 신호 상태와, 그 전 60일 안에 처음 켜진 날이에요. 앱에 기록이 있는 금리·환율·신용만 다시 계산해요 '
+            '(미국 금리는 최근 약 2년, 환율·신용은 2018년부터). 사례가 몇 개뿐이라 "이 신호가 먼저 켜지면 하락한다"는 증거가 못 돼요.</div>'
+            f'<div class="scroll"><table><tr><th>-15% 넘은 날</th>{"".join(f"<th>{n}</th>" for n in names.values())}</tr>{trs}</table></div></div>')
+
+
+def policy_card(conn):
+    """하락 점검: 법안·법령·정책 소식이 코스피에 미친 영향 (같이 움직였나) + 최근 관련 소식"""
+    try:
+        import news_impact as ni
+        import policy_impact as pi
+        import stock_market
+        res = pi.analyze(conn, list(stock_market.series(conn, "idx:KOSPI")))
+        recent = pi.recent_list(conn)
+    except Exception:
+        return ""
+    head = ('<div class="card"><b>법안·정책이 주식에 영향을 줬나</b>'
+            '<div class="muted">국회 발의법률안·법제처 법령 개정·정책 소식을 주제별로 모아, 그 소식이 있던 날과 없던 날의 코스피 움직임을 비교해요. '
+            '법안은 발의·심사 때 이미 시장에 반영됐을 수 있고, 통과돼도 시행은 한참 뒤인 경우가 많아요. 한 날에 여러 소식이 겹쳐 효과를 가르기 어려워서 '
+            f'인과가 아니라 \'같이 크게 움직였나\'만 보는 참고 자료예요 (소식이 있던 날이 {ni.MIN_DAYS}일 미만이면 숫자를 내지 않아요).</div>')
+    body = ""
+    if res:
+        order = list(pi.STRONG) + [pi.STAGE_PASS, pi.STAGE_BILL, pi.STAGE_LAW] + ["산업 지원", "금리·통화"]
+        trs = ""
+        for tp in order:
+            st = res["주제"].get(tp)
+            if not st:
+                continue
+            if not st["enough"]:
+                trs += f'<tr><td>{escape(tp)}</td><td colspan="4" class="muted">소식이 있던 날 {st["event"]["n"] if st["event"] else 0}일 — 더 쌓이면 보여요</td></tr>'
+                continue
+            e, r = st["event"], st["rest"]
+            trs += (f'<tr><td>{escape(tp)}</td><td>{e["n"]}일</td><td>{e["mean_abs"]:.2f}% <span class="muted">({r["mean_abs"]:.2f}%)</span></td>'
+                    f'<td>{gap_pct(e["mean"] / 100)} <span class="muted">({gap_pct(r["mean"] / 100)})</span></td><td>{e["big"]:.0f}% <span class="muted">({r["big"]:.0f}%)</span></td></tr>')
+        lo, hi = res["기간"]
+        body += (f'<div style="margin-top:8px"><span class="muted">{lo} ~ {hi}, 괄호는 소식이 없던 날</span>'
+                 '<div class="scroll"><table><tr><th>주제·단계</th><th>소식 있던 날</th><th>평균 |변화|</th><th>평균 변화</th><th>±1% 넘은 날</th></tr>'
+                 f'{trs}</table></div></div>')
+    else:
+        body += '<div class="muted" style="margin-top:6px">법안·정책 기록이 아직 없어요. 지금 수집 → 시장·정책만을 눌러 주세요 (국회·법제처 키 필요).</div>'
+    if recent:
+        lis = "".join(f'<div style="margin-top:4px"><span class="chip">{escape(i["stage"])}</span> {i["date"]} '
+                      + (f'<a href="{escape(i["url"])}" target="_blank" rel="noopener noreferrer">{escape(i["title"][:60])}</a>' if i["url"] else escape(i["title"][:60]))
+                      + f' <span class="muted">{escape(", ".join(i["topics"][:2]))}</span></div>' for i in recent)
+        body += f'<div style="margin-top:10px"><b style="font-size:13px">최근 2주 주식에 직접 닿는 소식</b>{lis}</div>'
+    return head + body + '</div>'
 
 
 def view_diag(conn, q):
@@ -1723,7 +1803,7 @@ def view_diag(conn, q):
               '<div class="muted">자료가 아직 없어요 (지금 수집 → 시장·정책만).</div>') + '</div>')
     note = ('<div class="muted" style="font-size:12px">이 화면은 누가 얼마나 빠졌고 어떤 지표가 같이 움직이는지 사실만 모아요. 하락의 원인을 단정하거나 '
             '사고팔 시점을 알려주지 않아요. 기사로 본 원인(AI 규제·금리·외국인 매도)은 시장 → 속보 탭에서 확인하세요.</div>')
-    return page("하락 점검", lights_card(conn) + dd_card + ct + history_card(conn) + chk + note)
+    return page("하락 점검", lights_card(conn) + dd_card + ct + history_card(conn) + lead_card(conn) + policy_card(conn) + chk + note)
 
 
 def view_calendar(conn, q):

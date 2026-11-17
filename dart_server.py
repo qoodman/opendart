@@ -144,6 +144,8 @@ SETTINGS_SPEC = [
      "전환사채·신주인수권부사채·교환사채·유상증자 결정 공시가 새로 올라오면 알립니다 (공시당 한 번, 최대 8건 표시). 첫 수집은 기준선이라 알림이 없습니다."),
     ("시장·정책", "DART_INDUSTRY", "업종 매핑 받기 (하락 점검의 업종별 기여도)", "bool", "1",
      "네이버 증권 업종 79개의 구성 종목을 주 1회 받습니다 (호출 100번 안팎, 키 불필요)."),
+    ("알림", "DART_LIGHTS_NOTIFY", "하락 원인 신호 변화 알림", "bool", "1",
+     "시장·정책 수집 때 하락 점검의 원인 신호(금리·반도체 쏠림·외국인·환율·신용·정책·법안)가 새로 켜지거나 꺼지면 알립니다. 첫 기록은 기준선이라 알림이 없습니다."),
     ("시장·정책", "DART_ETF_SHARE", "ETF 거래대금 비중 받기 (시장 지표)", "bool", "1",
      "KRX 키가 있어야 합니다. KRX 'ETF 일별매매정보'를 이용신청하면 과거까지 채우고, 아니면 장 마감 뒤(16시 이후) 수집한 날부터 쌓입니다."),
     ("시장·정책", "DART_NEWS", "해외 통신 속보 제목 받기 (로이터·AP·블룸버그·연합)", "bool", "1",
@@ -668,7 +670,33 @@ def run_market_policy(log=print):
         except Exception as e:
             out["policy"] = f"실패: {e}"
             log(f"정책 소식 실패: {e}")
+    try:            # 하락 점검 신호등을 하루 한 줄 기록하고, 새로 켜지거나 꺼진 신호가 있으면 알림
+        out["lights"] = lights_alerts(log)
+    except Exception as e:
+        out["lights"] = f"실패: {e}"
+        log(f"신호등 기록 실패: {e}")
     return out
+
+
+def lights_alerts(log=print):
+    """하락 점검 신호등을 오늘 기록하고, 새로 켜진·꺼진 신호가 있으면 ntfy (첫 기록은 기준선이라 알림 없음)"""
+    import drop_diag
+    conn = sqlite3.connect(results_db())
+    try:
+        prev, now, ls = drop_diag.snapshot(conn)
+    finally:
+        conn.close()
+    on, off = drop_diag.changes(prev, now, ls)
+    n_on = sum(1 for st in now.values() if st == "on")
+    log(f"하락 점검 신호등: 켜진 신호 {n_on}개 · 새로 켜짐 {len(on)} · 해제 {len(off)}")
+    if (on or off) and env("DART_LIGHTS_NOTIFY", "1") != "0":
+        url = env("DASHBOARD_URL")
+        lines = ([f"▲ 켜짐: {', '.join(on)}"] if on else []) + ([f"▽ 해제: {', '.join(off)}"] if off else []) + [f"지금 켜진 신호 {n_on}개"]
+        try:
+            notify("하락 원인 신호 변화", "\n".join(lines), click=(url.rstrip("/") + "/diag") if url else "", tags=("traffic_light",))
+        except Exception as e:
+            log(f"신호등 알림 실패: {e}")
+    return {"켜진 신호": n_on, "새로 켜짐": len(on), "해제": len(off)}
 
 
 def cmd_run_reanalyze(args):

@@ -97,26 +97,58 @@ def by_industry(conn, start, end, top=6):
 
 # ---------------- 원인 신호등 ----------------
 STATE_TXT = {"on": "켜짐", "watch": "주의", "off": "꺼짐", "na": "자료 없음"}
+RANK = {"na": -1, "off": 0, "watch": 1, "on": 2}
 
 
-def lights(conn):
+def _ago(pts, days):
+    import deriv_bond as dvb
+    return dvb._ago(pts, days)
+
+
+def rate_state(us):
+    """미국 10년 [(날짜, %)] → (state, 근거). 3개월 +0.50%p 이상 켜짐 · +0.25%p 이상 주의"""
+    if not us:
+        return "na", "미국 금리 자료가 아직 없어요"
+    last, prev = us[-1][1], _ago(us, 91)
+    if prev is None:
+        return "na", f"미국 10년 {last:.2f}% (3개월 전 자료 없음)"
+    d = last - prev
+    return ("on" if d >= 0.5 else "watch" if d >= 0.25 else "off"), f"미국 10년 {last:.2f}% (3개월 {d:+.2f}%p)"
+
+
+def fx_state(fx):
+    """원/달러 [(날짜, 원)] → (state, 근거). 3개월 +3% 이상 켜짐 · +1.5% 이상 주의"""
+    if not fx:
+        return "na", "환율 자료가 아직 없어요 (ECOS 키)"
+    last, prev = fx[-1][1], _ago(fx, 91)
+    if not prev:
+        return "na", f"{last:,.1f}원 (3개월 전 자료 없음)"
+    d = last / prev - 1
+    return ("on" if d >= 0.03 else "watch" if d >= 0.015 else "off"), f"{last:,.1f}원 (3개월 {d:+.1%})"
+
+
+def credit_state(corp, ktb):
+    """회사채 3년(AA-) − 국고채 3년 스프레드 → (state, 근거). 3개월 +0.15%p 이상 켜짐 · +0.08%p 이상 주의"""
+    c, k = dict(corp), dict(ktb)
+    sp = [(d, c[d] - k[d]) for d in sorted(set(c) & set(k))]
+    if not sp:
+        return "na", "회사채 스프레드 자료가 아직 없어요 (ECOS 키)"
+    last, prev = sp[-1][1], _ago(sp, 91)
+    if prev is None:
+        return "na", f"스프레드 {last:+.2f}%p (3개월 전 자료 없음)"
+    d = last - prev
+    return ("on" if d >= 0.15 else "watch" if d >= 0.08 else "off"), f"스프레드 {last:+.2f}%p (3개월 {d:+.2f}%p)"
+
+
+def lights(conn, today=None):
     """하락 원인별 신호등 [{id, name, state(on/watch/off/na), evidence, rule}]. 원인을 단정하지 않고 '지금 이 신호가 켜져 있나'만 알려 줘요.
     기준은 단순한 값이라 틀릴 수 있고, 여러 개가 동시에 켜지는 게 보통이에요."""
     import deriv_bond as dvb
-    import stock_market
+    import stock_market as sm
     out = []
-    # 1) 금리 충격: 미국 10년 3개월 변화
-    us = dvb.series(conn, "bond:us10")
-    it = dict(id="rate", name="금리 충격", state="na", evidence="미국 금리 자료가 아직 없어요", rule="미국 10년 3개월 +0.50%p 이상 켜짐 · +0.25%p 이상 주의")
-    if us:
-        last, prev = us[-1][1], dvb._ago(us, 91)
-        if prev is not None:
-            d = last - prev
-            it.update(state="on" if d >= 0.5 else "watch" if d >= 0.25 else "off", evidence=f"미국 10년 {last:.2f}% (3개월 {d:+.2f}%p)")
-        else:
-            it["evidence"] = f"미국 10년 {last:.2f}% (3개월 전 자료 없음)"
-    out.append(it)
-    # 2) 업종 쏠림: 최근 5거래일(없으면 하루) 코스피 하락 중 삼성전자·SK하이닉스 몫
+    st, ev = rate_state(dvb.series(conn, "bond:us10"))
+    out.append(dict(id="rate", name="금리 충격", state=st, evidence=ev, rule="미국 10년 3개월 +0.50%p 이상 켜짐 · +0.25%p 이상 주의"))
+    # 반도체 쏠림: 최근 5거래일(없으면 하루) 코스피 하락 중 삼성전자·SK하이닉스 몫
     it = dict(id="concentration", name="반도체 쏠림", state="na", evidence="KRX 시세가 아직 부족해요", rule="코스피 시총 -1% 이하일 때 두 종목 몫 60% 이상 켜짐 · 40% 이상 주의")
     wins = windows(conn)
     pick = next((w for w in wins if w[0].startswith("최근 5")), wins[0] if wins else None)
@@ -130,28 +162,99 @@ def lights(conn):
                 it.update(state="on" if share >= 0.6 else "watch" if share >= 0.4 else "off",
                           evidence=f"{pick[0]} 코스피 {r['total']:+.2f}% 중 삼성전자·SK하이닉스 {r['semi']:+.2f}%p ({share * 100:.0f}%)")
     out.append(it)
-    # 3) 외국인 수급: 선물·채권 탭의 외국인 코스피 현물 순매수 신호 (5일·20일 합 방향)
     sigs = {s["id"]: s for s in dvb.signals(conn)}
     it = dict(id="foreign", name="외국인 매도", state="na", evidence="외국인 순매수 자료가 아직 없어요", rule="외국인 5일·20일 합이 모두 순매도면 켜짐 · 엇갈리면 주의")
     sg = sigs.get("spot_foreign")
     if sg and sg.get("signal") is not None:
         it.update(state="on" if sg["signal"] < 0 else "watch" if sg["signal"] == 0 else "off", evidence=f"{sg['value']} · {sg['change']} (억원)")
     out.append(it)
-    # 4) 환율: 원/달러 3개월 변화
-    inds = {i.key: i for i in stock_market.indicators(conn)}
-    fx = inds.get("usdkrw")
-    it = dict(id="fx", name="원화 약세", state="na", evidence="환율 자료가 아직 없어요 (ECOS 키)", rule="원/달러 3개월 +3% 이상 켜짐 · +1.5% 이상 주의")
-    if fx and fx.available and fx.change_text:
-        try:
-            d = float(fx.change_text.split()[-1].replace("%", "")) / 100
-            it.update(state="on" if d >= 0.03 else "watch" if d >= 0.015 else "off", evidence=f"{fx.value_text} ({fx.change_text})")
-        except ValueError:
-            it["evidence"] = f"{fx.value_text} ({fx.change_text})"
-    out.append(it)
-    # 5) 신용: 회사채 스프레드 3개월 변화 (선물·채권 탭의 신호)
-    it = dict(id="credit", name="신용 경색", state="na", evidence="회사채 스프레드 자료가 아직 없어요 (ECOS 키)", rule="회사채 스프레드 3개월 +0.15%p 이상 켜짐")
-    sg = sigs.get("credit")
-    if sg and sg.get("signal") is not None:
-        it.update(state="on" if sg["signal"] < 0 else "off", evidence=f"{sg['value']} ({sg['change']})")
-    out.append(it)
+    st, ev = fx_state(sm.series(conn, "ecos:usdkrw"))
+    out.append(dict(id="fx", name="원화 약세", state=st, evidence=ev, rule="원/달러 3개월 +3% 이상 켜짐 · +1.5% 이상 주의"))
+    st, ev = credit_state(sm.series(conn, "ecos:corp3"), sm.series(conn, "ecos:ktb3"))
+    out.append(dict(id="credit", name="신용 경색", state=st, evidence=ev, rule="회사채 스프레드 3개월 +0.15%p 이상 켜짐 · +0.08%p 이상 주의"))
+    try:
+        import policy_impact
+        st, ev = policy_impact.light(conn, today)
+    except Exception:
+        st, ev = "na", "정책·법안 자료를 읽지 못했어요"
+    out.append(dict(id="policy", name="정책·법안", state=st, evidence=ev,
+                    rule="최근 7일 밸류업·공매도·세제·상법·자본시장 제도 관련 법안이 통과되면 켜짐 · 관련 소식만 있으면 주의"))
+    return out
+
+
+# ---------------- 날짜별 기록과 변화 ----------------
+def ensure_history(conn):
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS diag_lights (day TEXT, id TEXT, name TEXT, state TEXT, evidence TEXT, PRIMARY KEY (day, id));
+    """)
+
+
+def snapshot(conn, today=None):
+    """오늘 신호등을 하루 한 줄씩 저장 → (이전 기록, 오늘 기록) {id: state}. 이전 기록이 없으면 이전은 {} (첫 기록은 알림 없이 기준선)"""
+    import datetime as dt
+    ensure_history(conn)
+    day = (today or dt.date.today()).isoformat()
+    prev_day = conn.execute("SELECT MAX(day) FROM diag_lights WHERE day < ?", (day,)).fetchone()[0]
+    prev = {r[0]: r[1] for r in conn.execute("SELECT id, state FROM diag_lights WHERE day=?", (prev_day,))} if prev_day else {}
+    ls = lights(conn, today)
+    conn.executemany("INSERT OR REPLACE INTO diag_lights VALUES (?,?,?,?,?)", [(day, x["id"], x["name"], x["state"], x["evidence"]) for x in ls])
+    conn.execute("DELETE FROM diag_lights WHERE day < date(?, '-400 days')", (day,))
+    conn.commit()
+    return prev, {x["id"]: x["state"] for x in ls}, ls
+
+
+def changes(prev, now, ls):
+    """알림용: 새로 켜진 신호·꺼진 신호 → ([켜진 이름], [꺼진 이름]). 이전 기록이 없으면 둘 다 빈 목록"""
+    if not prev:
+        return [], []
+    names = {x["id"]: x["name"] for x in ls}
+    on = [names[i] for i, st in now.items() if st == "on" and prev.get(i) not in (None, "on", "na")]
+    off = [names[i] for i, st in now.items() if prev.get(i) == "on" and st in ("off", "watch")]
+    return on, off
+
+
+def history(conn, days=60):
+    """[(day, {id: state})] 오래된 것부터 (최근 days일)"""
+    try:
+        rows = conn.execute("SELECT day, id, state FROM diag_lights ORDER BY day").fetchall()
+    except sqlite3.OperationalError:
+        return []
+    by = {}
+    for d, i, st in rows:
+        by.setdefault(d, {})[i] = st
+    return sorted(by.items())[-days:]
+
+
+def lead_table(conn, level=15):
+    """과거 코스피가 -level%를 처음 넘어선 날 앞뒤로, 자료가 있는 세 신호(금리·환율·신용)가 켜져 있었나.
+    [{date, dd, lights: {id: (그날 상태, 이전 60일 안에 처음 켜진 날 또는 None, 근거 없음이면 None)}}]"""
+    import deriv_bond as dvb
+    import drawdown_history as dh
+    import stock_market as sm
+    kospi = list(sm.series(conn, "idx:KOSPI"))
+    eps = dh.episodes(kospi, level) if len(kospi) > dh.LOOKBACK + 60 else []
+    us, fx = dvb.series(conn, "bond:us10"), sm.series(conn, "ecos:usdkrw")
+    corp, ktb = sm.series(conn, "ecos:corp3"), sm.series(conn, "ecos:ktb3")
+    import datetime as dt
+
+    def upto(pts, day):
+        return [p for p in pts if p[0] <= day]
+    out = []
+    for e in eps:
+        d0 = dt.date.fromisoformat(e["date"])
+        row = {}
+        for sid, fn in (("rate", lambda day: rate_state(upto(us, day))), ("fx", lambda day: fx_state(upto(fx, day))),
+                        ("credit", lambda day: credit_state(upto(corp, day), upto(ktb, day)))):
+            st0, _ = fn(e["date"])
+            if st0 == "na":
+                row[sid] = None
+                continue
+            first = None
+            for back in range(60, -1, -5):                  # 60일 전부터 5일 간격으로 처음 켜진 날
+                day = (d0 - dt.timedelta(days=back)).isoformat()
+                if fn(day)[0] == "on":
+                    first = day
+                    break
+            row[sid] = (st0, first)
+        out.append(dict(date=e["date"], dd=e["dd"], lights=row))
     return out
