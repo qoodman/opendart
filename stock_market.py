@@ -224,6 +224,17 @@ def sync_index(conn, log=print):
         pts = {f"{d[:4].decode()}-{d[4:6].decode()}-{d[6:].decode()}": float(v) for d, v in rows}
         if pts:
             out[sym] = save_series(conn, f"idx:{sym}", pts)
+    try:                       # S&P500 (정권별 코스피 비교용, 네이버 해외지수 일봉 — 2010-07부터 있음)
+        r = requests.get("https://api.stock.naver.com/chart/foreign/index/.INX/day", timeout=60,
+                         headers={"User-Agent": "Mozilla/5.0", "Referer": "https://m.stock.naver.com/"},
+                         params=dict(startDateTime="20100101", endDateTime=(dt.date.today() + dt.timedelta(days=1)).strftime("%Y%m%d")))
+        r.raise_for_status()
+        pts = {f"{x['localDate'][:4]}-{x['localDate'][4:6]}-{x['localDate'][6:]}": float(x["closePrice"])
+               for x in r.json() if x.get("closePrice") is not None and len(str(x.get("localDate"))) == 8}
+        if pts:
+            out["SPX"] = save_series(conn, "idx:SPX", pts)
+    except (requests.exceptions.RequestException, ValueError, KeyError) as e:
+        log(f"  ✖ S&P500: {type(e).__name__}")
     return out
 
 

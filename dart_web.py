@@ -1459,7 +1459,7 @@ def presidents_card(conn):
     try:
         import presidents
         import stock_market
-        rows = presidents.analyze(list(stock_market.series(conn, "idx:KOSPI")))
+        rows = presidents.analyze(list(stock_market.series(conn, "idx:KOSPI")), ref_points=list(stock_market.series(conn, "idx:SPX")))
     except Exception:
         return ""
     if not rows:
@@ -1469,11 +1469,13 @@ def presidents_card(conn):
         nm = escape(r["name"]) + (f' <span class="muted">{escape(r["note"])}</span>' if r["note"] else "")
         trs += (f'<tr><td>{nm}{" *" if r["partial"] else ""}</td><td>{r["start"]:%Y-%m-%d} → {r["end"]:%Y-%m-%d}<br><span class="muted">{r["years"]:.1f}년</span></td>'
                 f'<td>{r["first"]:,.0f} → {r["last"]:,.0f}</td><td>{gap_pct(r["ret"])}</td>'
-                f'<td>{"" if r["ann"] is None else gap_pct(r["ann"])}</td><td>{gap_pct(r["mdd"])}</td></tr>')
+                f'<td>{"" if r["ann"] is None else gap_pct(r["ann"])}</td><td>{gap_pct(r["mdd"])}</td>'
+                + (f'<td>{gap_pct(r["cmp"]["ref"])}<br><span class="muted">{r["cmp"]["start"]:%y-%m} 부터 코스피 {gap_pct(r["cmp"]["kospi"])}</span></td><td>{r["cmp"]["diff"] * 100:+.1f}%p</td>'
+                   if r["cmp"] else '<td class="muted">-</td><td class="muted">-</td>') + '</tr>')
     return ('<div class="card"><b>정권별 코스피</b>'
             '<div class="muted">취임 직전 종가 → 재임 마지막 날(또는 오늘) 종가. 지수는 배당을 뺀 가격지수고, 세계 증시·금리·환율·반도체 경기의 영향이 훨씬 커서 '
-            '정권이 만든 결과로 읽으면 안 돼요 (참고 자료). 권한대행 기간은 어느 쪽에도 넣지 않았어요. 최대 낙폭은 재임 중 고점 대비 가장 크게 빠진 폭이에요.</div>'
-            '<div class="scroll"><table><tr><th>정권</th><th>기간</th><th>코스피</th><th>총 변화</th><th>연환산</th><th>최대 낙폭</th></tr>'
+            '정권이 만든 결과로 읽으면 안 돼요 (참고 자료). 권한대행 기간은 어느 쪽에도 넣지 않았어요. S&P500은 2010-07부터 기록이 있어서 그 이전 정권은 비교하지 못하고, 같은 구간으로 맞춰 코스피와 차이(%p)를 냈어요(원화 기준이 아닌 지수 점수 변화라 환율은 빠져 있어요). 최대 낙폭은 재임 중 고점 대비 가장 크게 빠진 폭이에요.</div>'
+            '<div class="scroll"><table><tr><th>정권</th><th>기간</th><th>코스피</th><th>총 변화</th><th>연환산</th><th>최대 낙폭</th><th>S&amp;P500 같은 기간</th><th>코스피 − S&amp;P</th></tr>'
             f'{trs}</table></div>'
             + ('<div class="muted" style="font-size:12px">* 앱이 받아 둔 코스피 기록이 그 정권 중간에 시작해서, 기록의 첫날부터 계산했어요.</div>' if any(r["partial"] for r in rows) else "")
             + '</div>')
