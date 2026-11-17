@@ -172,6 +172,23 @@ def latest(conn):
             for r in rows}
 
 
+def cap_rank(conn, code):
+    """최근 거래일 기준 {market, rank, total, share(%), top10(%), mktcap} — 같은 시장(코스피·코스닥) 안의 시가총액 순위와 비중. 없으면 None"""
+    try:
+        day = conn.execute("SELECT MAX(bas_dd) FROM krx_daily WHERE code=?", (code,)).fetchone()[0]
+        if not day:
+            return None
+        mk, cap = conn.execute("SELECT market, mktcap FROM krx_daily WHERE code=? AND bas_dd=?", (code, day)).fetchone()
+        caps = sorted((r[0] for r in conn.execute("SELECT mktcap FROM krx_daily WHERE bas_dd=? AND market=? AND mktcap > 0", (day, mk))), reverse=True)
+    except (sqlite3.OperationalError, TypeError):
+        return None
+    if not caps or not cap or cap <= 0:
+        return None
+    tot = sum(caps)
+    return dict(market=mk, rank=1 + sum(1 for c in caps if c > cap), total=len(caps), share=100.0 * cap / tot,
+                top10=100.0 * sum(caps[:10]) / tot, mktcap=cap, bas_dd=day)
+
+
 def avg_trdval(conn, code, n=10):
     """최근 n거래일 평균 거래대금 (원). 없으면 None"""
     try:

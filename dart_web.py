@@ -1071,7 +1071,7 @@ def view_stock(conn, code, q=None):
             chart = stat + price_chart([p["date"] for p in pr], [p["close"] for p in pr], buys, avg,
                                        title=f"{name} 주가와 기관 매수", target=tgt)
     reports = view_reports(conn, code, tgt, n_br, last_close)
-    body = (head + value_line(value_map(conn).get(code)) + stock_deriv_line(conn, name) + bonds_block(conn, code) + stock_scores_block(conn, code, name) + flow_block(conn, code) + ext_block(conn, code) + chart + reports
+    body = (head + value_line(value_map(conn).get(code)) + stock_deriv_line(conn, name) + cap_rank_line(conn, code) + bonds_block(conn, code) + stock_scores_block(conn, code, name) + flow_block(conn, code) + ext_block(conn, code) + chart + reports
             + trend_block(conn, code) + group_bar + '<h2 id="sum">날짜별 평균 매수단가</h2>'
             + (t1 or '<p class="muted">매수 내역 없음</p>')
             + '<h2 id="det">모든 변동 내역</h2>' + t2)
@@ -3575,6 +3575,20 @@ def bonds_block(conn, code):
             f'<div class="muted" style="font-size:12px;margin-top:2px">전환사채·신주인수권부사채는 주식으로 바뀌면 주식 수가 늘어(희석) 주가에 부담이 될 수 있고, 유상증자도 새 주식을 발행해요. '
             '좋고 나쁨은 용도·조건에 따라 달라서 판단은 하지 않고 공시만 모았어요. 규모·가격은 DART 응답에서 읽은 값이라 비어 있거나 틀릴 수 있어요 — 공시 원문을 확인하세요 (최근 3년, 최대 8건).</div>'
             f'{lines}</div>')
+
+
+def cap_rank_line(conn, code):
+    """종목 화면: 시장 안 시가총액 순위와 비중 한 줄 (KRX 시세가 있을 때). 시총 비율로 사는 패시브(지수·ETF) 자금이 얼마나 따라붙는 종목인지 가늠하는 참고용"""
+    try:
+        import krx_api
+        r = krx_api.cap_rank(conn, code)
+    except Exception:
+        return ""
+    if not r:
+        return ""
+    big = r["rank"] <= 10
+    return (f'<div class="muted" style="margin-top:4px">시가총액 {escape(r["market"])} {r["rank"]}위 / {r["total"]}종목 · 시장 안 비중 {r["share"]:.2f}%'
+            f'{" (상위 10개 합 " + format(r["top10"], ".0f") + "%)" if big else ""} · 시총 비율로 사는 지수·ETF 자금은 비중이 큰 종목에 더 많이 들어가요 (참고용, {escape(r["bas_dd"])})</div>')
 
 
 def stock_deriv_line(conn, name):
