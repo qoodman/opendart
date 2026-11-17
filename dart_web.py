@@ -1520,6 +1520,40 @@ def jewish_test(conn):
     return test
 
 
+def view_news(conn, q):
+    """시장 → 속보: 로이터·AP·블룸버그·연합 제목 (구글 뉴스 검색). 주제·언론사로 거르기"""
+    import news
+    topic = q.get("topic", "") if q.get("topic", "") in news.TOPICS else ""
+    feeds = [f[0] for f in news.FEEDS]
+    src = q.get("src", "") if q.get("src", "") in feeds else ""
+    hours = {"6": 6, "24": 24, "72": 72}.get(q.get("h", ""), 24)
+    rows = news.recent(conn, hours=hours, topic=topic, source=src)
+
+    def link(label, **kw):
+        cur = {"topic": topic, "src": src, "h": str(hours)}
+        cur.update(kw)
+        href = "/news?" + urlencode({k: v for k, v in cur.items() if v})
+        on = all(cur.get(k) == v for k, v in kw.items())
+        return (f'<b class="chip" style="background:var(--accent);color:var(--bg)">{escape(label)}</b>' if on else f'<a class="chip" href="{href}">{escape(label)}</a>')
+
+    filt = ('<div style="margin:6px 0">' + link("전체 주제", topic="") + " " + " ".join(link(t, topic=t) for t in news.TOPICS) + '</div>'
+            '<div style="margin:6px 0">' + link("전체 언론사", src="") + " " + " ".join(link(f, src=f) for f in feeds) + " · "
+            + " ".join(link(f"{h}시간", h=str(h)) for h in (6, 24, 72)) + '</div>')
+    if not rows:
+        body = ('<div class="card">아직 받은 기사가 없어요. 서버가 10분마다 확인해서 설정한 간격(기본 20분)마다 받아요. 설정에서 \'해외 통신 속보 제목 받기\'가 켜져 있는지 확인해 주세요.</div>')
+    else:
+        items = ""
+        for title, src_name, lk, when, tl, br in rows:
+            t = f'<a href="{escape(lk)}" target="_blank" rel="noopener noreferrer">{escape(title)}</a>' if lk else escape(title)
+            items += (f'<div style="margin:8px 0">{"<span class=\"chip warn\">속보</span> " if br else ""}{t}'
+                      f'<div class="muted" style="font-size:12px">{escape(src_name)} · {when} (한국 시간) '
+                      + "".join(f'<span class="chip">{escape(x)}</span> ' for x in tl) + '</div></div>')
+        body = f'<div class="card">{items}</div>'
+    note = ('<div class="muted" style="font-size:12px">구글 뉴스 검색으로 제목·링크만 모았어요 (본문은 원문 사이트에서). 실시간이 아니라 몇 분~수십 분 늦을 수 있고, '
+            '주제 표시는 제목 단어로 단순하게 나눈 거라 틀릴 수 있어요. 기사가 주가를 움직였다는 뜻이 아니에요.</div>')
+    return page("속보", hub_tabs_row("/news") + filt + body + note)
+
+
 def view_calendar(conn, q):
     try:
         import market_calendar as mc
@@ -2301,7 +2335,7 @@ def perf_url(**kw):
     return "/ideas?" + urlencode({"t": "perf", **kw})
 
 
-MARKET_HUB = {"/market": "시장 온도", "/policy": "정책", "/radar": "대비 레이더", "/shorts": "공매도 리포트", "/derivs": "선물·채권", "/calendar": "달력"}
+MARKET_HUB = {"/market": "시장 온도", "/policy": "정책", "/radar": "대비 레이더", "/news": "속보", "/shorts": "공매도 리포트", "/derivs": "선물·채권", "/calendar": "달력"}
 
 
 REPORT_HUB = {"/": "보고서", "/new": "새 공시", "/reports": "증권사 리포트"}
@@ -4097,6 +4131,8 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     return self._redirect("/ideas?" + urlencode({"t": "rank", **{k: v for k, v in q.items() if not k.startswith("_")}}))
                 elif url.path == "/radar":
                     body = view_radar(conn, q)
+                elif url.path == "/news":
+                    body = view_news(conn, q)
                 elif url.path == "/shorts":
                     body = view_shorts(conn, q)
                 elif url.path == "/derivs":

@@ -144,6 +144,11 @@ SETTINGS_SPEC = [
      "전환사채·신주인수권부사채·교환사채·유상증자 결정 공시가 새로 올라오면 알립니다 (공시당 한 번, 최대 8건 표시). 첫 수집은 기준선이라 알림이 없습니다."),
     ("시장·정책", "DART_ETF_SHARE", "ETF 거래대금 비중 받기 (시장 지표)", "bool", "1",
      "KRX 키가 있어야 합니다. KRX 'ETF 일별매매정보'를 이용신청하면 과거까지 채우고, 아니면 장 마감 뒤(16시 이후) 수집한 날부터 쌓입니다."),
+    ("시장·정책", "DART_NEWS", "해외 통신 속보 제목 받기 (로이터·AP·블룸버그·연합)", "bool", "1",
+     "구글 뉴스 검색으로 제목·링크만 모읍니다 (실시간이 아니라 몇 분~수십 분 늦을 수 있어요). 시장 → 속보 화면에서 봅니다."),
+    ("시장·정책", "DART_NEWS_MINUTES", "속보 확인 간격(분)", "int:10:240", "20", "서버가 10분마다 확인하는 때 이 간격이 지났으면 받습니다."),
+    ("알림", "DART_NEWS_NOTIFY", "증시 속보 알림", "bool", "1", "속보·긴급 기사나 아래 키워드가 든 새 기사를 알립니다 (한 번에 최대 5건, 최근 6시간 안 기사만). 처음 받은 기사는 알리지 않습니다."),
+    ("알림", "DART_NEWS_KEYWORDS", "속보 알림 키워드", "text?", "", "쉼표로 구분, 영어·한글 모두 가능. 비우면: 속보,Fed,연준,FOMC,금리,관세,tariff,환율,반도체"),
     ("시장·정책", "DART_CAL_NOTIFY", "내일 주요 증시 일정 알림 (저녁 6시)", "bool", "1",
      "달력의 ★ 일정(동시만기·휴장·FOMC·MSCI 반영·직접 추가한 중요 일정 등)이 내일이면 전날 저녁에 알립니다."),
     ("업데이트", "DART_AUTO_UPDATE", "매일 새벽 5시에 자동 업데이트", "bool", "0",
@@ -956,6 +961,40 @@ def calendar_tick(now):
            click=(url.rstrip("/") + "/calendar") if url else "", tags=("calendar",))
 
 
+def news_tick(now):
+    """10분마다 오는 tick에서, 설정한 간격(기본 20분)이 지났으면 해외 통신 속보 제목을 받고 속보·키워드 기사를 알림"""
+    if env("DART_NEWS", "1") == "0":
+        return
+    try:
+        every = max(10, int(env("DART_NEWS_MINUTES", "20") or 20))
+    except ValueError:
+        every = 20
+    state = data_dir() / "last_news.txt"
+    try:
+        last = float(state.read_text().strip())
+    except (OSError, ValueError):
+        last = 0.0
+    if now.timestamp() - last < every * 60 - 30:
+        return
+    state.write_text(str(now.timestamp()))
+    import news
+    res = news.sync(results_db())
+    if res.get("검색 실패") == len(news.FEEDS):
+        print("뉴스 검색이 전부 실패했어요 (네트워크 확인)", flush=True)
+        return
+    if env("DART_NEWS_NOTIFY", "1") == "0":
+        return
+    conn = sqlite3.connect(results_db())
+    try:
+        hits, total = news.pending_alerts(conn, env("DART_NEWS_KEYWORDS", ""))
+    finally:
+        conn.close()
+    if hits:
+        url = env("DASHBOARD_URL")
+        lines = [f"[{h[2] or '뉴스'}] {h[1][:90]}" for h in hits] + ([f"…외 {total - len(hits)}건"] if total > len(hits) else [])
+        notify(f"증시 속보 {total}건", "\n".join(lines), click=(url.rstrip("/") + "/news") if url else (hits[0][3] or ""), tags=("newspaper",))
+
+
 def cmd_tick(args):
     """10분마다 타이머가 부름: 설정한 자동 수집 시각이 지났고 아직 안 돌았으면 수집."""
     now = dt.datetime.now()
@@ -963,6 +1002,10 @@ def cmd_tick(args):
         calendar_tick(now)
     except Exception as e:
         print(f"달력 알림 실패: {e}", flush=True)
+    try:
+        news_tick(now)
+    except Exception as e:
+        print(f"뉴스 속보 확인 실패: {e}", flush=True)
     try:
         auto_update_tick(now)
     except Exception as e:
