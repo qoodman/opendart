@@ -395,9 +395,30 @@ def indicators(conn):
         ind.note = "ECOS 키가 있으면 보입니다"
     out.append(ind)
 
+    out.append(_etf_share(conn))
     out.append(_buy_flow(conn))
     out.append(_target_revisions(conn))
     return out
+
+
+def _etf_share(conn):
+    """ETF 거래대금 비중 (ETF ÷ (주식+ETF), 코스피·코스닥). 참고용이라 신호는 매기지 않음"""
+    ind = Indicator("etf_share", "ETF 거래대금 비중")
+    try:
+        import etf_share
+        pts = [(f"{d[:4]}-{d[4:6]}-{d[6:]}", v) for d, v in etf_share.series(conn)]
+    except Exception:
+        pts = []
+    if not pts:
+        ind.note = "KRX 키가 있고 ETF 일별매매(이용신청) 또는 장 마감 뒤 수집이 쌓이면 보입니다"
+        return ind
+    last, prev = pts[-1][1], _ago(pts, 91)
+    ind.points = [v for _, v in pts[-120:]]
+    ind.value_text, ind.period = f"{last:.1f}%", pts[-1][0]
+    if prev is not None:
+        ind.change_text = f"3개월 {last - prev:+.1f}%p"
+    ind.reason = ("ETF 같은 패시브 자금 비중이 커지면 시총 큰 종목으로 돈이 쏠리고 등락이 커질 수 있어요 (가설, 참고용)")
+    return ind
 
 
 def _buy_flow(conn):

@@ -142,6 +142,8 @@ SETTINGS_SPEC = [
      "아이디어 종합 점수가 7일 사이 10점 넘게 오르거나 내린 종목을 알립니다 (종목당 7일에 한 번, 최대 6개). 점수 기록이 쌓인 뒤(수집 5일 이상)부터 나옵니다."),
     ("알림", "DART_BONDS_NOTIFY", "새 채권·증자 공시 알림", "bool", "1",
      "전환사채·신주인수권부사채·교환사채·유상증자 결정 공시가 새로 올라오면 알립니다 (공시당 한 번, 최대 8건 표시). 첫 수집은 기준선이라 알림이 없습니다."),
+    ("시장·정책", "DART_ETF_SHARE", "ETF 거래대금 비중 받기 (시장 지표)", "bool", "1",
+     "KRX 키가 있어야 합니다. KRX 'ETF 일별매매정보'를 이용신청하면 과거까지 채우고, 아니면 장 마감 뒤(16시 이후) 수집한 날부터 쌓입니다."),
     ("시장·정책", "DART_CAL_NOTIFY", "내일 주요 증시 일정 알림 (저녁 6시)", "bool", "1",
      "달력의 ★ 일정(동시만기·휴장·FOMC·MSCI 반영·직접 추가한 중요 일정 등)이 내일이면 전날 저녁에 알립니다."),
     ("업데이트", "DART_AUTO_UPDATE", "매일 새벽 5시에 자동 업데이트", "bool", "0",
@@ -608,6 +610,13 @@ def run_market_policy(log=print):
         except Exception as e:
             out["krx"] = f"실패: {e}"
             log(f"KRX 시세 실패: {e}")
+    if env("DART_ETF_SHARE", "1") != "0" and krx_key_now():           # ETF 거래대금 비중 (시장 지표)
+        try:
+            import etf_share
+            out["etf_share"] = etf_share.sync(results_db(), krx_key_now(), log=log)
+        except Exception as e:
+            out["etf_share"] = f"실패: {e}"
+            log(f"ETF 거래대금 비중 실패: {e}")
     if env("DART_KRX_DERIV", "1") != "0" and krx_key_now():           # KRX 파생상품·채권·금시장 (선물·채권 탭)
         try:
             import krx_deriv
