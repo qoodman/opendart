@@ -2821,6 +2821,50 @@ def view_events(conn, q):
         top = sorted(codes, key=lambda c: -(mc.get(c) or 0))[:n]
         return " · ".join(f'<a href="{naver_link(c)}" target="_blank" rel="noopener noreferrer">{escape(nm.get(c, c))}</a>' + (f' <span class="muted" style="font-size:11px">{_mcap_text(mc.get(c))}</span>' if mc.get(c) else "") for c in top)
     import datetime as _dt0
+
+    # ---- 앞으로 계획된 이벤트
+    import datetime as _dt1
+    today = _dt1.date.today()
+    law_rows = []
+    try:
+        import legis as _lg
+        for r in _lg.load_rows(conn, live_limit=0):
+            pm = r.get("promul") or {}
+            if pm.get("kind") == "done" and pm.get("effective") and today.isoformat() <= pm["effective"] <= (today + _dt1.timedelta(days=150)).isoformat():
+                gnames = [g[1] for g in (r.get("groups") or [])][:4]
+                law_rows.append(dict(d=pm["effective"], end="", title="법 시행: " + r["name"][:48], kind="법 시행", events=[], src="", note="공포 " + (pm.get("date") or ""), themes=gnames))
+    except Exception:
+        law_rows = []
+    ups = et.upcoming(conn, today, 150, law_rows)
+    ucards = ""
+    for u in ups:
+        dd = (_dt1.date.fromisoformat(u["d"]) - today).days
+        chips, hit = "", {}
+        for eid in u["events"]:
+            ev_ = et.EVENT_BY_ID.get(eid)
+            if ev_:
+                for k_, n_, r_, c_, sg_ in et.groups(ev_, data):
+                    if r_ == "main":
+                        h_ = hit.setdefault(n_, [0, len(c_), sg_])
+                        h_[0] += 1
+                        if h_[2] != sg_:
+                            h_[2] = "±"
+        for n_, (h0, sz, sg_) in sorted(hit.items(), key=lambda kv: (-kv[1][0], -kv[1][1]))[:8]:
+            chips += f'<span class="chip {"up" if sg_ == "+" else "down" if sg_ == "-" else ""}" style="margin:1px">{"▲" if sg_ == "+" else "▼" if sg_ == "-" else "▲▼"} {escape(n_)}</span>'
+        for n_ in u.get("themes", []):
+            chips += f'<span class="chip" style="margin:1px">{escape(n_)}</span>'
+        evl = " ".join(f'<a class="chip" style="text-decoration:none" href="/ideas?t=events&ev={e_}">{escape(et.EVENT_BY_ID[e_]["name"].split(" (")[0])}</a>' for e_ in u["events"] if e_ in et.EVENT_BY_ID)
+        when = u["d"] + (f" ~ {u['end'][5:]}" if u.get("end") else "")
+        srcl = f' · <a href="{escape(u["src"])}" target="_blank" rel="noopener noreferrer">출처</a>' if u.get("src") else ""
+        ucards += (f'<tr><td style="white-space:nowrap"><b>{"오늘" if dd == 0 else f"D-{dd}"}</b><br><span class="muted" style="font-size:11px">{escape(when)}</span></td>'
+                   f'<td><b>{escape(u["title"])}</b> <span class="chip">{escape(u["kind"])}</span>'
+                   + (f'<div class="muted" style="font-size:11px">{escape(u["note"])}{srcl}</div>' if (u.get("note") or srcl) else "")
+                   + (f'<div style="margin-top:2px">{evl}</div>' if evl else "")
+                   + '</td><td style="font-size:12px">' + (chips or '<span class="muted">테마 직접 연결 없음 (시장 전체)</span>') + '</td></tr>')
+    upcard = ('<div class="card"><b>앞으로 계획된 이벤트 (150일 안)</b>'
+              '<div class="muted" style="font-size:12px">이미 공표된 일정, 매월 반복되는 일정(계산), 시행이 정해진 법, 직접 넣은 예정 이벤트를 모았어요. 날짜는 출처 기준이고 바뀔 수 있어요. 테마는 그 종류의 이벤트에 반응한다고 사전에 적힌 테마로, 반응의 방향과 크기는 이벤트 결과에 달려 있어요.</div>'
+              + (f'<div class="scroll"><table><tr><th>언제</th><th>이벤트</th><th>반응할 수 있는 테마</th></tr>{ucards}</table></div>' if ucards else '<div class="muted" style="margin-top:6px">150일 안에 알려진 일정이 없어요. 아래 \'예정 이벤트 추가\'로 직접 넣을 수 있어요.</div>')
+              + '</div>')
     # ---- 이벤트 하나 보기
     evcard = ""
     sel = et.EVENT_BY_ID.get(q.get("ev", ""))
@@ -2835,7 +2879,7 @@ def view_events(conn, q):
                   + (f'<div style="font-size:13px;margin-top:6px"><b>{"시가총액 큰 순" if mc else "점수 순"} 종목</b> ' + stocks_html([m[0] for m in mem], 15) + '</div>' if mem else "")
                   + '<form method="post" action="/events/add" class="filters" style="margin-top:8px">'
                   f'<input type="hidden" name="event_id" value="{sel["id"]}"><input name="d" value="{_dt0.date.today().isoformat()}" size="10"> '
-                  '<input name="title" placeholder="이 이벤트가 실제로 생긴 일 (예: 한중 정상회담 APEC)" size="34"><button>이 이벤트 기록하기</button></form></div>')
+                  '<input name="title" placeholder="무슨 일인지 (제목)" size="34"><button>이 이벤트 기록하기</button></form></div>')
     # ---- 테마별 표
     kw = (q.get("th") or "").strip()
     ecat = q.get("ec") or ""
@@ -2866,10 +2910,10 @@ def view_events(conn, q):
     # ---- 이벤트 기록
     opts = "".join(f'<option value="{e["id"]}">{escape(e["cat"])} · {escape(e["name"])}</option>' for e in et.EVENTS)
     import datetime as _dt
-    addf = ('<div class="card"><b>이벤트 기록 추가 (반응 확인용)</b><form method="post" action="/events/add" class="filters" style="margin-top:6px">'
+    addf = ('<div class="card"><b>이벤트 기록·예정 추가</b><form method="post" action="/events/add" class="filters" style="margin-top:6px">'
             f'<select name="event_id">{opts}</select> <input name="d" value="{_dt.date.today().isoformat()}" size="10" title="이벤트 날짜(장 마감 후 소식이면 다음 거래일)"> '
-            '<input name="title" placeholder="제목 (예: 한중 정상회담 APEC)" size="30"> <input name="note" placeholder="메모(선택)" size="24"><button>추가</button></form>'
-            '<div class="muted" style="font-size:12px">날짜는 소식이 시장에 반영된 날(장 마감 뒤라면 다음 거래일)로 넣어요. 기준가는 그 날짜 직전 종가예요.</div>'
+            '<input name="title" placeholder="제목 (무슨 일인지)" size="30"> <input name="note" placeholder="메모(선택)" size="24"><button>추가</button></form>'
+            '<div class="muted" style="font-size:12px">지난 날짜면 주가 반응을, 앞으로의 날짜면 위 “앞으로 계획된 이벤트”에 올라가요. 날짜는 소식이 시장에 반영된 날(장 마감 뒤라면 다음 거래일)로 넣어요. 기준가는 그 날짜 직전 종가예요.</div>'
             + "".join(f'<form method="post" action="/events/add" style="display:inline"><input type="hidden" name="event_id" value="{a}"><input type="hidden" name="d" value="{d}">'
                       f'<input type="hidden" name="title" value="{escape(t)}"><input type="hidden" name="note" value="{escape(n)}"><button class="chip" style="cursor:pointer">+ {d} {escape(t)}</button></form> '
                       for a, d, t, n in et.SUGGEST) + '</div>')
@@ -2878,7 +2922,7 @@ def view_events(conn, q):
     body = ""
     for lr in logs:
         ev = et.EVENT_BY_ID.get(lr["event_id"])
-        if not ev:
+        if not ev or lr["d"] > today.isoformat():
             continue
         mem = et.members(ev, data, top=12, mcap=mc)
         rs = et.reactions(conn, lr["d"], [(c, n) for c, n, _, _ in mem])
@@ -2892,8 +2936,8 @@ def view_events(conn, q):
                  f'<div class="muted" style="font-size:12px;margin:4px 0">{ordtxt} 상위 {len(rs)}종목 (테마: {escape(", ".join(dict.fromkeys(w for m in mem for w in m[3][:1])))})</div>'
                  + _ev_react_table(rs, mc) + pxb + '</div>')
     if not logs:
-        body = '<div class="card muted">아직 기록이 없어요. 위에서 오늘의 이벤트(또는 아래 예시)를 추가하면 연결 종목의 주가 반응이 나와요.</div>'
-    return page("이벤트 테마", flash + intro + evcard + table + addf + body)
+        body = '<div class="card muted">지난 이벤트 기록이 아직 없어요. 위에서 이벤트와 날짜를 추가하면 연결 종목의 주가 반응이 나와요.</div>'
+    return page("이벤트 테마", flash + intro + upcard + evcard + table + addf + body)
 
 
 def view_legstudy(conn, q):
