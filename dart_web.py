@@ -105,6 +105,51 @@ _ICONS = {}
 _NAV = {"realestate": "", "links": [], "status": {}, "has_update": False}   # 요청마다 설정·진행 상황으로 새로 채움
 
 
+_FRESH = {"t": 0.0, "v": ""}
+
+
+def _ago(stamp):
+    """'YYYY-MM-DD HH:MM(:SS)' → '3시간 전' (한국 시간 기준 서버 시각)"""
+    try:
+        t = dt.datetime.strptime(stamp[:16], "%Y-%m-%d %H:%M")
+    except (ValueError, TypeError):
+        return ""
+    sec = max(0, int((dt.datetime.now() - t).total_seconds()))
+    return "방금" if sec < 120 else f"{sec // 60}분 전" if sec < 3600 else f"{sec // 3600}시간 전" if sec < 86400 * 2 else f"{sec // 86400}일 전"
+
+
+def freshness_html():
+    """수집 메뉴 안: 보고서·시장 자료를 마지막으로 받은 때 (30초마다만 다시 읽음, 없으면 빈 문자열)"""
+    if time.time() - _FRESH["t"] < 30:
+        return _FRESH["v"]
+    out = ""
+    try:
+        db = os.path.join(_DATA_DIR["path"] or ".", "results.sqlite")
+        if os.path.exists(db):
+            c = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+            try:
+                rows = []
+                try:
+                    r = c.execute("SELECT finished FROM runs WHERE finished != '' ORDER BY started DESC LIMIT 1").fetchone()
+                    if r and r[0]:
+                        rows.append(("보고서·리포트", r[0]))
+                except sqlite3.Error:
+                    pass
+                try:
+                    r = c.execute("SELECT value FROM macro_meta WHERE key='synced'").fetchone()
+                    if r and r[0]:
+                        rows.append(("시장·정책", json.loads(r[0])))
+                except (sqlite3.Error, ValueError):
+                    pass
+                out = "".join(f'<div class="muted" style="padding:1px 8px;font-size:12px">{n} 마지막 수집: {escape(v[:16])} ({_ago(v)})</div>' for n, v in rows)
+            finally:
+                c.close()
+    except Exception:
+        out = ""
+    _FRESH.update(t=time.time(), v=out)
+    return out
+
+
 def run_widget():
     """모든 화면 위쪽 오른쪽: '지금 수집' 버튼, 수집 중이면 진행률"""
     st = _NAV.get("status") or {}
@@ -119,6 +164,7 @@ def run_widget():
                 "</script>")
     return ('<details class="runmenu"><summary class="runbtn">지금 수집 ▾</summary>'
             '<form method="post" action="/run" class="menu">'
+            + freshness_html() +
             '<button name="what" value="all">전체 <span class="muted">보고서 + 리포트</span></button>'
             '<button name="what" value="dart">보고서만 <span class="muted">DART 공시</span></button>'
             '<button name="what" value="reports">리포트만 <span class="muted">몇 분이면 끝</span></button>'
@@ -184,6 +230,45 @@ def header_actions():
     return f'<div class="runbar">{update_widget()}{run_widget()}</div>'
 
 
+UX_CSS = """
+.fabs{position:fixed;right:12px;bottom:14px;display:flex;flex-direction:column;gap:8px;z-index:20}
+.fabs button{width:40px;height:40px;border-radius:50%;padding:0;font-size:17px;line-height:1;background:var(--card);color:var(--fg);
+border:1px solid var(--line);box-shadow:0 2px 8px rgba(0,0,0,.18);opacity:.92}
+.fabs button.hide{display:none}
+details>summary{cursor:pointer}
+"""
+# 모든 화면 공통 작은 편의 기능 (스크립트가 없어도 화면은 그대로 동작)
+UX_JS = r"""
+(function(){
+function menus(){return document.querySelectorAll('details.runmenu');}
+// 1) 업데이트·수집 메뉴: 바깥을 누르거나 Esc를 누르면 닫히고, 하나를 열면 다른 하나는 닫힘
+document.addEventListener('click',function(e){menus().forEach(function(m){if(m.open&&!m.contains(e.target))m.open=false;});},true);
+document.addEventListener('keydown',function(e){if(e.key==='Escape')menus().forEach(function(m){m.open=false;});});
+menus().forEach(function(m){m.addEventListener('toggle',function(){if(m.open)menus().forEach(function(o){if(o!==m)o.open=false;});});});
+// 2) 접고 펼친 카드 기억 (화면 주소 + 제목 기준, 이 브라우저에만 저장)
+var store=null,key='dartd:'+location.pathname+'?'+((new URLSearchParams(location.search)).get('t')||'');
+try{store=JSON.parse(localStorage.getItem(key)||'{}')||{};}catch(e){store={};}
+function label(d){var s=d.querySelector(':scope>summary');return s?s.textContent.replace(/\s+/g,' ').trim().slice(0,48):'';}
+var ds=document.querySelectorAll('main details');
+ds.forEach(function(d){var l=label(d);if(l&&Object.prototype.hasOwnProperty.call(store,l))d.open=!!store[l];});
+ds.forEach(function(d){d.addEventListener('toggle',function(){var l=label(d);if(!l)return;store[l]=d.open;
+try{var ks=Object.keys(store);if(ks.length>200)delete store[ks[0]];localStorage.setItem(key,JSON.stringify(store));}catch(e){}});});
+// 3) 맨 위로 · 모두 접기/펴기 (긴 화면에서만)
+if(ds.length>=3||document.body.scrollHeight>2200){
+var box=document.createElement('div');box.className='fabs';
+var up=document.createElement('button');up.textContent='↑';up.title='맨 위로';up.className='hide';
+up.onclick=function(){window.scrollTo({top:0,behavior:'smooth'});};
+var tg=document.createElement('button');tg.textContent='▾▴';tg.title='카드 모두 접기/펴기';tg.style.fontSize='13px';
+tg.onclick=function(){var any=false;ds.forEach(function(d){if(d.open)any=true;});ds.forEach(function(d){d.open=!any;});};
+if(ds.length>=3)box.appendChild(tg);box.appendChild(up);document.body.appendChild(box);
+addEventListener('scroll',function(){up.classList.toggle('hide',window.scrollY<500);},{passive:true});}
+// 4) '/' 를 누르면 첫 검색칸으로
+document.addEventListener('keydown',function(e){if(e.key!=='/'||e.ctrlKey||e.metaKey||e.altKey)return;
+var t=e.target&&e.target.tagName;if(t==='INPUT'||t==='TEXTAREA'||t==='SELECT')return;
+var i=document.querySelector('main input[type=search],main input[name=kw],main input[name=q],main input[name=th]');if(i){e.preventDefault();i.focus();i.select();}});
+})();
+"""
+
 _CTX = threading.local()      # 요청마다 따로: 화면 맨 위에 붙일 탭 줄 (아이디어·시장 묶음)
 
 
@@ -195,13 +280,13 @@ def page(title, body, refresh=False, charts=False):
     meta = '<meta http-equiv="refresh" content="15">' if refresh else ""
     return f"""<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">{meta}
-<title>{escape(title)}</title><style>{CSS}{CHART_CSS}</style>
+<title>{escape(title)}</title><style>{CSS}{CHART_CSS}{UX_CSS}</style>
 <link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#2b5a9e">
 <link rel="icon" href="/icon-192.png"><link rel="apple-touch-icon" href="/icon-192.png">
 </head><body>
 <header><div class="hrow"><b>DART 단순투자</b>{header_actions()}</div><nav><a href="/">보고서</a><a href="/ideas">아이디어</a><a href="/market">시장</a>
 <a href="/settings">설정</a>{extra}</nav>
-</header><main>{body}</main>{"<script>" + CHART_JS + "</script>" if charts else ""}</body></html>""".encode()
+</header><main>{body}</main>{"<script>" + CHART_JS + "</script>" if charts else ""}<script>{UX_JS}</script></body></html>""".encode()
 
 
 # ---------------- 표시 도우미 ----------------
