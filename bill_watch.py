@@ -484,6 +484,24 @@ def check(assembly_key, conn=None, session=None):
     else:
         it["note"] = "열린국회정보 키가 없어요"
     items.append(it)
+    it = dict(op="과거 국회 법안 (입법 주가 분석용: 20·21·22대 범위와 단계 날짜)", ok=False, day="", total=0, sample=None, note="")
+    if assembly_key:
+        try:
+            import bill_history
+            pr = bill_history.probe(sp.Client("", "", assembly_key))
+            got = [p for p in pr if p["total"]]
+            smp = {}
+            for p in pr:
+                smp[f"{p['age']}대"] = (f"{p['total']:,}건 · 발의 {p['first'] or '-'} ~ {p['last'] or '-'} · 단계 날짜(표본 {p.get('sample_n', 0)}건 중) " +
+                                      ", ".join(f"{k} {v}" for k, v in p["fields"].items())) if p["total"] else (p["error"] or "받아지지 않아요 (0건)")
+            it.update(ok=bool(got), total=sum(p["total"] for p in pr), day=max((p["last"] for p in pr), default=""), sample=smp)
+            if len(got) < len(pr):
+                it["note"] = "일부 대는 받아지지 않았어요. 받아지는 대까지만 분석해요 (분석 범위가 좁아져요)."
+        except Exception as e:
+            it["note"] = f"{type(e).__name__}: {str(e)[:140]}"
+    else:
+        it["note"] = "열린국회정보 키가 없어요"
+    items.append(it)
     it = dict(op="법안 상세 페이지에서 제안이유 읽기", ok=False, day="", total=0, sample=None, note="")
     if first and first.get("DETAIL_LINK"):
         try:

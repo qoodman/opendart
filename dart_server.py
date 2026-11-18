@@ -837,6 +837,43 @@ def legis_action(action, form):
 _LEGIS_JOB = {"thread": None}
 
 
+def legstudy_run():
+    """입법 주가 분석의 '받고 분석하기': 과거 법안·기업 연결·주가·계산을 별도 프로세스(낮은 우선순위)로. (성공 여부, 안내)"""
+    import subprocess
+    import legis
+    status = data_dir() / "legstudy_status.json"
+    st = legis.read_status(str(status))
+    if st and st.get("running"):
+        return False, "이미 진행 중이에요. 아래 진행 상황을 확인하세요."
+
+    def lower_priority():
+        try:
+            os.nice(10)
+        except OSError:
+            pass
+    try:
+        logf = open(data_dir() / "legstudy.log", "ab")
+        proc = subprocess.Popen([sys.executable, str(ROOT / "dart_server.py"), "legis-study"], cwd=str(ROOT), stdout=logf, stderr=subprocess.STDOUT,
+                                start_new_session=True, preexec_fn=lower_priority)
+    except Exception as e:
+        return False, f"시작하지 못했어요: {type(e).__name__}: {str(e)[:100]}"
+    threading.Thread(target=proc.wait, daemon=True).start()
+    try:
+        status.write_text(json.dumps({"running": True, "pid": proc.pid, "started": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "finished": "",
+                                      "steps": [{"name": n, "state": "wait", "msg": ""} for n in ("과거 법안 받기", "법안 → 기업 연결", "종목 주가 받기", "분석 계산")]},
+                                     ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+    return True, "시작했어요 (별도 프로세스, 화면은 그대로 쓸 수 있어요). 과거 법안·주가를 받느라 처음에는 20~40분 걸릴 수 있어요."
+
+
+def cmd_legis_study(args):
+    """(서버 내부용) legstudy_run()이 띄우는 별도 프로세스"""
+    import legis_study
+    legis_study.run_all(str(results_db()), env_shared("ASSEMBLY_API_KEY"), str(data_dir() / "legstudy_status.json"), log=lambda m: print(m, flush=True))
+    return 0
+
+
 def legis_prepare():
     """입법 영향 탭의 '지금 준비하기': 테마·업종 → 국회 법안 목록 → 제안이유 → 공포일 → 영향 기업 계산을 **별도 프로세스(낮은 우선순위)**로 돌림.
     대시보드 안에서 돌리면 작은 서버에서 화면이 멈추고, 대시보드가 재시작될 때 같이 죽기 때문. (성공 여부, 안내)"""
@@ -1771,7 +1808,7 @@ def cmd_web(args):
                     update_info=update_info, check_update=check_update, start_update=start_update,
                     backup_list=backup_list, backup_busy=backup_busy, backup_start=backup_start,
                     backup_file=backup_file, krx_key=krx_key_now, save_krx_key=save_krx_key,
-                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
+                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, legstudy_run=legstudy_run, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
     serve(results_db(), host=args.host, port=args.port, child_env=child_env,
           get_key=lambda: read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", ""),
           save_key=save_key, settings_api=settings_api)
@@ -1794,6 +1831,7 @@ def main(argv=None):
     w.add_argument("--port", type=int, default=int(env("DART_WEB_PORT", "8766")))
     sub.add_parser("tick", help="자동 수집 시각이면 수집 (타이머용)")
     sub.add_parser("legis-prepare", help="(내부용) 입법 영향 기업 준비 작업")
+    sub.add_parser("legis-study", help="(내부용) 입법 주가 분석 작업")
     sub.add_parser("update", help="최신 코드 받아 설치")
     sub.add_parser("net-check")
     sub.add_parser("notify-test")
@@ -1809,7 +1847,7 @@ def main(argv=None):
     a = p.parse_args(argv)
     return {"run": cmd_run, "web": cmd_web, "net-check": cmd_net_check, "notify-test": cmd_notify_test,
             "status": cmd_status, "set-env": cmd_set_env, "hk-check": cmd_hk_check, "reports-check": cmd_hk_check, "market-check": cmd_market_check, "parse-check": cmd_parse_check,
-            "tick": cmd_tick, "update": cmd_update, "legis-prepare": cmd_legis_prepare}[a.cmd](a)
+            "tick": cmd_tick, "update": cmd_update, "legis-prepare": cmd_legis_prepare, "legis-study": cmd_legis_study}[a.cmd](a)
 
 
 if __name__ == "__main__":

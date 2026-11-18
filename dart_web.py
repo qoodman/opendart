@@ -2532,6 +2532,141 @@ def view_legis(conn, q):
     return page("입법 영향 기업", legis_watch_card(conn, watch, rows) + head + warn + body, refresh=running)
 
 
+def _path_svg(path, w=150, h=40):
+    """평균 초과수익 경로(D-20…D+20, %) 작은 그림: 점선=D0(단계 날짜), 가는 선=0%"""
+    if not path or len(path) < 3:
+        return ""
+    lo, hi = min(path + [0.0]), max(path + [0.0])
+    rg = (hi - lo) or 1.0
+    y = lambda v: h - 3 - (v - lo) / rg * (h - 6)
+    n = len(path) - 1
+    pts = " ".join(f"{1 + i * (w - 2) / n:.1f},{y(v):.1f}" for i, v in enumerate(path))
+    d0 = 1 + 20 * (w - 2) / 40
+    return (f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}" style="vertical-align:middle" role="img" aria-label="D-20부터 D+20까지 평균 초과수익 경로">'
+            f'<line x1="1" x2="{w - 1}" y1="{y(0):.1f}" y2="{y(0):.1f}" stroke="currentColor" stroke-opacity=".3"/>'
+            f'<line x1="{d0:.1f}" x2="{d0:.1f}" y1="0" y2="{h}" stroke="currentColor" stroke-opacity=".5" stroke-dasharray="3 2"/>'
+            f'<polyline points="{pts}" fill="none" stroke="var(--accent)" stroke-width="1.6"/></svg>')
+
+
+def _p_text(p):
+    if p is None:
+        return "-"
+    return "&lt;0.01" if p < 0.01 else f"{p:.2f}"
+
+
+def _study_verdict(p):
+    """(문구, 칩 클래스): 표본이 충분(날짜 30개 이상)하고 우연(같은 종목의 무작위 날짜)과 확실히 다를 때(p<0.01)만 '우연 밖'. 여러 묶음을 동시에 보니 기준을 엄격히."""
+    if p["n_dates"] < 30:
+        return "표본 적음", ""
+    bits, cls = [], ""
+    # 우연 대조군(p<0.01)과 날짜 군집 t값(|t|≥3)이 둘 다 동의할 때만 (독립된 두 방법이 모두 같은 말을 해야 표시)
+    if p.get("pre_p") is not None and p["pre_p"] < 0.01 and p.get("pre") is not None and abs(p.get("pre_t") or 0) >= 3:
+        bits.append("사전 " + ("상승" if p["pre"] > 0 else "하락"))
+    if p.get("post10_p") is not None and p["post10_p"] < 0.01 and p.get("post10") is not None and abs(p.get("post10_t") or 0) >= 3:
+        bits.append("사후 " + ("상승" if p["post10"] > 0 else "하락"))
+        cls = "up" if p["post10"] > 0 else "down"
+    if not bits:
+        return "뚜렷한 패턴 없음", ""
+    return " · ".join(bits) + " (우연 밖)", cls
+
+
+def _study_row(label, p):
+    v, cls = _study_verdict(p)
+    pre = "-" if p["pre"] is None else f'{p["pre"]:+.1f}% <span class="muted" style="font-size:11px">(p {_p_text(p.get("pre_p"))})</span>'
+    p10 = "-" if p["post10"] is None else f'{p["post10"]:+.1f}% <span class="muted" style="font-size:11px">(p {_p_text(p.get("post10_p"))})</span>'
+    p20 = "-" if p["post20"] is None else f'{p["post20"]:+.1f}%'
+    return (f'<tr><td>{escape(label)}</td><td>{p["n_events"]:,}<br><span class="muted" style="font-size:11px">날짜 {p["n_dates"]:,} · 종목 {p["n_stocks"]:,}</span></td>'
+            f'<td>{_path_svg(p["path"])}</td><td>{pre}</td><td>{p10}</td><td>{p20}</td><td><span class="chip {cls}">{escape(v)}</span></td></tr>')
+
+
+def _study_table(rows_html):
+    return ('<div class="scroll"><table><tr><th>구분</th><th>이벤트</th><th>평균 초과수익 경로<br><span class="muted" style="font-size:11px">D-20…D+20, 점선=단계 날짜</span></th>'
+            '<th>사전<br><span class="muted" style="font-size:11px">D-20→D-1</span></th><th>사후 10일<br><span class="muted" style="font-size:11px">D0→D+10</span></th>'
+            f'<th>사후 20일</th><th>판정</th></tr>{rows_html}</table></div>')
+
+
+def view_legstudy(conn, q):
+    """아이디어 → 입법 주가 분석: 과거 법안의 단계 날짜 전후로, 연결된 기업의 주가가 지수보다 얼마나 더 움직였나 (이벤트 스터디)"""
+    import bill_history
+    import legis as lg
+    import legis_study as ls
+    d = Path(_DATA_DIR["path"] or ".")
+    st = lg.read_status(str(d / "legstudy_status.json"))
+    running = bool(st and st.get("running"))
+    res, meta = ls.results(conn)
+    cov = bill_history.coverage(conn)
+
+    def n(sql):
+        r = lg._q(conn, sql)
+        return r[0][0] if r else 0
+    cnt = dict(bills=n("SELECT COUNT(*) FROM hist_bills"), pairs=n("SELECT COUNT(*) FROM hist_map"), priced=n("SELECT COUNT(*) FROM study_stock WHERE n > 0"))
+    msg = q.get("msg", "")
+    flash = f'<div class="card {"warn" if msg.startswith("✖") else ""}">{escape(msg)}</div>' if msg else ""
+    intro = ('<div class="card"><b>입법 주가 분석</b>'
+             '<div class="muted">과거 법안의 <b>단계 날짜</b>(발의 · 소관위 회부·상정·처리 · 법사위 · 본회의) 전후로, 그 법안에 닿는다고 짐작한 기업의 주가가 <b>지수보다 얼마나 더 움직였는지</b>를 평균 낸 기록이에요. '
+             '같은 기업의 <b>무작위 날짜</b>를 대조군으로 삼아, 우연으로 나올 만한 크기인지(p값)도 함께 봐요. 투자 권유가 아니라 과거 기록 분석이에요.</div>'
+             '<details style="margin-top:6px"><summary><b style="font-size:13px">꼭 알아 둘 한계 (투자 지표로 쓰기 전에)</b></summary>'
+             '<ul class="muted" style="margin:6px 0 0;padding-left:18px;font-size:13px">'
+             '<li><b>법안 → 기업 연결은 짐작</b>이에요. 테마 구성도 \'지금\' 기준이라, 과거에 속했던 종목과 상장폐지된 종목이 빠진 <b>생존 편향</b>이 있어요.</li>'
+             '<li><b>통과/폐기별 비교는 선견 편향</b>이에요. 결과를 사후에 알고 나눈 것이라 그 시점의 투자 신호가 아니에요. 단계에 도달한 시점에 알 수 있는 정보로 나눈 <b>단계별·연결 확실도별</b> 결과만 지표 후보가 될 수 있어요.</li>'
+             '<li>시장 전체 요인(정권·금리), 같은 날 몰린 소식, 소문에 의한 선반영이 섞여요. 표본이 작은 묶음은 우연일 가능성이 커요.</li>'
+             '<li>여러 묶음을 동시에 보면 우연히 \'유의\'해 보이는 것이 몇 개는 꼭 나와요. 그래서 우연 대조군 p&lt;0.01, 날짜 군집 |t|≥3, 날짜 30개 이상을 <b>모두</b> 만족할 때만 \'우연 밖\'으로 표시해요. 묶음끼리 같은 이벤트를 공유하므로(예: 단계별과 분야별) 우연 하나가 여러 줄로 겹쳐 보일 수도 있어요.</li>'
+             '<li>거래비용·유동성(특히 소형주)은 반영하지 않았어요. 가격 흐름이 보였다고 수익이 났을 거라는 뜻이 아니에요.</li></ul></details></div>')
+    # ---- 준비 상태
+    cov_txt = " · ".join(f'{c["age"]}대 {c["n"]:,}건({c["first"][:7]}~{c["last"][:7]}{"" if c["done"] else ", 받는 중"})' for c in cov) or "아직 받은 과거 법안이 없어요"
+    icon = {"ok": "✔", "fail": "✖", "run": "…", "wait": "·"}
+    steps = ""
+    if st:
+        for s_ in st.get("steps", []):
+            steps += (f'<div style="margin:3px 0"><b>{icon.get(s_["state"], "")} {escape(s_["name"])}</b> '
+                      f'<span class="{"warn" if s_["state"] == "fail" else "muted"}" style="font-size:12px">{escape(s_.get("msg", ""))}</span></div>')
+        steps = (f'<div style="margin-top:8px"><b style="font-size:13px">{"진행 중" if running else "마지막 실행 결과"}</b> '
+                 f'<span class="muted" style="font-size:12px">{escape(st.get("started", ""))} ~ {escape(st.get("finished", "") or "…")}</span>{steps}</div>')
+    state = (f'<div class="muted" style="font-size:13px">받아 둔 과거 법안: {escape(cov_txt)}<br>기업에 연결된 법안-기업 쌍 {cnt["pairs"]:,} · 주가를 받은 종목 {cnt["priced"]:,} · '
+             f'분석한 이벤트 {int(meta.get("n_events", 0) or 0):,}건' + (f' · 마지막 계산 {escape(meta.get("computed", ""))}' if meta.get("computed") else "") + '</div>')
+    btn = ('<form method="post" action="/legstudy/run" class="filters" style="margin:8px 0 0">'
+           f'<button{" disabled" if running else ""}>{"진행 중…" if running else ("다시 받고 분석하기" if res else "과거 법안·주가 받고 분석하기")}</button>'
+           '<span class="muted" style="font-size:12px">별도 프로세스로 돌려서 화면은 그대로 쓸 수 있어요 (처음엔 20~40분, 분석 계산 단계에서 서버 메모리를 잠시 300MB쯤 써요). 먼저 \'입법 영향 기업\' 탭에서 준비를 마쳐 두세요.</span></form>')
+    prep = (f'<div class="card"><b>준비 상태</b>{state}{btn}{steps}</div>')
+    if not res:
+        body = ('<div class="card"><div class="muted">아직 분석 결과가 없어요. 위 버튼으로 과거 법안과 주가를 받아 분석하세요. '
+                '과거 법안이 받아지는 범위(20·21·22대)는 설정 → 외부 데이터 연결 확인 → <b>법안·종목 확인</b>의 \'과거 국회 법안\' 줄에서 먼저 볼 수 있어요.</div></div>')
+        return page("입법 주가 분석", flash + intro + prep + body, refresh=running)
+    # ---- 요약
+    sig = []
+    for (grp, key), p in res.items():
+        if p["n_dates"] < 30:
+            continue
+        v, _ = _study_verdict(p)
+        if "우연 밖" in v:
+            sig.append((grp, key, p, v))
+    sig.sort(key=lambda x: -x[2]["n_dates"])
+    n_tested = sum(1 for p in res.values() if p["n_dates"] >= 30)
+    lines = "".join(f'<li><b>{escape(g)} · {escape(k.replace("|", " · "))}</b>: {escape(v)} — 사전 {p["pre"]:+.1f}%, 사후 10일 {p["post10"]:+.1f}% (날짜 {p["n_dates"]:,}개)</li>' for g, k, p, v in sig[:8])
+    summary = ('<div class="card"><b>한눈에 보기</b>'
+               + (f'<ul style="margin:6px 0 0;padding-left:18px">{lines}</ul>' if sig else
+                  '<div style="margin-top:6px"><b>뚜렷한 패턴이 없어요.</b> 표본이 충분한 묶음 중 우연과 확실히 다른 것이 없었어요. 법안 단계 소식만으로 매매할 근거가 이 데이터에서는 확인되지 않았어요.</div>')
+               + f'<div class="muted" style="font-size:12px;margin-top:6px">표본 충분(날짜 30개 이상) 묶음 {n_tested}개를 동시에 봤으므로, 우연만으로도 p&lt;0.01이 약 {n_tested * 2 * 0.01:.1f}개 나올 수 있어요. '
+                 '위 항목이 많지 않다면 우연일 가능성을 먼저 의심하세요. 사전 상승은 \'소문·기대로 미리 오른 것\', 사후 하락은 \'재료 소멸\'과 같은 모양이에요.</div></div>')
+    # ---- 단계별
+    order = [s for s, _ in ls.STAGES]
+    t1 = "".join(_study_row(s, res[("단계", s)]) for s in order if ("단계", s) in res)
+    t2 = "".join(_study_row(f"{s} · {tier}", res[("단계×연결", f"{s}|{tier}")]) for s in order for tier in ("직접 언급", "개념·테마 짐작") if ("단계×연결", f"{s}|{tier}") in res)
+    t3 = "".join(_study_row(f"{s} · {oc}", res[("단계×결과", f"{s}|{oc}")]) for s in order for oc in ("통과", "폐기", "심사 중") if ("단계×결과", f"{s}|{oc}") in res)
+    sec = lambda title, note, tbl: (f'<div class="card"><b>{title}</b><div class="muted" style="font-size:13px;margin:2px 0 4px">{note}</div>{tbl}</div>') if tbl else ""
+    b1 = sec("단계별", "단계 날짜(D0)를 기준으로 연결된 기업의 지수 대비 초과수익. 이 시점에 알 수 있는 정보라서 지표 후보가 될 수 있는 구분이에요.", _study_table(t1) if t1 else "")
+    b2 = sec("연결 확실도별", "법안 문구에 기업 이름이 직접 나온 경우와 개념·테마로 짐작한 경우를 나눠 봐요. 직접 언급이 더 정확한 연결이에요 (표본은 적어요).", _study_table(t2) if t2 else "")
+    b3 = sec("결과별 (통과 / 폐기 / 심사 중) — 사후 정보", "<b class=\"warn\">결과를 사후에 알고 나눈 것이라 투자 신호가 아니에요.</b> \'통과한 법안은 올랐다\'는 모양이 나와도 그 시점에는 통과 여부를 몰랐어요. 어떤 법안이 어떤 길을 갔는지 보는 용도예요.", _study_table(t3) if t3 else "")
+    # ---- 분야별
+    ct = ""
+    for stage in ("발의", "소관위 처리", "본회의 처리"):
+        rows = sorted(((k.split("|", 1)[1], p) for (g, k), p in res.items() if g == "분야" and k.startswith(stage + "|")), key=lambda x: -x[1]["n_dates"])[:10]
+        if rows:
+            ct += f'<div style="margin-top:8px"><b style="font-size:13px">{escape(stage)} 단계</b>' + _study_table("".join(_study_row(c, p) for c, p in rows)) + "</div>"
+    b4 = sec("분야별", "법안이 읽힌 분야(개념)별. 표본 15건·날짜 8개 이상인 묶음만 나와요.", ct)
+    return page("입법 주가 분석", flash + intro + prep + summary + b1 + b2 + b3 + b4, refresh=running)
+
+
 def view_calendar(conn, q):
     try:
         import market_calendar as mc
@@ -2899,12 +3034,12 @@ IDEA_TABS = {"overall": "종합", "mine": "내 종목 점수", "cheap": "기관 
              "rank": "종목 순위", "score": "점수표 (오일전문가)", "perf": "운용사 성적표",
              "lynch": "피터 린치", "buffett": "워렌 버핏",
              "graham": "벤저민 그레이엄", "magic": "마법공식", "fscore": "F-스코어", "momentum": "모멘텀",
-             "legis": "입법 영향 기업"}
-IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "legis", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
+             "legis": "입법 영향 기업", "legstudy": "입법 주가 분석"}
+IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "legis", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf", "legstudy"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
 
 
 IDEA_SECTIONS = [("점수", ["overall", "mine"]), ("투자 방법", ["lynch", "buffett", "graham", "magic", "fscore", "momentum"]),
-                 ("종목 찾기", ["cheap", "cluster", "super", "legis", "rank"]), ("평가·성적", ["score", "perf"])]
+                 ("종목 찾기", ["cheap", "cluster", "super", "legis", "rank"]), ("평가·성적", ["score", "perf", "legstudy"])]
 
 
 def idea_tab_html(active, link=None):
@@ -3335,6 +3470,12 @@ def view_ideas(conn, q):
         q = {**q, "t": "overall"}
     if q.get("t") == "mine":
         return view_mine(conn, q)
+    if q.get("t") == "legstudy":
+        _CTX.pre = idea_tabs_row("legstudy")
+        try:
+            return view_legstudy(conn, q)
+        finally:
+            _CTX.pre = ""
     if q.get("t") == "legis":
         _CTX.pre = idea_tabs_row("legis")
         try:
@@ -5319,6 +5460,12 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 S = settings()
                 ok, why = S["legis_prepare"]() if "legis_prepare" in S else (False, "이 서버 버전은 지원하지 않아요")
                 return self._redirect("/ideas?" + urlencode({"t": "legis", "msg": ("✔ " if ok else "✖ ") + why}))
+            if path == "/legstudy/run" and settings_api:
+                n = min(int(self.headers.get("Content-Length") or 0), 4096)
+                self.rfile.read(n)
+                S = settings()
+                ok, why = S["legstudy_run"]() if "legstudy_run" in S else (False, "이 서버 버전은 지원하지 않아요")
+                return self._redirect("/ideas?" + urlencode({"t": "legstudy", "msg": ("✔ " if ok else "✖ ") + why}))
             if path.startswith("/legis/") and path != "/legis/prepare" and settings_api:
                 act = path[len("/legis/"):]
                 if act not in ("watch_add", "watch_del", "watch_import", "fb_no", "fb_yes", "fb_del"):

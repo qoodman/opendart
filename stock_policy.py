@@ -233,9 +233,9 @@ class Client:
                         "org": g("소관부처명")})
         return out
 
-    def bills_page(self, keyword="", page=1, size=100):
-        """한 쪽 → (rows, 전체 건수). keyword가 비면 22대 국회 법안 전체"""
-        params = {"KEY": self.assembly_key, "Type": "json", "pIndex": page, "pSize": size, "AGE": ASSEMBLY_AGE}
+    def bills_page(self, keyword="", page=1, size=100, age=None):
+        """한 쪽 → (rows, 전체 건수). keyword가 비면 그 대(기본 22대) 국회 법안 전체"""
+        params = {"KEY": self.assembly_key, "Type": "json", "pIndex": page, "pSize": size, "AGE": age or ASSEMBLY_AGE}
         if keyword:
             params["BILL_NAME"] = keyword
         data = self._get(BILL_URL, params).json()
