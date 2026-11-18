@@ -931,6 +931,30 @@ def legstudy_run():
     return True, "시작했어요 (별도 프로세스, 화면은 그대로 쓸 수 있어요). 과거 법안·주가를 받느라 처음에는 20~40분 걸릴 수 있어요."
 
 
+def fin_action(action, form):
+    """재무제표 분석 탭: 내 후보 담기·빼기. (성공 여부, 한 줄 안내)"""
+    import fin_analyzer
+    code = (form.get("code") or "").strip()
+    if not re.fullmatch(r"\d{6}", code):
+        return False, "종목을 알 수 없어요."
+    conn = sqlite3.connect(results_db())
+    try:
+        fin_analyzer.ensure(conn)
+        if action == "pick":
+            conn.execute("INSERT OR IGNORE INTO fin_pick VALUES (?,?)", (code, dt.date.today().isoformat()))
+            conn.commit()
+            return True, f"{code}를 내 후보에 담았어요."
+        if action == "unpick":
+            conn.execute("DELETE FROM fin_pick WHERE code=?", (code,))
+            conn.commit()
+            return True, f"{code}를 내 후보에서 뺐어요."
+        return False, "알 수 없는 동작이에요."
+    except Exception as e:
+        return False, f"{type(e).__name__}: {str(e)[:120]}"
+    finally:
+        conn.close()
+
+
 def fin_run():
     """재무제표 분석기의 '받고 분석하기': 종목마다 최근 정기보고서(DART 전체 재무제표)를 받아 지표·점수를 계산. 별도 프로세스(낮은 우선순위). (성공 여부, 안내)"""
     import subprocess
@@ -1916,7 +1940,7 @@ def cmd_web(args):
                     update_info=update_info, check_update=check_update, start_update=start_update,
                     backup_list=backup_list, backup_busy=backup_busy, backup_start=backup_start,
                     backup_file=backup_file, krx_key=krx_key_now, save_krx_key=save_krx_key,
-                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, event_action=event_action, legstudy_run=legstudy_run, fin_run=fin_run, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
+                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, event_action=event_action, legstudy_run=legstudy_run, fin_run=fin_run, fin_action=fin_action, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
     serve(results_db(), host=args.host, port=args.port, child_env=child_env,
           get_key=lambda: read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", ""),
           save_key=save_key, settings_api=settings_api)

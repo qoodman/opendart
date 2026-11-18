@@ -39,6 +39,7 @@ def ensure(conn):
         PRIMARY KEY (code, year, rcode));
     CREATE TABLE IF NOT EXISTS fin_report_try (code TEXT PRIMARY KEY, tried TEXT, note TEXT);
     CREATE INDEX IF NOT EXISTS fin_report_code ON fin_report(code);
+    CREATE TABLE IF NOT EXISTS fin_pick (code TEXT PRIMARY KEY, added TEXT);
     """)
 
 

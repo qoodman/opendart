@@ -3316,37 +3316,54 @@ def view_fin(conn, q):
     if not rows:
         return page("재무제표 분석", flash + prep + how + '<div class="card muted">아직 분석한 종목이 없어요. 위 버튼으로 받아 주세요 (DART 키가 설정에 있어야 해요).</div>', refresh=running)
     kw = (q.get("kw") or "").strip()
-    gr = q.get("g") if q.get("g") in ("A", "B", "C", "D") else ""
-    flt = q.get("f") if q.get("f") in ("turn", "cash", "warn", "clean", "grow") else ""
     sort = q.get("s") if q.get("s") in FIN_SORTS else "score"
+    pkey = q.get("p") if q.get("p") in FIN_PRESETS else ""
+    num = lambda k: (lambda v: float(v) if re.fullmatch(r"-?\d+(\.\d+)?", v or "") else None)((q.get(k) or "").strip())
+    crit = dict(FIN_PRESETS[pkey][2]) if pkey else {}
+    for k, (key, scale) in FIN_NUMS.items():                      # 직접 넣은 숫자 조건이 프리셋을 덮어씀
+        v = num(k)
+        if v is not None:
+            crit[key] = v / scale
+    for k, key in (("cl", "clean"), ("fc", "fcf"), ("nc", "netcash"), ("tn", "turn")):
+        if q.get(k) == "1":
+            crit[key] = True
+    picks = fin_picks(conn)
+    only_pick = q.get("pick") == "1"
     sel = []
     for r in rows:
-        m = r["m"]
         if kw and kw not in (r["name"] or "") and kw not in r["code"]:
             continue
-        if gr and r["grade"] != gr:
+        if only_pick and r["code"] not in picks:
             continue
-        if flt == "turn" and not (m.get("op_py") is not None and m["op_py"] <= 0 < (m.get("op") or 0)):
-            continue
-        if flt == "cash" and not ((m.get("ocf_to_ni") or 0) >= 1.0 and (m.get("fcf") or 0) > 0):
-            continue
-        if flt == "warn" and not any(k == "warn" for k, _ in r["signals"]):
-            continue
-        if flt == "clean" and (r["score"] is None or any(k == "warn" for k, _ in r["signals"])):
-            continue
-        if flt == "grow" and not ((m.get("rev_yoy") or 0) >= 0.1 and (m.get("op_yoy") or 0) >= 0.1 and (m.get("ocf") or 0) > 0):
+        if crit and not _fin_match(r, crit, val.get(r["code"], (None, None)), mc.get(r["code"])):
             continue
         sel.append(r)
     sel.sort(key=FIN_SORTS[sort][1])
-    scored_only = [r for r in sel if r["score"] is not None]
-    show = scored_only if sort != "score" or True else sel
+    show = [r for r in sel if r["score"] is not None]
     limit = 500 if q.get("all") == "1" else 80
+    keep = {k: v for k, v in q.items() if k in ("kw", "s", "p", "pick", "all", *FIN_NUMS, "cl", "fc", "nc", "tn") and v}
+    link = lambda **kw_: "/ideas?" + urlencode({"t": "fin", **{k: v for k, v in {**keep, **kw_}.items() if v not in (None, "")}})
+    # 프리셋 칩
+    chips = " ".join((f'<b class="chip" style="background:var(--accent);color:var(--bg)" title="{escape(v[1])}">{escape(v[0])}</b>' if k == pkey else
+                      f'<a class="chip" href="/ideas?{urlencode({"t": "fin", "p": k, "s": sort})}" title="{escape(v[1])}">{escape(v[0])}</a>') for k, v in FIN_PRESETS.items())
+    chips += (' <a class="chip" href="/ideas?t=fin">조건 지우기</a>' if (pkey or crit or only_pick) else "")
+    chips += (f' <b class="chip" style="background:var(--accent);color:var(--bg)">★ 내 후보 {len(picks)}</b>' if only_pick else f' <a class="chip" href="{link(pick="1")}">★ 내 후보 {len(picks)}</a>')
+    desc = f'<div class="muted" style="font-size:12px;margin:4px 0">{escape(FIN_PRESETS[pkey][1])}</div>' if pkey else ""
+    pv = lambda key, scale: "" if key not in crit else f"{crit[key] * scale:g}"
+    nums = "".join(f'<label style="font-size:13px;white-space:nowrap">{lab} <input name="{k}" value="{pv(key, scale)}" size="5" inputmode="decimal" placeholder="{ph}"></label> '
+                   for k, (key, scale), lab, ph in FIN_NUM_FIELDS)
+    checks = "".join(f'<label style="font-size:13px;white-space:nowrap"><input type="checkbox" name="{k}" value="1"{" checked" if crit.get(key) else ""}> {lab}</label> '
+                     for k, key, lab in (("cl", "clean", "경고 없음"), ("fc", "fcf", "잉여현금흐름 흑자"), ("nc", "netcash", "순현금"), ("tn", "turn", "영업이익 흑자 전환")))
     opts = lambda cur, items: "".join(f'<option value="{k}"{" selected" if k == cur else ""}>{escape(v)}</option>' for k, v in items)
-    form = ('<form method="get" action="/ideas" class="filters"><input type="hidden" name="t" value="fin">'
-            f'<input type="search" name="kw" value="{escape(kw)}" placeholder="종목 이름·코드">'
-            f'<select name="g">{opts(gr, [("", "모든 등급"), ("A", "A (75+)"), ("B", "B (60~)"), ("C", "C (45~)"), ("D", "D")])}</select>'
-            f'<select name="f">{opts(flt, [("", "모든 종목"), ("grow", "성장 + 현금 흑자"), ("turn", "영업이익 흑자 전환"), ("cash", "현금 전환 우수 (영업CF≥순이익, FCF 흑자)"), ("clean", "경고 없음"), ("warn", "경고 있음")])}</select>'
-            f'<select name="s">{opts(sort, [(k, v[0]) for k, v in FIN_SORTS.items()])}</select><button>보기</button></form>')
+    form = ('<form method="get" action="/ideas" class="filters" style="align-items:center"><input type="hidden" name="t" value="fin">'
+            + (f'<input type="hidden" name="pick" value="1">' if only_pick else "")
+            + f'<input type="search" name="kw" value="{escape(kw)}" placeholder="종목 이름·코드">'
+            f'<select name="s">{opts(sort, [(k, v[0]) for k, v in FIN_SORTS.items()])}</select>'
+            f'<details style="flex:1 1 100%"><summary class="muted">직접 조건 넣기 (숫자 칸은 비우면 조건 없음)</summary><div style="margin:6px 0;line-height:2.1">{nums}<br>{checks}</div></details>'
+            '<button>보기</button></form>')
+    star = lambda code: ('<form method="post" action="/fin/%s" style="display:inline;margin:0"><input type="hidden" name="code" value="%s"><input type="hidden" name="back" value="%s">'
+                         '<button title="%s" style="padding:0 4px;background:none;color:var(--accent);font-size:18px">%s</button></form>'
+                         % ("unpick" if code in picks else "pick", code, escape(urlencode({k: v for k, v in keep.items()})), "내 후보에서 빼기" if code in picks else "내 후보에 담기", "★" if code in picks else "☆"))
     trs = ""
     for r in show[:limit]:
         m = r["m"]
@@ -3356,21 +3373,110 @@ def view_fin(conn, q):
         cls = {"A": "up", "B": "", "C": "", "D": "down"}.get(r["grade"], "")
         parts = " · ".join(f'{k[:2]} {int(pr.get(k, 0))}' for k in ("성장", "수익성", "현금", "안정성"))
         opm_t = "-" if m.get("opm") is None else f'{m["opm"]:.1%}'
+        roe_t = "-" if m.get("roe") is None else f'{m["roe"]:.0%}'
         cash_t = "-" if m.get("ocf_to_ni") is None else f'{m["ocf_to_ni"]:.1f}배'
         debt_t = "-" if m.get("debt_ratio") is None else _fin_pct(m["debt_ratio"], False)
         turn_t = "흑전" if (m.get("op_py") is not None and m["op_py"] <= 0 < (m.get("op") or 0)) else _fin_pct(m.get("op_yoy"))
         warn_t = "" if not n_warn else f'<span class="down">⚠ {n_warn}</span>'
         pp_t = f'{"-" if per is None else f"{per:.1f}"}/{"-" if pbr is None else f"{pbr:.1f}"}'
-        trs += (f'<tr><td><a href="/ideas?{urlencode({"t": "fin", "code": r["code"]})}"><b>{escape(r["name"] or r["code"])}</b></a><br><span class="muted" style="font-size:11px">{escape(r["code"])} · {escape(_fin_label(r))}</span></td>'
+        trs += (f'<tr><td>{star(r["code"])}</td><td><a href="/ideas?{urlencode({"t": "fin", "code": r["code"]})}"><b>{escape(r["name"] or r["code"])}</b></a><br><span class="muted" style="font-size:11px">{escape(r["code"])} · {escape(_fin_label(r))}</span></td>'
                 f'<td><span class="chip {cls}" style="font-weight:700">{r["grade"]} {int(r["score"])}</span><br><span class="muted" style="font-size:10px">{parts}</span></td>'
-                f'<td>{_fin_pct(m.get("rev_yoy"))}</td><td>{turn_t}</td><td>{opm_t}</td><td>{cash_t}</td><td>{debt_t}</td><td>{warn_t}</td>'
+                f'<td>{_fin_pct(m.get("rev_yoy"))}</td><td>{turn_t}</td><td>{opm_t}</td><td>{roe_t}</td><td>{cash_t}</td><td>{debt_t}</td><td>{warn_t}</td>'
                 f'<td class="muted" style="font-size:12px">{pp_t}<br>{_mcap_text(mc.get(r["code"]))}</td></tr>')
-    more = (f'<div class="muted" style="margin-top:6px">{len(show)}개 중 {min(limit, len(show))}개를 보여 줘요. <a href="/ideas?{urlencode({"t": "fin", "kw": kw, "g": gr, "f": flt, "s": sort, "all": "1"})}">더 보기</a></div>'
-            if len(show) > limit else f'<div class="muted" style="margin-top:6px">{len(show)}개 종목</div>')
-    table = ('<div class="card"><b>종목별 재무 점수</b>' + form
-             + (f'<div class="scroll"><table><tr><th>종목</th><th>점수<br><span class="muted" style="font-size:10px">성장·수익·현금·안정</span></th><th>매출<br>전년비</th><th>영업이익<br>전년비</th><th>영업<br>이익률</th><th>영업CF<br>/순이익</th><th>부채<br>비율</th><th>경고</th><th>PER/PBR<br>시총</th></tr>{trs}</table></div>' if trs else '<div class="muted">조건에 맞는 종목이 없어요.</div>')
+    more = (f'<div class="muted" style="margin-top:6px">{len(show)}개 중 {min(limit, len(show))}개를 보여 줘요. <a href="{link(all="1")}">더 보기</a></div>'
+            if len(show) > limit else f'<div class="muted" style="margin-top:6px">{len(show)}개 종목 · 조건에 맞는 종목이 너무 적으면 조건을 줄이고, 너무 많으면 프리셋을 겹쳐 직접 숫자를 조여 보세요.</div>')
+    table = ('<div class="card"><b>좋은 기업 고르기</b><div class="muted" style="font-size:12px">한 번에 눌러 보는 기준(프리셋)이나 직접 숫자로 후보를 좁히고, ☆로 내 후보에 담아 비교해요. 숫자는 최근 정기보고서(누적) 기준이에요.</div>'
+             f'<div style="margin:8px 0">{chips}</div>{desc}{form}'
+             + (f'<div class="scroll"><table><tr><th></th><th>종목</th><th>점수<br><span class="muted" style="font-size:10px">성장·수익·현금·안정</span></th><th>매출<br>전년비</th><th>영업이익<br>전년비</th><th>영업<br>이익률</th><th>ROE<br>연환산</th><th>영업CF<br>/순이익</th><th>부채<br>비율</th><th>경고</th><th>PER/PBR<br>시총</th></tr>{trs}</table></div>' if trs else '<div class="muted">조건에 맞는 종목이 없어요.</div>')
              + more + '</div>')
-    return page("재무제표 분석", flash + prep + table + how, refresh=running)
+    cmp_card = _fin_compare(rows, picks, val, mc) if picks and (only_pick or len(picks) >= 2) else ""
+    return page("재무제표 분석", flash + prep + table + cmp_card + how, refresh=running)
+
+
+FIN_PRESETS = {
+    "good": ("재무 우량", "점수 75 이상(A)이고 경고 신호가 없는 종목 — 성장·수익·현금·안정이 고르게 좋은 종목", dict(min_score=75, clean=True)),
+    "growth": ("성장 + 현금", "매출·영업이익이 10% 넘게 늘고 영업현금흐름이 흑자이며 점수 60 이상 — 이익이 현금으로 들어오는 성장", dict(min_score=60, rev=0.10, op=0.10, ocf_pos=True)),
+    "turn": ("흑자 전환", "전년 같은 기간 영업적자였다가 이번에 영업흑자 — 바뀐 이유(일회성인지)를 꼭 확인하세요", dict(turn=True)),
+    "value": ("저평가 우량", "점수 65 이상 · 경고 없음 · PER 15 이하(흑자) · PBR 1.5 이하 — 좋은 기업을 싼 값에 (PER·PBR은 네이버 증권 값)", dict(min_score=65, clean=True, per=15.0, pbr=1.5)),
+    "cash": ("현금 부자", "순현금(현금성자산 > 차입금)이고 영업현금흐름 ÷ 순이익 1배 이상 · 잉여현금흐름 흑자", dict(netcash=True, cash=1.0, fcf=True)),
+    "profit": ("고수익·저부채", "ROE(연환산) 15% 이상 · 영업이익률 10% 이상 · 부채비율 100% 이하 — 버핏식 '좋은 사업'의 숫자 흔적", dict(roe=0.15, opm=0.10, debt=1.0)),
+}
+FIN_NUMS = {"ms": ("min_score", 1), "rv": ("rev", 100), "ov": ("op", 100), "om": ("opm", 100), "ro": ("roe", 100), "cs": ("cash", 1), "db": ("debt", 100), "pe": ("per", 1), "pb": ("pbr", 1), "cp": ("cap", 1)}
+FIN_NUM_FIELDS = [("ms", FIN_NUMS["ms"], "점수 ≥", "70"), ("rv", FIN_NUMS["rv"], "매출 증가율 ≥ (%)", "10"), ("ov", FIN_NUMS["ov"], "영업이익 증가율 ≥ (%)", "10"),
+                  ("om", FIN_NUMS["om"], "영업이익률 ≥ (%)", "10"), ("ro", FIN_NUMS["ro"], "ROE ≥ (%)", "10"), ("cs", FIN_NUMS["cs"], "영업CF/순이익 ≥ (배)", "1"),
+                  ("db", FIN_NUMS["db"], "부채비율 ≤ (%)", "100"), ("pe", FIN_NUMS["pe"], "PER ≤", "15"), ("pb", FIN_NUMS["pb"], "PBR ≤", "1.5"), ("cp", FIN_NUMS["cp"], "시총 ≥ (억원)", "1000")]
+
+
+def _fin_match(r, c, vp, cap):
+    """종목 r이 조건 c(dict)를 모두 만족하나. 값이 없으면 그 조건은 불합격 (모르는 값으로 통과시키지 않음)"""
+    m = r["m"]
+    per, pbr = vp
+    if r["score"] is None:
+        return False
+    if "min_score" in c and r["score"] < c["min_score"]:
+        return False
+    for key, mk in (("rev", "rev_yoy"), ("op", "op_yoy"), ("opm", "opm"), ("roe", "roe"), ("cash", "ocf_to_ni")):
+        if key in c and (m.get(mk) is None or m[mk] < c[key]):
+            if not (key == "op" and m.get("op_py") is not None and m["op_py"] <= 0 < (m.get("op") or 0)):      # 영업이익 증가율은 흑자 전환도 인정
+                return False
+    if "debt" in c and (m.get("debt_ratio") is None or m["debt_ratio"] > c["debt"]):
+        return False
+    if "per" in c and (per is None or per <= 0 or per > c["per"]):
+        return False
+    if "pbr" in c and (pbr is None or pbr <= 0 or pbr > c["pbr"]):
+        return False
+    if "cap" in c and (cap is None or cap < c["cap"] * 1e8):
+        return False
+    if c.get("clean") and any(k == "warn" for k, _ in r["signals"]):
+        return False
+    if c.get("fcf") and (m.get("fcf") is None or m["fcf"] <= 0):
+        return False
+    if c.get("ocf_pos") and (m.get("ocf") is None or m["ocf"] <= 0):
+        return False
+    if c.get("netcash") and (m.get("net_debt") is None or m["net_debt"] >= 0):
+        return False
+    if c.get("turn") and not (m.get("op_py") is not None and m["op_py"] <= 0 < (m.get("op") or 0)):
+        return False
+    return True
+
+
+def fin_picks(conn):
+    """내 후보 종목 {코드: 담은 날} (표가 없으면 {})"""
+    try:
+        return {c: d for c, d in conn.execute("SELECT code, added FROM fin_pick ORDER BY added")}
+    except sqlite3.Error:
+        return {}
+
+
+def _fin_compare(rows, picks, val, mc):
+    """내 후보 비교표: 항목마다 가장 좋은 값을 굵게"""
+    sel = [r for r in rows if r["code"] in picks and r["score"] is not None][:8]
+    if not sel:
+        return ""
+    best_hi = lambda f: max((v for v in (f(r) for r in sel) if v is not None), default=None)
+    best_lo = lambda f: min((v for v in (f(r) for r in sel) if v is not None), default=None)
+    items = [("점수", lambda r: r["score"], "{:.0f}", True), ("성장 (30)", lambda r: r["parts"].get("성장"), "{:.0f}", True), ("수익성 (20)", lambda r: r["parts"].get("수익성"), "{:.0f}", True),
+             ("현금 (25)", lambda r: r["parts"].get("현금"), "{:.0f}", True), ("안정성 (20)", lambda r: r["parts"].get("안정성"), "{:.0f}", True),
+             ("매출 증가율", lambda r: r["m"].get("rev_yoy"), "{:+.0%}", True), ("영업이익 증가율", lambda r: r["m"].get("op_yoy"), "{:+.0%}", True),
+             ("영업이익률", lambda r: r["m"].get("opm"), "{:.1%}", True), ("ROE (연환산)", lambda r: r["m"].get("roe"), "{:.0%}", True),
+             ("영업CF / 순이익", lambda r: r["m"].get("ocf_to_ni"), "{:.1f}배", True), ("부채비율", lambda r: r["m"].get("debt_ratio"), "{:.0%}", False),
+             ("유동비율", lambda r: r["m"].get("current_ratio"), "{:.0%}", True), ("PER", lambda r: (val.get(r["code"]) or (None, None))[0], "{:.1f}", False),
+             ("PBR", lambda r: (val.get(r["code"]) or (None, None))[1], "{:.2f}", False)]
+    head = "".join(f'<th><a href="/ideas?{urlencode({"t": "fin", "code": r["code"]})}">{escape(r["name"] or r["code"])}</a><br><span class="muted" style="font-size:10px">{escape(_fin_label(r))}</span></th>' for r in sel)
+    body = ""
+    for lab, f, fmt, hi in items:
+        b = best_hi(f) if hi else best_lo(f)
+        cells = ""
+        for r in sel:
+            v = f(r)
+            if v is None:
+                cells += '<td class="muted">-</td>'
+            else:
+                cells += f'<td{" style=font-weight:700" if (b is not None and v == b and len(sel) > 1 and not (lab in ("PER", "PBR") and v <= 0)) else ""}>{fmt.format(v)}</td>'
+        body += f'<tr><td>{lab}</td>{cells}</tr>'
+    mcr = "".join(f'<td class="muted" style="font-size:12px">{_mcap_text(mc.get(r["code"]))}</td>' for r in sel)
+    return ('<div class="card"><b>내 후보 비교</b><div class="muted" style="font-size:12px">굵은 숫자가 그 줄에서 가장 좋은 값이에요 (부채비율·PER·PBR은 낮을수록). 업종이 다르면 숫자의 의미가 달라서 같은 업종끼리 비교하는 게 좋아요.</div>'
+            f'<div class="scroll"><table><tr><th></th>{head}</tr>{body}<tr><td>시총</td>{mcr}</tr></table></div></div>')
 
 
 def _fin_detail(conn, r, code, rows, mc, val, fa):
@@ -6327,6 +6433,13 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 S = settings()
                 ok, why = S["legis_prepare"]() if "legis_prepare" in S else (False, "이 서버 버전은 지원하지 않아요")
                 return self._redirect("/ideas?" + urlencode({"t": "legis", "msg": ("✔ " if ok else "✖ ") + why}))
+            if path in ("/fin/pick", "/fin/unpick") and settings_api:
+                n = min(int(self.headers.get("Content-Length") or 0), 4096)
+                form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore")).items()}
+                S = settings()
+                ok, why = S["fin_action"](path[len("/fin/"):], form) if "fin_action" in S else (False, "이 서버 버전은 지원하지 않아요")
+                back = {k: v[0] for k, v in parse_qs(form.get("back", "")).items()}
+                return self._redirect("/ideas?" + urlencode({"t": "fin", **back, "msg": ("✔ " if ok else "✖ ") + why}))
             if path == "/fin/run" and settings_api:
                 n = min(int(self.headers.get("Content-Length") or 0), 4096)
                 self.rfile.read(n)
