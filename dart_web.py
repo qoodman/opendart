@@ -3031,20 +3031,39 @@ def view_cycle(conn, q):
                 + (f'<ul style="margin:4px 0;padding-left:18px;font-size:12px">{ev}</ul>' if (full and ev) else "")
                 + (f'<div style="font-size:12px;margin-top:2px">{escape(a["note"])}</div>' if (full and a["note"]) else "")
                 + (f'<div class="muted" style="font-size:12px;margin-top:2px">판단에 더 필요한데 앱에 없는 것: {escape(mi)}</div>' if (full and mi) else ""))
-    bear_n, bull_n = cy.consensus(asm) if asm else (0, 0)
+    syn = cy.synthesize(ind, asm) if asm else None
+    sit = syn["situation"] if syn else None
+    tone_cls = {"up": "up", "down": "down", "turn": "", "flat": "", "none": ""}
     acard = ""
-    if asm:
-        lines = "".join(f'<div style="border-top:1px solid var(--line);padding:6px 0"><b style="font-size:13px">{escape(a["name"])}</b>{asm_box(a, False)}</div>' for a in asm)
-        acard = ('<div class="card"><details open><summary style="cursor:pointer"><b>이론별 현재 국면 후보</b></summary>'
-                 '<div class="muted" style="font-size:12px;margin-top:4px">위 점검표 숫자를 각 이론의 기준에 대 본 결과예요. 판정이 아니라 후보이고, 이론마다 앱에 없는 정보(실적·거래량·심리·물가 등)가 필요해서 확신도를 같이 적었어요. 자세한 근거는 아래 이론 설명을 펼치면 보여요.</div>'
-                 + lines
-                 + (f'<div style="margin-top:8px;font-size:13px"><b>종합</b> 판단 가능한 이론 중 <b>하락·긴축·침체 쪽 {bear_n}개</b>, <b>회복·바닥 쪽 {bull_n}개</b>. '
-                    '<span class="muted">이론들은 같은 가격·금리를 보는 경우가 많아 서로 독립적인 증거가 아니에요. 개수가 많다고 확률이 높은 게 아니에요.</span></div>' if (bear_n or bull_n) else "")
+    if syn:
+        bl = "".join(f'<li style="margin:4px 0">{re.sub(r"[*][*](.+?)[*][*]", lambda m_: "<b>" + m_.group(1) + "</b>", escape(x))}</li>' for x in syn["lines"])
+        cnt = " ".join(f'<span class="chip {tone_cls[k]}">{cy.TONE_LABEL[k]} {len(v)}</span>' for k, v in syn["groups"].items())
+        rowsx = "".join(
+            f'<div style="border-top:1px solid var(--line);padding:6px 0"><div style="display:flex;justify-content:space-between;gap:8px;align-items:center"><b style="font-size:13px">{escape(a["name"])}</b>'
+            f'<span class="chip {tone_cls[a["tone"]]}" style="white-space:nowrap">{cy.TONE_LABEL[a["tone"]]}</span></div>{asm_box(a, False)}</div>' for a in asm)
+        wrows = "".join(f'<div style="border-top:1px solid var(--line);padding:6px 0"><b style="font-size:13px">{escape(w)}</b> <span class="muted" style="font-size:12px">지금: {escape(n_)}</span>'
+                        f'<div style="font-size:12px">{escape(c_)}</div></div>' for w, n_, c_ in syn["watch"])
+        acard = ('<div class="card"><details open><summary style="cursor:pointer"><b>지금 국면을 여러 이론에 비춰 보면</b></summary>'
+                 + (f'<div style="margin:8px 0"><span class="chip" style="font-size:14px;font-weight:700">{escape(sit["label"])}</span></div>' if sit else "")
+                 + f'<ul style="padding-left:18px;margin:4px 0;font-size:13px">{bl}</ul>'
+                 + f'<div style="margin:6px 0">{cnt}</div>'
+                 + '<div class="muted" style="font-size:12px">상승·정체·하락·바닥 모두 같은 틀로 봤어요. 판정이 아니라 후보이고, 이론마다 앱에 없는 정보(실적·거래량·심리·물가 등)가 필요해서 확신도를 적었어요. '
+                   '이론들은 같은 가격·금리를 보는 경우가 많아 서로 독립적인 증거가 아니에요. 개수가 많다고 확률이 높은 게 아니에요.</div>'
+                 + f'<div style="margin-top:8px"><b style="font-size:13px">이론별 후보</b>{rowsx}</div>'
+                 + f'<div style="margin-top:10px"><b style="font-size:13px">앞으로 판단을 바꿀 변수</b>{wrows}</div>'
                  + '</details></div>')
-    tips = "".join(f'<li style="margin:6px 0"><b>{escape(t)}</b><div class="muted" style="font-size:13px">{escape(d)}</div></li>' for t, d in cy.TIPS_DOWN)
-    tipc = ('<div class="card"><details open><summary style="cursor:pointer"><b>하락장에서 생각해 볼 것</b></summary>'
-            '<div class="muted" style="font-size:12px;margin-top:4px">종목이나 시점을 추천하는 게 아니라, 어떤 이론을 쓰든 공통으로 나오는 점검 질문이에요.</div>'
-            f'<ol style="padding-left:20px;margin:6px 0">{tips}</ol></details></div>')
+    sit_key = sit["key"] if sit else None
+    groups_tips = [("up", "상승기에 생각해 볼 것", cy.TIPS_UP), ("flat", "정체(횡보)기에 생각해 볼 것", cy.TIPS_FLAT),
+                   ("rebound", "바닥 다지기·반등기에 생각해 볼 것", cy.TIPS_TURN), ("down", "하락기에 생각해 볼 것", cy.TIPS_DOWN)]
+    cur_key = "down" if sit_key in ("turn_down", "down") else sit_key
+    tdet = ""
+    for k_, lab_, lst_ in groups_tips:
+        li_ = "".join(f'<li style="margin:6px 0"><b>{escape(t_)}</b><div class="muted" style="font-size:13px">{escape(d_)}</div></li>' for t_, d_ in lst_)
+        tdet += (f'<details{" open" if k_ == cur_key else ""} style="border-top:1px solid var(--line);padding:6px 0"><summary style="cursor:pointer"><b>{lab_}</b>'
+                 + (' <span class="chip">지금 상황</span>' if k_ == cur_key else "") + f'</summary><ol style="padding-left:20px;margin:6px 0">{li_}</ol></details>')
+    tipc = ('<div class="card"><details open><summary style="cursor:pointer"><b>상황별로 생각해 볼 것</b></summary>'
+            '<div class="muted" style="font-size:12px;margin-top:4px">종목이나 시점을 추천하는 게 아니라, 어떤 이론을 쓰든 공통으로 나오는 점검 질문이에요. 지금 상황에 해당하는 항목이 펼쳐져 있어요.</div>'
+            + tdet + '</details></div>')
     th = ""
     for t in cy.THEORIES:
         ph = "".join(f'<tr><td><b>{escape(a)}</b></td><td>{escape(b)}</td><td style="font-size:12px">{escape(c)}</td><td style="font-size:12px">{escape(d)}</td></tr>' for a, b, c, d in t["phases"])
@@ -3054,10 +3073,11 @@ def view_cycle(conn, q):
                + (f'<div style="margin:6px 0;padding:6px 8px;border:1px solid var(--line);border-radius:8px"><b style="font-size:13px">지금 판단 (후보)</b>{asm_box(asm_by[t["id"]])}</div>' if t["id"] in asm_by else "") +
                f'<div style="font-size:13px;margin:6px 0">{escape(t["idea"])}</div>'
                f'<div class="scroll"><table><tr><th>국면</th><th>모습</th><th>신호</th><th>특징</th></tr>{ph}</table></div>'
-               f'<div style="margin-top:6px;font-size:13px"><b>하락장에서 읽는 법</b> {escape(t["down"])}</div>'
+               + "".join(f'<div style="margin-top:6px;font-size:13px;{"background:var(--chip);border-radius:6px;padding:4px 6px" if hl else ""}"><b>{lab} 읽는 법</b>{" (지금 상황)" if hl else ""} {escape(t[key])}</div>'
+                         for key, lab, hl in (("up", "상승기", cur_key == "up"), ("flat", "정체기", cur_key == "flat"), ("down", "하락기", cur_key == "down"))) +
                f'<div class="muted" style="font-size:12px;margin-top:4px">⚠ 한계: {escape(t["limit"])}</div></details>')
     thc = ('<div class="card"><b>유명한 사이클 이론 정리</b><div class="muted" style="font-size:12px">이름을 눌러 펼쳐요.</div>' + th + '</div>')
-    return page("투자 사이클", intro + live + acard + gcard + tipc + _fold(thc, False))
+    return page("투자 사이클", intro + acard + live + gcard + tipc + _fold(thc, False))
 
 
 def view_legstudy(conn, q):
