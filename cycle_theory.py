@@ -167,6 +167,7 @@ def indicators(conn):
     """→ dict(rows=[dict(label, value, note)], price='up'|'down'|'flat'|None, rate='up'|'down'|'flat'|None, candidates=[...])"""
     import stock_market as sm
     rows, price, rate = [], None, None
+    raw = {}
     k = _pts(sm.series(conn, "idx:KOSPI"))
     if len(k) >= 260:
         closes = [v for _, v in k]
@@ -177,6 +178,8 @@ def indicators(conn):
         ma_prev = sum(closes[-220:-20]) / 200
         slope = ma / ma_prev - 1
         r12 = last / closes[-252] - 1
+        raw.update(dd=dd, below_ma=last < ma, slope=slope, r12=r12, r1m=last / closes[-22] - 1, r3m=last / closes[-64] - 1, last=last, ma=ma,
+                   low60=last <= min(closes[-60:]) * 1.03)
         price = "down" if (last < ma and slope < 0) else "turn_down" if last < ma else "up" if (last > ma and slope > 0) else "flat"
         rows.append(dict(label="코스피 고점 대비 (250거래일)", value=f"{dd:+.1%}", note=f"지금 {last:,.0f} · 고점 {hi:,.0f}"))
         if last < ma and slope < 0:
@@ -196,23 +199,36 @@ def indicators(conn):
         if prev:
             diff = cur[1] - prev[1]
             rate = "up" if diff > 0.1 else "down" if diff < -0.1 else "flat"
+            raw.update(rate_diff=diff, rate_level=cur[1])
             rows.append(dict(label="기준금리 (6개월 변화)", value=f"{cur[1]:.2f}%  ({diff:+.2f}%p)", note={"up": "인상 구간", "down": "인하 구간", "flat": "동결 구간"}[rate]))
         else:
             rows.append(dict(label="기준금리", value=f"{cur[1]:.2f}%", note=f"기준일 {cur[0].isoformat()}"))
     k3, k10 = _pts(sm.series(conn, "ecos:ktb3")), _pts(sm.series(conn, "ecos:ktb10"))
     if k3 and k10:
         sp = k10[-1][1] - k3[-1][1]
+        raw["spread"] = sp
         rows.append(dict(label="국고채 10년-3년 금리차", value=f"{sp:+.2f}%p", note="마이너스(역전)면 시장이 경기 둔화·금리 인하를 먼저 반영하는 경향이 있어요" if sp < 0 else "플러스(정상)"))
     fx = _pts(sm.series(conn, "ecos:usdkrw"))
     if fx:
         p0 = _near(fx, fx[-1][0] - dt.timedelta(days=90))
         if p0:
+            raw["fx3"] = fx[-1][1] / p0[1] - 1
             rows.append(dict(label="원/달러 환율 (3개월)", value=f"{fx[-1][1]:,.0f}원  ({fx[-1][1] / p0[1] - 1:+.1%})", note="원화 약세는 수출주엔 유리해도 외국인 매도 압력과 함께 오는 경우가 많아요"))
     m2 = _pts(sm.series(conn, "ecos:m2"))
     if m2:
         y0 = _near(m2, m2[-1][0] - dt.timedelta(days=365))
         if y0:
+            raw["m2yoy"] = m2[-1][1] / y0[1] - 1
             rows.append(dict(label="M2 광의통화 증가율 (1년)", value=f"{m2[-1][1] / y0[1] - 1:+.1%}", note="유동성 증가가 둔화되면 금융장세 조건이 약해져요"))
+    c3 = _pts(sm.series(conn, "ecos:corp3"))
+    if c3 and k3:
+        cs = c3[-1][1] - k3[-1][1]
+        p6c, p6k = _near(c3, c3[-1][0] - dt.timedelta(days=180)), _near(k3, k3[-1][0] - dt.timedelta(days=180))
+        raw["credit"] = cs
+        if p6c and p6k:
+            raw["credit_chg"] = cs - (p6c[1] - p6k[1])
+        rows.append(dict(label="회사채(AA-) 3년 - 국고채 3년 (신용 스프레드)", value=f"{cs:.2f}%p" + (f"  (6개월 {raw['credit_chg']:+.2f}%p)" if "credit_chg" in raw else ""),
+                         note="벌어질수록 시장이 신용 위험을 크게 본다는 뜻이에요 (신용 경색의 신호)"))
     cands = []
     if price and rate:
         if price == "turn_down":
@@ -237,7 +253,7 @@ def indicators(conn):
                 cands.append(("실적장세", "금리가 오르는데 주가가 오르는 건 실적이 받쳐 주는 후반부일 때"))
         else:
             cands.append(("국면 전환 구간", "주가 추세가 뚜렷하지 않아요. 바닥(1단계) 또는 천장(3단계) 근처일 수 있어요"))
-    return dict(rows=rows, price=price, rate=rate, candidates=cands)
+    return dict(rows=rows, price=price, rate=rate, candidates=cands, raw=raw)
 
 
 def _down(pts, maxn=240):
@@ -284,3 +300,156 @@ def chart_data(conn, years=3):
     yoy = [(d, (v / m2[i - 12][1] - 1) * 100) for i, (d, v) in enumerate(m2) if i >= 12]
     out["m2"] = [dict(name="M2 증가율 1년(%)", pts=rng(yoy), color="s3")]
     return out
+
+
+def _pct(v):
+    return f"{v:+.1%}"
+
+
+def assess(ind):
+    """이론별 '지금 어느 국면 후보인가' → [dict(id, name, verdict, conf, evidence[], missing[], note)]
+    conf: '중간'(핵심 지표가 앱에 있음) · '낮음'(대리 지표만) · '판단 불가'. 모두 후보이고 판정이 아니에요."""
+    r = ind.get("raw", {})
+    out = []
+    have_px = "dd" in r
+    have_rate = "rate_diff" in r
+    up_rate = have_rate and r["rate_diff"] > 0.1
+    dn_rate = have_rate and r["rate_diff"] < -0.1
+    rate_txt = (f"기준금리 6개월 {r['rate_diff']:+.2f}%p ({'인상' if up_rate else '인하' if dn_rate else '동결'})" if have_rate else "")
+    px_txt = ""
+    if have_px:
+        px_txt = f"고점 대비 {_pct(r['dd'])} · 200일선 {'아래' if r['below_ma'] else '위'}·기울기 {_pct(r['slope'])} · 1개월 {_pct(r['r1m'])} · 3개월 {_pct(r['r3m'])}"
+
+    def add(id_, name, verdict, conf, ev, missing, note=""):
+        out.append(dict(id=id_, name=name, verdict=verdict, conf=conf, evidence=[e for e in ev if e], missing=missing, note=note))
+    # 우라가미
+    if have_px and have_rate:
+        below = r["below_ma"]
+        if below and up_rate:
+            v, nt = "역금융장세 (초입~진행)", "실적이 아직 좋다면 이 판단이 맞아요. 실적이 이미 꺾였다면 역실적장세로 넘어가는 중일 수 있어요."
+        elif below and dn_rate:
+            v, nt = "역실적장세 (초입~진행)", "금리가 내려가는데 주가가 약하다면 실적 악화가 반영되는 중이라는 뜻이에요. 금리가 충분히 낮아지면 금융장세(다음 상승)의 조건이 갖춰져요."
+        elif below:
+            v, nt = "역금융장세와 역실적장세 사이 (금리 동결)", "금리 방향이 없어서 둘을 가르는 건 실적 방향이에요."
+        elif up_rate:
+            v, nt = "실적장세 후반", "금리가 오르는데도 주가가 버티는 건 실적이 받쳐 줄 때예요."
+        else:
+            v, nt = "금융장세 또는 실적장세", "실적이 아직 부진하면 금융장세, 개선 중이면 실적장세예요."
+        add("urakami", "우라가미 구니오의 4계절", v, "중간", [rate_txt, px_txt], ["기업 실적(이익) 방향 — 여기서 갈려요"], nt)
+    else:
+        add("urakami", "우라가미 구니오의 4계절", "판단 불가", "판단 불가", [], ["기준금리와 코스피 자료"])
+    # 코스톨라니
+    if have_px:
+        dd, below, slope, r1m = r["dd"], r["below_ma"], r["slope"], r["r1m"]
+        if not below and slope > 0:
+            v = "A3 과열 가능" if (dd > -0.05 and r["r12"] >= 0.4) else "A2 동행(상승)"
+        elif below and slope >= 0:
+            v = "B1 조정 시작 가능"
+        elif below and slope < 0:
+            if dd <= -0.35 and r1m >= -0.02:
+                v = "B3 과매도 (바닥 근처 후보)"
+            elif dd <= -0.20:
+                v = "B2 동행(하락)"
+            else:
+                v = "B1~B2 (하락 초중반)"
+        else:
+            v = "A1 바닥 다지기 또는 하락 중 반등"
+        add("kostolany", "코스톨라니의 달걀", v, "낮음", [px_txt, "금리 " + rate_txt if rate_txt else ""],
+            ["거래량(바닥은 한산하고 과열은 폭증)", "투자자 심리와 누가 보유하고 있는지(대중 vs 소수)"], "코스톨라니의 국면은 거래량·심리로 구분하는데 앱이 갖고 있지 않아서 가격 위치로만 추정했어요.")
+    else:
+        add("kostolany", "코스톨라니의 달걀", "판단 불가", "판단 불가", [], ["코스피 자료"])
+    # 투자 시계
+    if have_px and have_rate:
+        weak = r["below_ma"]
+        if weak and up_rate:
+            v, nt = "과열 말기 ~ 스태그플레이션 쪽", "물가가 높게 유지되면 스태그플레이션(현금·방어), 물가가 꺾이는 중이면 과열 뒤 침체 초입이에요."
+        elif weak and dn_rate:
+            v, nt = "회복(리플레이션) 초입 쪽", "성장·물가가 모두 낮다면 채권이 유리한 구간이에요."
+        elif weak:
+            v, nt = "판단 어려움 (금리 동결 + 주가 약세)", ""
+        elif dn_rate:
+            v, nt = "호황(회복기)", "성장은 살아나고 물가는 낮을 때 주식이 유리해요."
+        else:
+            v, nt = "호황~과열", ""
+        add("clock", "메릴린치 투자 시계", v, "낮음", [rate_txt, px_txt], ["경제 성장률", "물가(인플레이션)"], "투자 시계의 두 축(성장·물가)이 앱에 없어서 금리와 주가로 짐작했어요. 이 이론은 물가가 핵심이에요. " + nt)
+    else:
+        add("clock", "메릴린치 투자 시계", "판단 불가", "판단 불가", [], ["성장률", "물가"])
+    # 업종 순환
+    if have_px and have_rate:
+        weak = r["below_ma"]
+        if weak and up_rate:
+            v, tilt = "후기 → 침체 전환", "필수소비재·헬스케어·유틸리티 같은 방어 업종이 상대적으로 덜 빠지는 구간"
+        elif weak and dn_rate:
+            v, tilt = "침체 (바닥 접근 가능)", "방어주가 덜 빠지고, 금리 민감 업종(금융·경기소비재·부동산)이 먼저 반등할 준비를 하는 구간"
+        elif not weak and dn_rate:
+            v, tilt = "초기 (회복 시작)", "금융·경기소비재·부동산이 강한 구간"
+        else:
+            v, tilt = "중기 (확장) 또는 후기", "IT·산업재 → 에너지·소재로 넘어가는 구간"
+        add("sector", "경기 사이클과 업종 순환", v, "낮음", [rate_txt, px_txt], ["경기 지표(성장·실적·재고)"], tilt)
+    else:
+        add("sector", "경기 사이클과 업종 순환", "판단 불가", "판단 불가", [], ["금리와 코스피 자료"])
+    # 막스
+    if have_px:
+        dd = r["dd"]
+        pos = "비관 쪽으로 크게 기울어 있을 가능성" if dd <= -0.30 else "비관 쪽으로 기우는 중" if dd <= -0.15 else "중간 근처" if dd > -0.10 and r["r12"] < 0.3 else "낙관 쪽 (직전 상승이 큼)"
+        cred = (f"신용 스프레드 {r['credit']:.2f}%p" + (f" (6개월 {r['credit_chg']:+.2f}%p)" if 'credit_chg' in r else "")) if "credit" in r else ""
+        add("marks", "하워드 막스의 시장 사이클", pos, "낮음", [px_txt, cred],
+            ["밸류에이션(PER·PBR 등 가격이 싼지)", "투자자 심리·자금 흐름(신용 공급)"], "진자의 위치는 가격이 얼마나 빠졌나가 아니라 '위험 대비 얼마나 싼가'로 정해져요. 가격 낙폭만으로는 비관 쪽인지만 짐작할 수 있어요.")
+    else:
+        add("marks", "하워드 막스의 시장 사이클", "판단 불가", "판단 불가", [], ["코스피 자료"])
+    # 달리오
+    if have_rate:
+        bits = [rate_txt, f"M2 1년 {_pct(r['m2yoy'])}" if "m2yoy" in r else "",
+                (f"신용 스프레드 {r['credit']:.2f}%p" + (f" ({r['credit_chg']:+.2f}%p/6개월)" if 'credit_chg' in r else "")) if "credit" in r else ""]
+        if up_rate:
+            v = "단기 부채 사이클 — 긴축 구간"
+        elif dn_rate:
+            v = "단기 부채 사이클 — 완화 구간"
+        else:
+            v = "단기 부채 사이클 — 정책 대기 구간"
+        widen = r.get("credit_chg", 0) > 0.15
+        add("dalio", "레이 달리오의 부채 사이클", v + (" · 신용 스프레드 확대 중" if widen else ""), "낮음", bits,
+            ["가계·기업 부채 규모와 상환 부담", "신용 스프레드·연체율", "물가"], "단기 사이클은 신용 확장·수축을 보는 건데 앱엔 금리·M2·회사채 스프레드만 있어요. 장기 부채 사이클은 수십 년 단위라 여기서 판단하지 않아요.")
+    else:
+        add("dalio", "레이 달리오의 부채 사이클", "판단 불가", "판단 불가", [], ["기준금리 자료"])
+    # 다우/와인스타인 (가장 기계적)
+    if have_px:
+        below, slope, dd = r["below_ma"], r["slope"], r["dd"]
+        if below and slope < 0:
+            v = "4단계 (하락)"
+        elif below and slope >= 0:
+            v = "3단계 → 4단계 전환 (천장 이후 하락 초입)"
+        elif not below and slope > 0:
+            v = "2단계 (상승)"
+        else:
+            v = "1단계 (바닥 다지기) 또는 하락 중 반등"
+        add("dow", "다우 이론과 와인스타인 4단계", v, "중간", [px_txt, "와인스타인은 30주(약 150일)선을 쓰는데 여기선 200일선으로 봤어요"],
+            ["거래량(바닥·천장 확인)"], "이평선 기준이라 가장 기계적인 판단이에요. 횡보장에서는 신호가 자주 바뀌어요.")
+    else:
+        add("dow", "다우 이론과 와인스타인 4단계", "판단 불가", "판단 불가", [], ["코스피 자료"])
+    # 민스키
+    if "credit" in r:
+        wide = r.get("credit_chg", 0) > 0.15
+        add("minsky", "민스키·킨들버거 버블 모형", "신용 경색 신호 있음" if wide else "신용 경색 신호는 아직 약함", "낮음",
+            [f"회사채-국고채 스프레드 {r['credit']:.2f}%p" + (f" (6개월 {r['credit_chg']:+.2f}%p)" if 'credit_chg' in r else ""), px_txt],
+            ["신용융자 잔고·반대매매 규모", "기업·가계 부채 비율"], "레버리지 청산이 낙폭의 원인인지가 핵심인데 앱이 가진 신용 지표는 회사채 스프레드뿐이에요.")
+    else:
+        add("minsky", "민스키·킨들버거 버블 모형", "판단 불가", "판단 불가", [px_txt], ["신용융자 잔고·반대매매", "회사채 스프레드", "부채 비율"], "앱에 신용 지표가 부족해요.")
+    add("waves", "장기 파동 (키친·주글라르·쿠즈네츠·콘드라티예프)", "판단 불가", "판단 불가", [], ["재고 주기 (반도체 업황·제조업 재고)", "설비투자", "건설 지표"], "달력으로 위치를 정하는 이론이 아니라서 판단하지 않았어요.")
+    return out
+
+
+def consensus(items):
+    """판단이 가능한 이론들의 방향 → 하락 쪽/상승 쪽/엇갈림 개수. 이론이 서로 독립적이지 않다는 점을 같이 알려야 해요."""
+    bear_kw = ("역금융", "역실적", "B1", "B2", "4단계", "스태그", "침체", "후기", "긴축", "경색 신호 있음", "3단계 → 4단계", "하락")
+    bull_kw = ("A1", "A2", "금융장세 또는", "호황", "회복", "초기", "2단계", "완화", "B3")
+    bear = bull = 0
+    for a in items:
+        if a["conf"] == "판단 불가" or a["id"] == "marks":      # 막스의 '비관 쪽'은 기회 신호일 수도 있어서 방향 집계에서 뺌
+            continue
+        v = a["verdict"]
+        if any(k in v for k in bear_kw):
+            bear += 1
+        elif any(k in v for k in bull_kw):
+            bull += 1
+    return bear, bull
