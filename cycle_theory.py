@@ -267,6 +267,20 @@ def indicators(conn):
             raw["credit_chg"] = cs - (p6c[1] - p6k[1])
         rows.append(dict(label="회사채(AA-) 3년 - 국고채 3년 (신용 스프레드)", value=f"{cs:.2f}%p" + (f"  (6개월 {raw['credit_chg']:+.2f}%p)" if "credit_chg" in raw else ""),
                          note="벌어질수록 시장이 신용 위험을 크게 본다는 뜻이에요 (신용 경색의 신호)"))
+    try:
+        import earnings_pulse as ep
+        ea = ep.analyze(conn)
+    except Exception:
+        ea = None
+    if ea:
+        raw["earn"] = ea
+        def _g(v):
+            return "-" if v is None else (f"{v:+.0%}" if abs(v) < 2 else f"{v + 1:.1f}배")
+        qpart = f"  ·  직전 분기 대비 {_g(ea['qoq'])}" if ea["qoq"] is not None else ""
+        rows.append(dict(label=f"상장사 실적 흐름 (시총 상위 {ea['n']}개 합산 영업이익)", value=f"{ea['label']}  (전년 동기 {_g(ea['yoy'])})",
+                         note=f"기준 {ea['period'][:4]}.{ea['period'][4:]} 분기{qpart} · 영업이익이 늘어난 종목 {ea['breadth']:.0%}" + (f" · 올해 컨센서스 vs 작년 {_g(ea['fwd'])}" if ea['fwd'] is not None else "")
+                              + (f" · 컨센서스 4주 변화 {_g(ea['rev'])}" if ea['rev'] is not None else " · 컨센서스 수정 추이는 몇 주 쌓여야 보여요")
+                              + ("".join(" · " + x for x in ea["notes"]))))
     cands = []
     if price and rate:
         if price == "turn_down":
@@ -361,19 +375,35 @@ def assess(ind):
     def add(id_, name, verdict, conf, ev, missing, note=""):
         out.append(dict(id=id_, name=name, verdict=verdict, conf=conf, evidence=[e for e in ev if e], missing=missing, note=note))
     # 우라가미
+    ea = r.get("earn")
+    e_dir = None if not ea else ("up" if ea["label"] == "개선" else "down" if ea["label"] == "악화" else "mixed")
     if have_px and have_rate:
         below = r["below_ma"]
-        if below and up_rate:
+        et_txt = (f"기업 실적 {ea['label']} (시총 상위 {ea['n']}개 합산 영업이익 전년 동기 {ea['yoy']:+.0%}, 늘어난 종목 {ea['breadth']:.0%})" if ea and ea["yoy"] is not None and abs(ea["yoy"]) < 2 else
+                  (f"기업 실적 {ea['label']} (시총 상위 {ea['n']}개 합산 영업이익 전년 동기 {ea['yoy'] + 1:.1f}배, 늘어난 종목 {ea['breadth']:.0%})" if ea and ea["yoy"] is not None else ""))
+        missing = [] if ea else ["기업 실적(이익) 방향 — 여기서 갈려요 (시장·정책 수집으로 실적을 받으면 반영돼요)"]
+        conf = "높음" if (ea and ea["n"] >= 30) else "중간"
+        if below and e_dir == "up":
+            v, nt = "역금융장세", "실적은 좋은데 주가가 빠지는 전형적인 모습이에요 (금리 인상·유동성 축소가 주가를 먼저 누르는 구간). 실적 악화가 확인되면 역실적장세로 넘어가요."
+        elif below and e_dir == "down":
+            v, nt = "역실적장세", "실적이 꺾이며 주가가 더 빠지는 구간이에요. 금리가 충분히 내려오면 금융장세(다음 상승)의 조건이 갖춰져요."
+        elif below and up_rate:
             v, nt = "역금융장세 (초입~진행)", "실적이 아직 좋다면 이 판단이 맞아요. 실적이 이미 꺾였다면 역실적장세로 넘어가는 중일 수 있어요."
         elif below and dn_rate:
             v, nt = "역실적장세 (초입~진행)", "금리가 내려가는데 주가가 약하다면 실적 악화가 반영되는 중이라는 뜻이에요. 금리가 충분히 낮아지면 금융장세(다음 상승)의 조건이 갖춰져요."
         elif below:
             v, nt = "역금융장세와 역실적장세 사이 (금리 동결)", "금리 방향이 없어서 둘을 가르는 건 실적 방향이에요."
+        elif e_dir == "down" and not up_rate:
+            v, nt = "금융장세", "실적은 부진한데 금리 하락·유동성으로 주가가 오르는 구간이에요."
+        elif e_dir == "up" and up_rate:
+            v, nt = "실적장세 후반", "금리가 오르는데도 주가가 버티는 건 실적이 받쳐 줄 때예요. 금리 인상이 이어지면 역금융장세가 다음 단계예요."
+        elif e_dir == "up":
+            v, nt = "실적장세", "실적 개선이 주가를 받치는 구간이에요."
         elif up_rate:
             v, nt = "실적장세 후반", "금리가 오르는데도 주가가 버티는 건 실적이 받쳐 줄 때예요."
         else:
             v, nt = "금융장세 또는 실적장세", "실적이 아직 부진하면 금융장세, 개선 중이면 실적장세예요."
-        add("urakami", "우라가미 구니오의 4계절", v, "중간", [rate_txt, px_txt], ["기업 실적(이익) 방향 — 여기서 갈려요"], nt)
+        add("urakami", "우라가미 구니오의 4계절", v, conf, [rate_txt, px_txt, et_txt], missing, nt)
     else:
         add("urakami", "우라가미 구니오의 4계절", "판단 불가", "판단 불가", [], ["기준금리와 코스피 자료"])
     # 코스톨라니
@@ -575,6 +605,10 @@ def synthesize(ind, asm):
         watch.append(("기준금리 방향", f"6개월 {r['rate_diff']:+.2f}%p", "인상 → 동결·인하로 바뀌면 우라가미의 역금융장세가 끝나가는 신호(다음 단계는 역실적장세나 금융장세), 인하 → 인상이면 반대"))
     if "credit" in r:
         watch.append(("신용 스프레드", f"{r['credit']:.2f}%p" + (f" (6개월 {r['credit_chg']:+.2f}%p)" if "credit_chg" in r else ""), "빠르게 벌어지면 신용 경색(민스키·달리오 하락 신호), 줄어들면 위험 선호 회복"))
-    watch.append(("기업 실적(앱에 없음)", "직접 확인", "이익 전망이 하향되면 실적장세→역금융/역실적 쪽, 상향되면 금융장세→실적장세 쪽. 우라가미 판단의 핵심 변수"))
+    ea = r.get("earn")
+    if ea:
+        watch.append(("기업 실적 방향", f"{ea['label']} (점수 {ea['score']:+d}) · 기준 {ea['period'][:4]}.{ea['period'][4:]} 분기", "이익 전망이 하향되고 늘어난 종목이 줄면 실적장세·역금융장세 → 역실적장세 쪽, 상향되면 금융장세 → 실적장세 쪽. 우라가미 판단의 핵심 변수"))
+    else:
+        watch.append(("기업 실적 방향 (아직 못 받음)", "시장·정책 수집으로 받아요", "이익 전망이 하향되면 실적장세→역금융/역실적 쪽, 상향되면 금융장세→실적장세 쪽. 우라가미 판단의 핵심 변수"))
     watch.append(("물가·성장률(앱에 없음)", "직접 확인", "투자 시계의 두 축. 물가가 높으면 스태그플레이션·과열, 낮으면 리플레이션·호황"))
     return dict(situation=sit, groups=groups, n=n, lines=lines, watch=watch)

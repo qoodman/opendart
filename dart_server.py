@@ -684,6 +684,13 @@ def run_market_policy(log=print):
         except Exception as e:
             out["policy"] = f"실패: {e}"
             log(f"정책 소식 실패: {e}")
+    if env("DART_EARNINGS", "1") != "0":        # 투자 사이클의 '기업 실적 방향': 시총 상위 종목 합산 영업이익·컨센서스 (네이버, 주 1회)
+        try:
+            import earnings_pulse
+            out["earnings"] = earnings_pulse.sync(results_db(), log=log)
+        except Exception as e:
+            out["earnings"] = f"실패: {e}"
+            log(f"실적 받기 실패: {e}")
     if env("DART_THEMES", "1") != "0":          # 법안 → 기업 짐작에 쓰는 테마(265개) → 종목 (네이버, 주 1회)
         try:
             import theme_map
