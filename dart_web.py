@@ -2975,6 +2975,43 @@ def view_events(conn, q):
     return page("이벤트 테마", flash + _fold(intro) + _fold(upcard, True) + evcard + _fold(table) + _fold(addf) + logfold)
 
 
+def view_cycle(conn, q):
+    """아이디어 → 투자 사이클: 유명한 사이클 이론 정리 + 지금 자료로 보는 점검표 + 하락장에서 생각할 질문"""
+    import cycle_theory as cy
+    try:
+        ind = cy.indicators(conn)
+    except Exception:
+        ind = dict(rows=[], price=None, rate=None, candidates=[])
+    intro = ('<div class="card"><b>투자 사이클</b><div class="muted" style="font-size:13px">시장은 오르고 내리는 순환을 반복한다는 생각을 정리한 유명한 이론들이에요. '
+             '<b>지금이 몇 번째 국면인지 맞히는 도구가 아니라 생각의 틀</b>이에요. 사이클은 지나간 뒤에야 선명해지고, 같은 모양이 반복된다는 보장도 없어요. '
+             '아래 설명은 이론의 요약이라 원전과 다를 수 있고, 투자 권유가 아니에요.</div></div>')
+    rows = "".join(f'<tr><td>{escape(r["label"])}</td><td><b>{escape(r["value"])}</b></td><td class="muted" style="font-size:12px">{escape(r["note"])}</td></tr>' for r in ind["rows"])
+    cand = "".join(f'<li><b>{escape(n)}</b> — {escape(w)}</li>' for n, w in ind["candidates"])
+    live = ('<div class="card"><b>지금 자료로 보는 점검표</b>'
+            '<div class="muted" style="font-size:12px">앱이 받아 둔 코스피·기준금리·국고채·환율·M2로 계산했어요. 기업 실적, 거래량, 투자자 심리, 물가·성장률은 여기서 계산하지 않아요.</div>'
+            + (f'<div class="scroll"><table><tr><th>지표</th><th>값</th><th>읽는 법</th></tr>{rows}</table></div>' if rows else
+               '<div class="muted" style="margin-top:6px">코스피·금리 자료가 아직 부족해요 (시장·정책 데이터를 먼저 받아 주세요).</div>')
+            + (f'<div style="margin-top:8px"><b style="font-size:13px">우라가미 틀로 본 후보 (금리 방향 × 주가 추세만 반영)</b><ul style="margin:4px 0;padding-left:18px;font-size:13px">{cand}</ul>'
+               '<div class="muted" style="font-size:12px">실적 방향은 반영하지 않았어요. 후보일 뿐 판정이 아니에요.</div></div>' if cand else "")
+            + '<div style="margin-top:6px"><a class="chip" href="/market">하락 점검 (과거 비슷하게 빠진 뒤 기록) ↗</a></div></div>')
+    tips = "".join(f'<li style="margin:6px 0"><b>{escape(t)}</b><div class="muted" style="font-size:13px">{escape(d)}</div></li>' for t, d in cy.TIPS_DOWN)
+    tipc = ('<div class="card"><details open><summary style="cursor:pointer"><b>하락장에서 생각해 볼 것</b></summary>'
+            '<div class="muted" style="font-size:12px;margin-top:4px">종목이나 시점을 추천하는 게 아니라, 어떤 이론을 쓰든 공통으로 나오는 점검 질문이에요.</div>'
+            f'<ol style="padding-left:20px;margin:6px 0">{tips}</ol></details></div>')
+    th = ""
+    for t in cy.THEORIES:
+        ph = "".join(f'<tr><td><b>{escape(a)}</b></td><td>{escape(b)}</td><td style="font-size:12px">{escape(c)}</td><td style="font-size:12px">{escape(d)}</td></tr>' for a, b, c, d in t["phases"])
+        th += (f'<details style="border-top:1px solid var(--line);padding:8px 0"><summary style="cursor:pointer"><b>{escape(t["name"])}</b>'
+               f'<span class="muted" style="font-size:12px"> — {escape(t["who"])}</span></summary>'
+               f'<div class="muted" style="font-size:12px;margin-top:4px">보는 축: {escape(t["axes"])}</div>'
+               f'<div style="font-size:13px;margin:6px 0">{escape(t["idea"])}</div>'
+               f'<div class="scroll"><table><tr><th>국면</th><th>모습</th><th>신호</th><th>특징</th></tr>{ph}</table></div>'
+               f'<div style="margin-top:6px;font-size:13px"><b>하락장에서 읽는 법</b> {escape(t["down"])}</div>'
+               f'<div class="muted" style="font-size:12px;margin-top:4px">⚠ 한계: {escape(t["limit"])}</div></details>')
+    thc = ('<div class="card"><b>유명한 사이클 이론 정리</b><div class="muted" style="font-size:12px">이름을 눌러 펼쳐요.</div>' + th + '</div>')
+    return page("투자 사이클", intro + live + tipc + _fold(thc, True))
+
+
 def view_legstudy(conn, q):
     """아이디어 → 입법 주가 분석: 과거 법안의 단계 날짜 전후로, 연결된 기업의 주가가 지수보다 얼마나 더 움직였나 (이벤트 스터디)"""
     import bill_history
@@ -3425,11 +3462,11 @@ IDEA_TABS = {"overall": "종합", "mine": "내 종목 점수", "cheap": "기관 
              "rank": "종목 순위", "score": "점수표 (오일전문가)", "perf": "운용사 성적표",
              "lynch": "피터 린치", "buffett": "워렌 버핏",
              "graham": "벤저민 그레이엄", "magic": "마법공식", "fscore": "F-스코어", "momentum": "모멘텀",
-             "legis": "입법 영향 기업", "legstudy": "입법 주가 분석", "events": "이벤트 테마"}
-IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "legis", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf", "legstudy", "events"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
+             "legis": "입법 영향 기업", "legstudy": "입법 주가 분석", "events": "이벤트 테마", "cycle": "투자 사이클"}
+IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "legis", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf", "legstudy", "events", "cycle"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
 
 
-IDEA_SECTIONS = [("점수", ["overall", "mine"]), ("투자 방법", ["lynch", "buffett", "graham", "magic", "fscore", "momentum"]),
+IDEA_SECTIONS = [("점수", ["overall", "mine"]), ("투자 방법", ["lynch", "buffett", "graham", "magic", "fscore", "momentum", "cycle"]),
                  ("종목 찾기", ["cheap", "cluster", "super", "legis", "events", "rank"]), ("평가·성적", ["score", "perf", "legstudy"])]
 
 
@@ -3861,6 +3898,12 @@ def view_ideas(conn, q):
         q = {**q, "t": "overall"}
     if q.get("t") == "mine":
         return view_mine(conn, q)
+    if q.get("t") == "cycle":
+        _CTX.pre = idea_tabs_row("cycle")
+        try:
+            return view_cycle(conn, q)
+        finally:
+            _CTX.pre = ""
     if q.get("t") == "events":
         _CTX.pre = idea_tabs_row("events")
         try:
