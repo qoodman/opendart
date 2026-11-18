@@ -132,6 +132,8 @@ TIPS_DOWN = [
 def _parse(p):
     p = str(p)
     try:
+        if len(p) == 7 and p[4] == "-":                      # 앱은 월별 자료를 'YYYY-MM'으로 저장
+            return dt.date(int(p[:4]), int(p[5:]), 28)
         if len(p) == 6 and p.isdigit():
             return dt.date(int(p[:4]), int(p[4:]), 28)
         if len(p) == 8 and p.isdigit():
@@ -177,7 +179,15 @@ def indicators(conn):
         r12 = last / closes[-252] - 1
         price = "down" if (last < ma and slope < 0) else "up" if (last > ma and slope > 0) else "flat"
         rows.append(dict(label="코스피 고점 대비 (250거래일)", value=f"{dd:+.1%}", note=f"지금 {last:,.0f} · 고점 {hi:,.0f}"))
-        rows.append(dict(label="코스피 200일 이동평균", value=f"{'아래' if last < ma else '위'} · 기울기 {slope:+.1%}", note="가격이 이평선 아래이고 이평선도 내려가면 와인스타인의 4단계(하락)에 가까워요"))
+        if last < ma and slope < 0:
+            ma_note = "가격이 이평선 아래이고 이평선도 내려가는 중 — 와인스타인의 4단계(하락)에 가까워요"
+        elif last < ma:
+            ma_note = "가격은 이평선 아래로 내려왔지만 이평선은 아직 오르는 중 — 급등 뒤 막 꺾인 모습(3단계 천장→4단계 하락으로 넘어가는 초입)일 수 있어요. 이평선이 꺾이는지 지켜보는 구간"
+        elif slope < 0:
+            ma_note = "가격이 이평선 위로 올라왔지만 이평선은 아직 내려가는 중 — 반등이 추세 전환인지 확인이 필요한 구간"
+        else:
+            ma_note = "가격이 이평선 위이고 이평선도 오르는 중 — 2단계(상승)에 가까워요"
+        rows.append(dict(label="코스피 200일 이동평균", value=f"{'아래' if last < ma else '위'} · 기울기 {slope:+.1%}", note=ma_note))
         rows.append(dict(label="코스피 12개월 수익률", value=f"{r12:+.1%}", note=f"기준일 {k[-1][0].isoformat()}"))
     base = _pts(sm.series(conn, "ecos:base_rate"))
     if base:
