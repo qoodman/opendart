@@ -103,8 +103,17 @@ def groups(ev, data):
     return out
 
 
-def members(ev, data, top=40):
-    """→ [(코드, 이름, 점수, [근거 테마...])]. 작은 테마(구체적)와 주요 테마일수록 높게. 점수는 순서용이에요."""
+def mcaps(conn):
+    """KRX 시세의 최근 시가총액 {코드: 원}. 없으면 {}"""
+    try:
+        return {c: m for c, m in conn.execute("SELECT code, mktcap FROM krx_daily WHERE bas_dd=(SELECT MAX(bas_dd) FROM krx_daily)") if m}
+    except sqlite3.Error:
+        return {}
+
+
+def members(ev, data, top=40, mcap=None):
+    """→ [(코드, 이름, 점수, [근거 테마...])]. mcap(시가총액 {코드: 원})이 있으면 시가총액 큰 순, 없으면 점수 순.
+    점수는 작은 테마(구체적)와 주요 테마일수록 높게 — 순서용이에요."""
     sc, why = {}, {}
     for kind, name, role, codes in groups(ev, data):
         w = (3.0 if role == "main" else 1.2) * (1.0 if kind == "테마" else 0.6) / (1 + len(codes) / 40.0)
@@ -112,8 +121,11 @@ def members(ev, data, top=40):
             sc[c] = sc.get(c, 0) + w
             why.setdefault(c, []).append(name)
     names = data.get("이름", {})
-    ranked = sorted(sc, key=lambda c: (-sc[c], c))[:top]
-    return [(c, names.get(c, c), round(sc[c], 2), why[c][:4]) for c in ranked]
+    if mcap:
+        ranked = sorted(sc, key=lambda c: (-(mcap.get(c) or 0), -sc[c], c))
+    else:
+        ranked = sorted(sc, key=lambda c: (-sc[c], c))
+    return [(c, names.get(c, c), round(sc[c], 2), why[c][:4]) for c in ranked[:top]]
 
 
 def add(conn, d, event_id, title, note=""):

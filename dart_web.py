@@ -2770,7 +2770,7 @@ def study_amp_card(res, meta):
             + t4 + '</div>')
 
 
-def _ev_react_table(rs):
+def _ev_react_table(rs, mc=None):
     """종목별 반응 표 + 평균 줄"""
     import event_themes as et
     f = lambda v: '<td class="muted">-</td>' if v is None else f'<td class="{"up" if v > 0 else "down" if v < 0 else ""}">{v:+.1f}</td>'
@@ -2778,17 +2778,17 @@ def _ev_react_table(rs):
     for x in rs:
         r = x["r"]
         if not x["has_prices"]:
-            trs += f'<tr><td>{escape(x["name"])}</td><td colspan="5" class="muted">주가를 아직 못 받았어요</td></tr>'
+            trs += f'<tr><td>{escape(x["name"])}</td><td>{_mcap_text((mc or {}).get(x["code"]))}</td><td colspan="5" class="muted">주가를 아직 못 받았어요</td></tr>'
         elif not r:
-            trs += f'<tr><td>{escape(x["name"])}</td><td colspan="5" class="muted">이 날짜 전후 주가가 부족해요</td></tr>'
+            trs += f'<tr><td>{escape(x["name"])}</td><td>{_mcap_text((mc or {}).get(x["code"]))}</td><td colspan="5" class="muted">이 날짜 전후 주가가 부족해요</td></tr>'
         else:
-            trs += f'<tr><td><a href="{naver_link(x["code"])}" target="_blank" rel="noopener noreferrer">{escape(x["name"])}</a></td>{f(r.get("ab5pre"))}{f(r.get("ab1"))}{f(r.get("ab5"))}{f(r.get("ab20"))}{f(r.get("since"))}</tr>'
+            trs += f'<tr><td><a href="{naver_link(x["code"])}" target="_blank" rel="noopener noreferrer">{escape(x["name"])}</a></td><td>{_mcap_text((mc or {}).get(x["code"]))}</td>{f(r.get("ab5pre"))}{f(r.get("ab1"))}{f(r.get("ab5"))}{f(r.get("ab20"))}{f(r.get("since"))}</tr>'
     sm = et.summarize(rs)
     if sm:
         cells = "".join((f'<td><b>{sm[k]["mean"]:+.1f}</b><br><span class="muted" style="font-size:11px">중앙 {sm[k]["med"]:+.1f} · 플러스 {sm[k]["up"]:.0%}</span></td>' if k in sm else '<td class="muted">-</td>')
                         for k in ("ab5pre", "ab1", "ab5", "ab20", "since"))
-        trs += f'<tr style="background:var(--chip)"><td><b>평균 ({max(v["n"] for v in sm.values())}종목)</b></td>{cells}</tr>'
-    return ('<div class="scroll"><table><tr><th>종목</th><th>사전 5일</th><th>이후 1일</th><th>5일</th><th>20일</th><th>현재까지</th></tr>' + trs + '</table></div>'
+        trs += f'<tr style="background:var(--chip)"><td><b>평균 ({max(v["n"] for v in sm.values())}종목)</b></td><td></td>{cells}</tr>'
+    return ('<div class="scroll"><table><tr><th>종목</th><th>시총</th><th>사전 5일</th><th>이후 1일</th><th>5일</th><th>20일</th><th>현재까지</th></tr>' + trs + '</table></div>'
             '<div class="muted" style="font-size:11px">지수 대비 초과수익(%p). 기준은 이벤트 직전 종가, 사전은 이벤트 5거래일 전부터.</div>')
 
 
@@ -2814,12 +2814,13 @@ def view_events(conn, q):
                       f'<input type="hidden" name="title" value="{escape(t)}"><input type="hidden" name="note" value="{escape(n)}"><button class="chip" style="cursor:pointer">+ {d} {escape(t)}</button></form> '
                       for a, d, t, n in et.SUGGEST) + '</div>')
     logs = et.log_rows(conn)
+    mc = et.mcaps(conn)
     body = ""
     for lr in logs:
         ev = et.EVENT_BY_ID.get(lr["event_id"])
         if not ev:
             continue
-        mem = et.members(ev, data, top=12)
+        mem = et.members(ev, data, top=12, mcap=mc)
         rs = et.reactions(conn, lr["d"], [(c, n) for c, n, _, _ in mem])
         need = [x["code"] for x in rs if not x["has_prices"]]
         pxb = ('<form method="post" action="/events/px" class="filters" style="margin:6px 0 0">'
@@ -2828,8 +2829,8 @@ def view_events(conn, q):
                  f'<span class="chip">{escape(ev["cat"])}</span> <span class="chip {"up" if ev["dir"] == "호재" else "down" if ev["dir"] == "악재" else ""}">{escape(ev["dir"])} 가설</span>'
                  + (f'<div class="muted" style="font-size:12px">{escape(lr["note"])}</div>' if lr["note"] else "") +
                  f'</div><form method="post" action="/events/del"><input type="hidden" name="id" value="{lr["id"]}"><button class="chip" style="cursor:pointer">삭제</button></form></div>'
-                 f'<div class="muted" style="font-size:12px;margin:4px 0">점수 상위 {len(rs)}종목 (테마: {escape(", ".join(dict.fromkeys(w for m in mem for w in m[3][:1])))})</div>'
-                 + _ev_react_table(rs) + pxb + '</div>')
+                 f'<div class="muted" style="font-size:12px;margin:4px 0">{'시가총액 큰 순' if mc else '점수 순 (KRX 시세가 없어 시가총액은 못 썼어요)'} 상위 {len(rs)}종목 (테마: {escape(", ".join(dict.fromkeys(w for m in mem for w in m[3][:1])))})</div>'
+                 + _ev_react_table(rs, mc) + pxb + '</div>')
     if not logs:
         body = '<div class="card muted">아직 기록이 없어요. 위에서 오늘의 이벤트(또는 아래 예시)를 추가하면 연결 종목의 주가 반응이 나와요.</div>'
     cats = {}
@@ -2843,7 +2844,7 @@ def view_events(conn, q):
             nm = data.get("이름", {})
             mem = []
             gl = "".join(f'<tr><td>{escape(k)}</td><td>{escape(n)}</td><td>{"주요" if r == "main" else "보조"}</td><td>{len(c)}</td>'
-                         f'<td style="font-size:12px">' + " · ".join(f'<a href="{naver_link(x)}" target="_blank" rel="noopener noreferrer">{escape(nm.get(x, x))}</a>' for x in c[:60]) + (f' … 외 {len(c) - 60}' if len(c) > 60 else "") + '</td></tr>' for k, n, r, c in gs)
+                         f'<td style="font-size:12px">' + " · ".join(f'<a href="{naver_link(x)}" target="_blank" rel="noopener noreferrer">{escape(nm.get(x, x))}</a>' for x in sorted(c, key=lambda z: -(mc.get(z) or 0))[:60]) + (f' … 외 {len(c) - 60}' if len(c) > 60 else "") + '</td></tr>' for k, n, r, c in gs)
             items += (f'<details style="margin:8px 0"><summary><b>{escape(ev["name"])}</b> <span class="chip {"up" if ev["dir"] == "호재" else "down" if ev["dir"] == "악재" else ""}">{escape(ev["dir"])}</span></summary>'
                       f'<div style="font-size:13px;margin:4px 0">{escape(ev["why"])}</div><div class="muted" style="font-size:12px">⚠ {escape(ev["note"])}</div>'
                       + (f'<div class="scroll"><table><tr><th>종류</th><th>테마·업종</th><th>역할</th><th>종목 수</th><th>종목</th></tr>{gl}</table></div>' if gs else '<div class="muted">지금 네이버 테마 목록에 맞는 테마가 없어요.</div>')
