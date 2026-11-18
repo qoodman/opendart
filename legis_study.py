@@ -19,6 +19,7 @@
 import bisect
 import datetime as dt
 import json
+import re
 import sqlite3
 import time
 
@@ -34,7 +35,7 @@ STAGES = (("발의", "propose_dt"), ("소관위 회부", "committee_dt"), ("소�
           ("소관위 처리", "cmt_proc_dt"), ("법사위 처리", "law_proc_dt"), ("본회의 처리", "proc_dt"),
           ("공포", "promul_dt"), ("시행", "effective_dt"))
 MIN_NOTICE_DAYS = 14               # '시행' 이벤트는 공포 뒤 이만큼 지나서 시행되는 것만 (즉시 시행은 사전에 알려진 시행일이 아니라서 뺌)
-STEPS = ("과거 법안 받기", "공포·시행일 확인 (법제처)", "법안 → 기업 연결", "종목 주가 받기", "분석 계산")
+STEPS = ("과거 법안 받기", "공포·시행일 확인 (법제처)", "법안 → 기업 연결", "과거 제안이유 받기", "종목 주가 받기", "분석 계산")
 MIN_SCORE = 3.0                       # 이 점수 이상인 후보만 이벤트로 (연결이 느슨한 것 제외)
 PX_START = "20150101"
 HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://m.stock.naver.com/"}
@@ -51,6 +52,11 @@ def ensure(conn):
     CREATE TABLE IF NOT EXISTS study_result (grp TEXT, gkey TEXT, payload TEXT, computed TEXT, PRIMARY KEY (grp, gkey));
     CREATE TABLE IF NOT EXISTS study_meta (key TEXT PRIMARY KEY, value TEXT);
     """)
+    for tbl, col in (("study_px", "vol REAL"), ("study_stock", "vol_ok INTEGER")):        # 거래량 (거래대금 규모·사전 거래량 급증 조건용)
+        try:
+            conn.execute(f"ALTER TABLE {tbl} ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass
 
 
 def outcome(result):
@@ -153,6 +159,7 @@ def find_promulgations(db_path, law_oc, log=print, progress=None, session=None):
 
 # ---------------- 2) 주가 ----------------
 def fetch_px(code, session=None):
+    """[(날짜, 종가, 거래량)] 오래된 것부터 (2015년~). 거래량은 네이버 일봉의 accumulatedTradingVolume"""
     r = (session or requests).get(PRICE_URL.format(code=code), headers=HEADERS, timeout=40,
                                   params={"startDateTime": PX_START, "endDateTime": (dt.date.today() + dt.timedelta(days=1)).strftime("%Y%m%d")})
     r.raise_for_status()
@@ -160,30 +167,33 @@ def fetch_px(code, session=None):
     for x in r.json():
         d, c = str(x.get("localDate", "")), x.get("closePrice")
         if len(d) == 8 and c:
-            out.append((f"{d[:4]}-{d[4:6]}-{d[6:]}", float(c)))
+            v = x.get("accumulatedTradingVolume")
+            out.append((f"{d[:4]}-{d[4:6]}-{d[6:]}", float(c), float(v) if v not in (None, "") else None))
     return sorted(out)
 
 
 def fetch_prices(db_path, log=print, progress=None, session=None, sleep=0.2, max_codes=None):
-    """연결된 종목 중 주가가 없는 것을 받음 (한 종목 1~2번 호출). 실패한 종목은 건너뛰고 계속 → {받음, 실패, 전체}"""
+    """연결된 종목 중 주가(와 거래량)가 없는 것을 받음 (한 종목 1~2번 호출). 실패한 종목은 건너뛰고 계속 → {받음, 실패, 전체}"""
     import bill_watch
     conn = sqlite3.connect(db_path)
     try:
         ensure(conn)
         codes = [c for (c,) in conn.execute("SELECT DISTINCT code FROM hist_map")]
-        have = {c for (c,) in conn.execute("SELECT code FROM study_stock WHERE n > 0")}
+        have = {c for (c,) in conn.execute("SELECT code FROM study_stock WHERE n > 0 AND COALESCE(vol_ok, 0) = 1")}      # 거래량까지 받은 종목은 건너뜀
         todo = [c for c in codes if c not in have][:max_codes]
         ok = fail = 0
         for i, code in enumerate(todo):
             try:
                 rows = fetch_px(code, session)
                 nm, mk = bill_watch.stock_info(code, session)
-                conn.executemany("INSERT OR REPLACE INTO study_px VALUES (?,?,?)", [(code, d, c) for d, c in rows])
-                conn.execute("INSERT OR REPLACE INTO study_stock VALUES (?,?,?,?,?)", (code, nm or "", mk or "", dt.date.today().isoformat(), len(rows)))
+                conn.executemany("INSERT OR REPLACE INTO study_px (code, d, close, vol) VALUES (?,?,?,?)", [(code, d, c, v) for d, c, v in rows])
+                has_vol = 1 if any(v is not None for _, _, v in rows) else 0
+                conn.execute("INSERT OR REPLACE INTO study_stock (code, name, market, px_fetched, n, vol_ok) VALUES (?,?,?,?,?,?)",
+                             (code, nm or "", mk or "", dt.date.today().isoformat(), len(rows), has_vol))
                 ok += 1
             except Exception as e:
                 fail += 1
-                conn.execute("INSERT OR REPLACE INTO study_stock VALUES (?,?,?,?,?)", (code, "", "", dt.date.today().isoformat(), 0))
+                conn.execute("INSERT OR REPLACE INTO study_stock (code, name, market, px_fetched, n, vol_ok) VALUES (?,?,?,?,?,0)", (code, "", "", dt.date.today().isoformat(), 0))
                 if fail <= 3:
                     log(f"주가 {code} 실패: {type(e).__name__}")
             if i % 25 == 0:
@@ -194,6 +204,48 @@ def fetch_prices(db_path, log=print, progress=None, session=None, sleep=0.2, max
         conn.commit()
         log(f"주가: 받음 {ok} · 실패 {fail} · 대상 {len(todo)}/{len(codes)}")
         return {"받음": ok, "실패": fail, "대상": len(todo), "전체 종목": len(codes)}
+    finally:
+        conn.close()
+
+
+# ---------------- 2.5) 과거 법안 제안이유 (방향 판정용) ----------------
+def fetch_hist_texts(db_path, limit=1500, log=print, progress=None, sleep=0.3, fetcher=None):
+    """기업에 연결된 과거 법안 중 제안이유가 없는 것을 최근·진행 단계 순으로 limit건 받아 bill_text에 저장 (수혜/부담 방향 판정에 씀).
+    연속 5번 실패하면 멈춰요. 이어받기 가능 → {성공, 실패, 대상}"""
+    import bill_watch
+    fetcher = fetcher or bill_watch.fetch_text
+    conn = sqlite3.connect(db_path)
+    try:
+        ensure(conn)
+        bill_watch.ensure(conn)
+        have = {k for (k,) in conn.execute("SELECT bill_key FROM bill_text")}
+        rows = conn.execute("SELECT b.key, b.url, COALESCE(NULLIF(b.proc_dt,''), NULLIF(b.cmt_proc_dt,''), b.propose_dt) d FROM hist_bills b "
+                            "WHERE b.url != '' AND b.key IN (SELECT DISTINCT bill_key FROM hist_map) ORDER BY (b.proc_dt != '') DESC, d DESC").fetchall()
+        todo = [(k, u) for k, u, _ in rows if k not in have][:limit]
+        ok = fail = streak = 0
+        for i, (key, url) in enumerate(todo):
+            try:
+                txt = fetcher(url)
+                streak = 0
+            except Exception:
+                fail += 1
+                streak += 1
+                if streak >= 5:
+                    log("과거 제안이유: 5번 연속 실패해서 멈췄어요")
+                    break
+                continue
+            conn.execute("INSERT OR REPLACE INTO bill_text VALUES (?,?,?)", (key, dt.date.today().isoformat(), txt))
+            ok += 1
+            if ok % 25 == 0:
+                conn.commit()
+                if progress:
+                    progress(f"{i + 1}/{len(todo)}")
+            time.sleep(sleep)
+        conn.commit()
+        log(f"과거 제안이유: 대상 {len(todo)} · 성공 {ok} · 실패 {fail}")
+        if todo and not ok and fail:
+            raise RuntimeError(f"제안이유를 한 건도 못 받았어요 ({fail}건 실패) — 국회 페이지 접속 문제예요. 방향(수혜/부담) 분석은 제목 단어로만 해서 범위가 좁아져요")
+        return {"성공": ok, "실패": fail, "대상": len(todo)}
     finally:
         conn.close()
 
@@ -274,10 +326,148 @@ def _placebo_p(observed, rows, cl, k, mat, lo, hi, B, rng):
     return float((1 + (np.abs(stats) >= abs(observed)).sum()) / (len(stats) + 1))
 
 
+SUP_WORDS = ("지원", "육성", "진흥", "촉진", "활성화", "감면", "면제", "공제", "보조", "융자", "장려", "특례", "비과세", "완화")
+BUR_WORDS = ("처벌", "과징금", "과태료", "벌금", "금지", "제재", "규제", "의무", "환수", "상한", "제한", "취소", "강화")
+
+
+def title_sign(name):
+    """법안 제목의 단어로 수혜(+1)/부담(-1)/모름(0). 법 이름 자체('조세특례제한법'의 '특례'·'제한')는 빼고 부제목 같은 나머지만 봐요 — 제목만으로는 거칠어요."""
+    import legis as lg
+    n = re.sub(r"\s+", "", name or "")
+    law = re.sub(r"\s+", "", lg.law_name(name) or "")
+    if law:
+        n = n.replace(law, "", 1)
+    sup = sum(1 for w in SUP_WORDS if w in n)
+    bur = sum(1 for w in BUR_WORDS if w in n)
+    return 1 if sup and not bur else -1 if bur and not sup else 0
+
+
+def bill_sign(name, text):
+    """제안이유 본문이 있으면 본문 단어(legis.nature_hint), 없으면 제목 단어로 수혜(+1)/부담(-1)/모름(0)"""
+    import legis as lg
+    if text and len(text.strip()) >= 30:
+        k = lg.nature_hint("", text)["kind"]
+        return 1 if k == "support" else -1 if k == "burden" else 0
+    return title_sign(name)
+
+
+def sponsors(proposer):
+    """공동발의 인원: 정부안 0, '… 등 10인' → 10, 이름 하나 → 1, 모르면 -1"""
+    s = proposer or ""
+    if not s.strip():
+        return -1
+    if "정부" in s:
+        return 0
+    m = re.search(r"(\d+)\s*인", s)
+    return int(m.group(1)) if m else 1
+
+
+def _liq_arrays(P, vol):
+    """D0 기준 미리 알 수 있는 값: 거래대금 규모(D-80…D-21 평균 종가×거래량)와 사전 거래량 급증(D-5…D-1 평균 ÷ D-80…D-21 평균). 거래량이 없으면 nan"""
+    n = len(P)
+    liq = np.full(n, np.nan)
+    surge = np.full(n, np.nan)
+    if vol is None or np.all(np.isnan(vol)) or n < 90:
+        return liq, surge
+    v = np.nan_to_num(vol, nan=0.0)
+    cs = np.concatenate([[0.0], np.cumsum(P * v)])
+    cv = np.concatenate([[0.0], np.cumsum(v)])
+    t = np.arange(81, n)
+    liq[t] = (cs[t - 20] - cs[t - 80]) / 60.0
+    base = (cv[t - 20] - cv[t - 80]) / 60.0
+    recent = (cv[t] - cv[t - 5]) / 5.0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        surge[t] = np.where(base > 0, recent / base, np.nan)
+    return liq, surge
+
+
+def _p_two(draws, obs):
+    d = draws[~np.isnan(draws)]
+    if obs is None or len(d) < 50:
+        return None
+    return float((1 + (np.abs(d) >= abs(obs)).sum()) / (len(d) + 1))
+
+
+def _p_up(draws, obs):
+    d = draws[~np.isnan(draws)]
+    if obs is None or len(d) < 50:
+        return None
+    return float((1 + (d >= obs).sum()) / (len(d) + 1))
+
+
+def _abs_threshold(mat, rows, lo, hi, rng, q=0.9):
+    sub = mat[np.unique(rows)][:, lo:hi].ravel()
+    sub = sub[~np.isnan(sub)]
+    if len(sub) > 300000:
+        sub = rng.choice(sub, 300000, replace=False)
+    return float(np.quantile(np.abs(sub), q)) if len(sub) else None
+
+
+def _suite(vals, sign, rows, cl, k, mat, lo, hi, B, rng, want_tail=True):
+    """사후 10일 값(vals)에 대한 한 묶음 통계: 부호 있는 평균(우연 p), 움직임 크기(|값| 평균을 평소와 비교한 배율·p), 큰 움직임 비율(평소 상위 10% 크기 이상인 비율), 방향 보정 평균.
+    대조군은 날짜 묶음마다 무작위 달력 위치를 하나 뽑아 그날 같은 종목들이 보인 값을 써요 (같은 날 이벤트는 같은 무작위 날짜를 함께 받음)."""
+    obs = dict(sig=_cluster_stat(vals, cl, k), abs=_cluster_stat(np.abs(vals), cl, k))
+    thr = _abs_threshold(mat, rows, lo, hi, rng) if want_tail else None
+    a = np.abs(vals)
+    if thr is not None:
+        obs["tail"] = _cluster_stat(np.where(np.isnan(a), np.nan, (a >= thr).astype(np.float64)), cl, k)
+    sg = None
+    if sign is not None and np.any(sign != 0):
+        sg = np.where(sign != 0, sign.astype(np.float64), np.nan)
+        obs["al"] = _cluster_stat(vals * sg, cl, k)
+    d_sig, d_abs = np.empty(B), np.empty(B)
+    d_tail = np.empty(B) if thr is not None else None
+    d_al = np.empty(B) if sg is not None else None
+    for b in range(B):
+        r = rng.integers(lo, hi, size=k)
+        v = mat[rows, r[cl]].astype(np.float64)
+        av = np.abs(v)
+        d_sig[b] = _cluster_stat(v, cl, k)
+        d_abs[b] = _cluster_stat(av, cl, k)
+        if d_tail is not None:
+            d_tail[b] = _cluster_stat(np.where(np.isnan(av), np.nan, (av >= thr).astype(np.float64)), cl, k)
+        if d_al is not None:
+            d_al[b] = _cluster_stat(v * sg, cl, k)
+    out = dict(post10_p=_p_two(d_sig, obs["sig"]))
+    base_abs = float(np.nanmean(d_abs))
+    out.update(abs_mean=None if np.isnan(obs["abs"]) else round(obs["abs"] * 100, 3), abs_base=round(base_abs * 100, 3),
+               abs_ratio=round(obs["abs"] / base_abs, 3) if base_abs > 0 and not np.isnan(obs["abs"]) else None, abs_p=_p_up(d_abs, obs["abs"]))
+    if thr is not None:
+        te = float(np.nanmean(d_tail))
+        out.update(tail=None if np.isnan(obs["tail"]) else round(obs["tail"], 4), tail_exp=round(te, 4), tail_p=_p_up(d_tail, obs["tail"]), tail_thr=round(thr * 100, 2))
+    if d_al is not None:
+        n_al = int(np.sum(~np.isnan(vals * sg)))
+        out.update(al_n=n_al, al_post10=None if np.isnan(obs["al"]) else round(obs["al"] * 100, 3), al_p=_p_two(d_al, obs["al"]))
+    return out
+
+
+def _abs_ratio(vals, rows, cl, k, mat_abs, lo, hi, B, rng):
+    """특징 분석용 가벼운 버전: (움직임 크기 배율, 우연 p). 대조군도 같은 방식(날짜 묶음별 무작위 위치)"""
+    if k < 3:
+        return None, None
+    obs = _cluster_stat(np.abs(vals), cl, k)
+    d = np.empty(B)
+    for b in range(B):
+        r = rng.integers(lo, hi, size=k)
+        d[b] = _cluster_stat(mat_abs[rows, r[cl]].astype(np.float64), cl, k)
+    base = float(np.nanmean(d))
+    if np.isnan(obs) or not base > 0:
+        return None, None
+    return round(obs / base, 3), _p_up(d, obs)
+
+
+STAGE_SETS = (("발의", ("발의",)), ("심사", ("소관위 회부", "소관위 상정", "소관위 처리", "법사위 처리")), ("확정", ("본회의 처리", "공포", "시행")))
+TRAIN_FRAC = 0.6                         # 이벤트 날짜의 앞 60%는 학습, 뒤 40%는 검증
+# '강하게 반응하는 조건' 판정 기준: 학습 기간에서 찾고(p·배율), 검증 기간에서 재현돼야 '재현됨'. 값은 무효과 합성 세계의 오탐률을 직접 재서 정했어요.
+TRAIN_MIN_RATIO, TRAIN_P = 1.12, 0.01
+TEST_MIN_RATIO, TEST_P = 1.05, 0.05
+
+
 def compute(db_path, log=print, B=500, seed=7, progress=None):
     """저장된 법안·연결·주가로 이벤트 스터디를 계산해 study_result에 저장 → {이벤트, 묶음}"""
     if np is None:
         raise RuntimeError("numpy가 필요해요 (pandas와 함께 설치돼 있어야 해요)")
+    import theme_map
     conn = sqlite3.connect(db_path)
     try:
         ensure(conn)
@@ -285,17 +475,33 @@ def compute(db_path, log=print, B=500, seed=7, progress=None):
         if not len(idx["KOSPI"][0]):
             raise RuntimeError("코스피 지수 기록이 없어요 (지금 수집 → 시장·정책만을 먼저 돌려 주세요)")
         mk = {c: (m or "") for c, m in conn.execute("SELECT code, market FROM study_stock WHERE n > 0")}
-        # 이벤트 모으기: (code, stage) → [(발생일, 법안, tier, outcome, concept)]
+        try:
+            texts = {k_: t_ for k_, t_ in conn.execute("SELECT bill_key, text FROM bill_text WHERE text != ''") if k_.startswith("h:")}
+        except sqlite3.OperationalError:
+            texts = {}
+        names_by_code = {c: n for c, n in conn.execute("SELECT code, name FROM study_stock")}
+        tdata = theme_map.load(conn)
+        n_theme = {}
+        for _, codes_ in tdata["테마"].items():
+            for c_ in codes_:
+                n_theme[c_] = n_theme.get(c_, 0) + 1
+        # 이벤트 모으기: code → [(단계, 날짜, 법안키, tier, outcome, concept, score, sign, sponsors)]
         ev_by_code = {}
         sel = ", ".join(c for _, c in STAGES)
-        q = (f"SELECT b.key, b.proc_result, {sel}, m.code, m.tier, m.concept FROM hist_bills b JOIN hist_map m ON m.bill_key=b.key")
+        q = (f"SELECT b.key, b.proc_result, b.proposer, b.name, {sel}, m.code, m.tier, m.concept, m.score FROM hist_bills b JOIN hist_map m ON m.bill_key=b.key")
         n_raw = 0
+        bsign, bspon, bname = {}, {}, {}
+        nst = len(STAGES)
         for row in conn.execute(q):
-            key, res = row[0], row[1]
-            dates = row[2:2 + len(STAGES)]
-            code, tier, concept = row[2 + len(STAGES):]
+            key, res, prop, bnm = row[0], row[1], row[2], row[3]
+            dates = row[4:4 + nst]
+            code, tier, concept, score = row[4 + nst:]
             if code not in mk:
                 continue
+            if key not in bsign:
+                bsign[key] = bill_sign(bnm, texts.get(key, ""))
+                bspon[key] = sponsors(prop)
+                bname[key] = bnm
             dmap = {st_: dd for (st_, _), dd in zip(STAGES, dates)}
             for (stage, _), d in zip(STAGES, dates):
                 if stage == "시행" and d and dmap.get("공포"):          # 즉시 시행은 제외
@@ -305,59 +511,67 @@ def compute(db_path, log=print, B=500, seed=7, progress=None):
                     except ValueError:
                         continue
                 if d and d >= "2015-03-01":
-                    ev_by_code.setdefault(code, []).append((stage, d, key, tier, outcome(res), concept))
+                    ev_by_code.setdefault(code, []).append((stage, d, key, tier, outcome(res), concept, float(score or 0), bsign[key], bspon[key]))
                     n_raw += 1
-        # 이벤트를 파이썬 딕셔너리가 아니라 숫자 배열(열별 리스트 → numpy)로 모아 메모리를 아껴요 (수십만 건)
         STG = {s_: i for i, (s_, _) in enumerate(STAGES)}
         TIERS, OUTS, CONCEPTS = {}, {}, {}
-        col = {k_: [] for k_ in ("stage", "row", "pos", "t0", "tier", "out", "concept", "pre", "p10", "p20")}
-        paths = []
-        code_of_row = []
-        cal_all = idx["KOSPI"][0]                                      # 달력: 코스피 거래일 (종목별 값을 이 달력 위치에 올림)
+        bill_keys, bill_ix = [], {}
+        col = {k_: [] for k_ in ("stage", "row", "pos", "t0", "tier", "out", "concept", "pre", "p10", "p20", "bill", "score", "sign", "spon", "liq", "surge", "ntheme")}
+        paths, code_of_row, series = [], [], []
+        cal_all = idx["KOSPI"][0]
         cal = cal_all[cal_all >= _ord("2015-01-01")]
-        series = []
         for ci, (code, evs) in enumerate(ev_by_code.items()):
-            rows = conn.execute("SELECT d, close FROM study_px WHERE code=? ORDER BY d", (code,)).fetchall()
+            rows = conn.execute("SELECT d, close, vol FROM study_px WHERE code=? ORDER BY d", (code,)).fetchall()
             if len(rows) < 60:
                 continue
-            days = np.array([_ord(d) for d, _ in rows], dtype=np.int64)
-            P = np.array([c for _, c in rows], dtype=float)
+            days = np.array([_ord(d) for d, _, _ in rows], dtype=np.int64)
+            P = np.array([c for _, c, _ in rows], dtype=float)
+            vol = np.array([np.nan if v is None else v for _, _, v in rows], dtype=float)
             idays, ivals = idx["KOSDAQ" if mk.get(code) == "KOSDAQ" and len(idx["KOSDAQ"][0]) else "KOSPI"]
             I = _aligned_index(days, idays, ivals)
             pre, p10, p20 = _stat_arrays(P, I)
+            liq, surge = _liq_arrays(P, vol)
             cpos = np.searchsorted(cal, days)
-            okc = (cpos < len(cal)) & (cal[np.clip(cpos, 0, len(cal) - 1)] == days)      # 달력에 있는 날만
+            okc = (cpos < len(cal)) & (cal[np.clip(cpos, 0, len(cal) - 1)] == days)
             row = len(series)
             code_of_row.append(code)
             series.append((cpos[okc], pre[okc].astype(np.float32), p10[okc].astype(np.float32)))
             seen = {}
-            for stage, d, key, tier, oc, concept in evs:
+            for stage, d, key, tier, oc, concept, score, sgn, spn in evs:
                 o = _ord(d)
                 t0 = int(np.searchsorted(days, o, side="left"))
                 if t0 < 21 or t0 + POST >= len(days) or np.isnan(pre[t0]) or np.isnan(p10[t0]) or not okc[t0]:
                     continue
                 k = (stage, t0)
-                if k in seen:                              # 같은 기업·단계·날짜는 한 번 (연결 확실도는 높은 쪽)
+                if k in seen:                              # 같은 기업·단계·날짜는 한 번 (연결 확실도는 높은 쪽, 방향이 엇갈리면 모름)
                     e = seen[k]
                     if tier == "직접 언급":
                         e[0] = "직접 언급"
                     if e[1] != oc:
                         e[1] = "섞임"
+                    e[5] = max(e[5], score)
+                    if e[6] != sgn:
+                        e[6] = 0
                     continue
-                seen[k] = [tier, oc, concept, t0]
+                seen[k] = [tier, oc, concept, t0, key, score, sgn, spn]
             if seen:
                 t0s = np.array([v[3] for v in seen.values()], dtype=np.int64)
                 ks = list(seen.keys())
                 pa = np.arange(-PRE, POST + 1)
                 pidx = t0s[:, None] + pa[None, :]
                 ref = t0s - 21
-                car = (P[pidx] / P[ref][:, None] - 1) - (I[pidx] / I[ref][:, None] - 1)           # 이벤트 × 41
+                car = (P[pidx] / P[ref][:, None] - 1) - (I[pidx] / I[ref][:, None] - 1)
                 paths.append(car.astype(np.float32))
-                for j, ((stage, t0), (tier, oc, concept, _)) in enumerate(zip(ks, seen.values())):
+                for (stage, t0), (tier, oc, concept, _, key, score, sgn, spn) in zip(ks, seen.values()):
+                    if key not in bill_ix:
+                        bill_ix[key] = len(bill_keys)
+                        bill_keys.append(key)
                     col["stage"].append(STG[stage]); col["row"].append(row); col["pos"].append(int(cpos[t0])); col["t0"].append(int(days[t0]))
                     col["tier"].append(TIERS.setdefault(tier, len(TIERS))); col["out"].append(OUTS.setdefault(oc, len(OUTS)))
                     col["concept"].append(CONCEPTS.setdefault(concept or "", len(CONCEPTS)))
                     col["pre"].append(pre[t0]); col["p10"].append(p10[t0]); col["p20"].append(p20[t0] if not np.isnan(p20[t0]) else np.nan)
+                    col["bill"].append(bill_ix[key]); col["score"].append(score); col["sign"].append(sgn); col["spon"].append(spn)
+                    col["liq"].append(liq[t0]); col["surge"].append(surge[t0]); col["ntheme"].append(n_theme.get(code, 0))
             if progress and ci % 100 == 0:
                 progress(f"{ci}/{len(ev_by_code)} 종목")
         n_ev = len(col["stage"])
@@ -365,7 +579,6 @@ def compute(db_path, log=print, B=500, seed=7, progress=None):
         del col
         PATHS = np.concatenate(paths, axis=0) if paths else np.empty((0, PRE + POST + 1), dtype=np.float32)
         del paths
-        # 달력 행렬: 대조군에서 '그날 그 종목이 보인 값'을 바로 꺼내려고 (종목 × 달력 위치)
         mat_pre = np.full((len(series), len(cal)), np.nan, dtype=np.float32)
         mat_p10 = np.full((len(series), len(cal)), np.nan, dtype=np.float32)
         for r_, (cp, a_, b_) in enumerate(series):
@@ -377,6 +590,8 @@ def compute(db_path, log=print, B=500, seed=7, progress=None):
         inv = lambda d_: {v: k for k, v in d_.items()}
         TIER_N, OUT_N, CON_N = inv(TIERS), inv(OUTS), inv(CONCEPTS)
         stage_names = [s_ for s_, _ in STAGES]
+        stage_i = {n_: i for i, n_ in enumerate(stage_names)}
+        sign_cover = float(np.mean(A["sign"] != 0)) if n_ev else 0.0
         groups = {}
 
         def add(grp, gkey, i):
@@ -389,37 +604,151 @@ def compute(db_path, log=print, B=500, seed=7, progress=None):
             add("단계×결과", f"{st_}|{out_}", i)
             if con_ and st_ in ("발의", "소관위 처리", "본회의 처리"):
                 add("분야", f"{st_}|{con_}", i)
+            sg_ = A["sign"][i]
+            if sg_ != 0:
+                add("방향", f"{st_}|{'수혜 힌트' if sg_ > 0 else '부담 힌트'}", i)
         conn.execute("DELETE FROM study_result")
         today = dt.date.today().isoformat()
         stored = 0
-        for (grp, gkey), ii in groups.items():
-            ii = np.array(ii, dtype=np.int64)
+
+        def payload_for(ii, Bn):
             dates = A["t0"][ii]
-            n_dates = int(len(np.unique(dates)))
-            if len(ii) < 15 or n_dates < 8:
-                continue
+            _, cl_ = np.unique(dates, return_inverse=True)
+            kk = int(cl_.max()) + 1
+            rows_ = A["row"][ii]
             pre_m, pre_t, _ = _clustered(A["pre"][ii], dates)
             p10_m, p10_t, _ = _clustered(A["p10"][ii], dates)
             p20_m, p20_t, _ = _clustered(A["p20"][ii], dates)
-            rows_ = A["row"][ii]
-            _, cl_ = np.unique(dates, return_inverse=True)
-            kk = int(cl_.max()) + 1
-            Bn = B if len(ii) <= 20000 else max(100, B // 4)
-            n_stocks = int(len(np.unique(rows_)))
-            payload = dict(
-                n_events=int(len(ii)), n_dates=n_dates, n_stocks=n_stocks,
+            sgn = A["sign"][ii]
+            suite = _suite(A["p10"][ii].astype(np.float64), sgn if np.mean(sgn != 0) >= 0.1 and np.sum(sgn != 0) >= 30 else None,
+                           rows_, cl_, kk, mat_p10, lo_pos, hi_pos, Bn, rng)
+            pl = dict(
+                n_events=int(len(ii)), n_dates=int(kk), n_stocks=int(len(np.unique(rows_))),
                 path=[round(float(x) * 100, 3) for x in PATHS[ii].mean(axis=0)],
                 pre=None if pre_m is None else round(pre_m * 100, 3), pre_t=None if pre_t is None else round(pre_t, 2),
                 post10=None if p10_m is None else round(p10_m * 100, 3), post10_t=None if p10_t is None else round(p10_t, 2),
                 post20=None if p20_m is None else round(p20_m * 100, 3), post20_t=None if p20_t is None else round(p20_t, 2),
-                pre_p=_placebo_p(pre_m, rows_, cl_, kk, mat_pre, lo_pos, hi_pos, Bn, rng), post10_p=_placebo_p(p10_m, rows_, cl_, kk, mat_p10, lo_pos, hi_pos, Bn, rng))
-            conn.execute("INSERT OR REPLACE INTO study_result VALUES (?,?,?,?)", (grp, gkey, json.dumps(payload, ensure_ascii=False), today))
+                pre_p=_placebo_p(pre_m, rows_, cl_, kk, mat_pre, lo_pos, hi_pos, Bn, rng), n_sign=int(np.sum(sgn != 0)))
+            pl.update(suite)
+            return pl
+        for (grp, gkey), ii in groups.items():
+            ii = np.array(ii, dtype=np.int64)
+            n_dates = int(len(np.unique(A["t0"][ii])))
+            if len(ii) < 15 or n_dates < 8:
+                continue
+            Bn = B if len(ii) <= 20000 else max(100, B // 4)
+            conn.execute("INSERT OR REPLACE INTO study_result VALUES (?,?,?,?)", (grp, gkey, json.dumps(payload_for(ii, Bn), ensure_ascii=False), today))
             stored += 1
+        # ---- 강하게 반응하는 조건 (학습 → 검증) ----
+        def halves(x):
+            ok = ~np.isnan(x)
+            out = np.full(len(x), -1, dtype=np.int8)
+            if ok.sum() >= 30:
+                med = np.quantile(x[ok], 0.5)
+                out[ok] = np.where(x[ok] <= med, 0, 1)
+            return out
+        spon = A["spon"]
+        feats = [("연결", np.where(A["tier"] == TIERS.get("직접 언급", -9), 0, 1).astype(np.int8) if n_ev else np.array([], dtype=np.int8), ["직접 언급", "개념·테마 짐작"]),
+                 ("점수", halves(A["score"].astype(float)), ["낮음", "높음"]),
+                 ("소속 테마 수", np.where(A["ntheme"] <= 0, -1, np.where(A["ntheme"] == 1, 0, 1)).astype(np.int8), ["1개(특화)", "2개 이상"]),
+                 ("거래대금 규모", halves(A["liq"].astype(float)), ["하위 절반", "상위 절반"]),
+                 ("사전 거래량", np.where(np.isnan(A["surge"]), -1, (A["surge"] >= 2.0).astype(np.int8)).astype(np.int8), ["보통", "급증(2배↑)"]),
+                 ("공동발의", np.where(spon < 0, -1, np.where(spon == 0, 0, np.where(spon < 10, 1, 2))).astype(np.int8), ["정부안", "1~9인", "10인 이상"]),
+                 ("법안 성격", np.where(A["sign"] > 0, 0, np.where(A["sign"] < 0, 1, -1)).astype(np.int8), ["수혜 힌트", "부담 힌트"])]
+        mat_abs = np.abs(mat_p10)
+        Bf = min(B, 300)
+        n_feat = 0
+        for set_name, stages_ in STAGE_SETS:
+            sidx = np.where(np.isin(A["stage"], [stage_i[x] for x in stages_]))[0]
+            if len(sidx) < 200:
+                continue
+            ud = np.unique(A["t0"][sidx])
+            split = int(np.quantile(ud, TRAIN_FRAC))
+            split_pos = int(np.searchsorted(cal, split))
+            ranges = {"train": (lo_pos, max(lo_pos + 10, split_pos)), "test": (min(split_pos, hi_pos - 10), hi_pos)}
+            sel_split = {"train": sidx[A["t0"][sidx] <= split], "test": sidx[A["t0"][sidx] > split]}
+
+            def run(ii, which):
+                if len(ii) < 30:
+                    return dict(n=int(len(ii)), n_dates=0, ratio=None, p=None)
+                dates = A["t0"][ii]
+                _, cl_ = np.unique(dates, return_inverse=True)
+                kk = int(cl_.max()) + 1
+                if kk < 12:
+                    return dict(n=int(len(ii)), n_dates=kk, ratio=None, p=None)
+                lo_, hi_ = ranges[which]
+                ratio, pv = _abs_ratio(A["p10"][ii].astype(np.float64), A["row"][ii], cl_, kk, mat_abs, lo_, hi_, Bf if len(ii) <= 20000 else 100, rng)
+                return dict(n=int(len(ii)), n_dates=kk, ratio=ratio, p=pv)
+            base = {w: run(sel_split[w], w) for w in ("train", "test")}
+            conn.execute("INSERT OR REPLACE INTO study_result VALUES (?,?,?,?)", ("특징", f"{set_name}|전체", json.dumps(dict(
+                set=set_name, feature="전체", bucket="전체", train=base["train"], test=base["test"], status="기준", split=dt.date.fromordinal(split).isoformat()), ensure_ascii=False), today))
+            # 버킷: 특징 하나씩 + 두 특징 조합 (효과가 '소형주이면서 기업명 직접 언급'처럼 교차 조건에만 있을 수 있어서)
+            buckets = []
+            for fname, fa, labels in feats:
+                for bi, blab in enumerate(labels):
+                    buckets.append((f"{fname}={blab}", fname, blab, (fa == bi)))
+            for i1 in range(len(feats)):
+                for i2 in range(i1 + 1, len(feats)):
+                    f1, f2 = feats[i1], feats[i2]
+                    for b1, l1 in enumerate(f1[2]):
+                        m1 = (f1[1] == b1)
+                        if not m1.any():
+                            continue
+                        for b2, l2 in enumerate(f2[2]):
+                            buckets.append((f"{f1[0]}={l1} + {f2[0]}={l2}", f"{f1[0]}+{f2[0]}", f"{l1} + {l2}", m1 & (f2[1] == b2)))
+            for key_, fname, blab, m in buckets:
+                if not m.any():
+                    continue
+                r = {w: run(sel_split[w][m[sel_split[w]]], w) for w in ("train", "test")}
+                tr, te = r["train"], r["test"]
+                ok_tr = (tr["ratio"] is not None and tr["n_dates"] >= 25 and tr["ratio"] >= TRAIN_MIN_RATIO and (tr["p"] or 1) < TRAIN_P
+                         and tr["ratio"] >= (base["train"]["ratio"] or 1) + 0.05)
+                ok_te = (te["ratio"] is not None and te["n_dates"] >= 15 and te["ratio"] >= TEST_MIN_RATIO and (te["p"] or 1) < TEST_P
+                         and te["ratio"] >= (base["test"]["ratio"] or 1) + 0.02)
+                thin = (tr["n_dates"] < 25) or (te["n_dates"] < 15)
+                status = "재현됨" if ok_tr and ok_te else "학습에서만" if ok_tr else "표본 부족" if thin else "없음"
+                if status in ("없음", "표본 부족") and "+" in fname:          # 조합 버킷은 의미 있는 것(학습 통과)만 저장해 표를 작게
+                    continue
+                conn.execute("INSERT OR REPLACE INTO study_result VALUES (?,?,?,?)", ("특징", f"{set_name}|{key_}", json.dumps(dict(
+                    set=set_name, feature=fname, bucket=blab, train=tr, test=te, status=status, split=dt.date.fromordinal(split).isoformat()), ensure_ascii=False), today))
+                n_feat += 1
+        # ---- 반응이 컸던 사례 (사후 선택이라 참고용) ----
+        big_stage = [stage_i[x] for x in ("소관위 처리", "법사위 처리", "본회의 처리", "공포", "시행")]
+        cidx = np.where(np.isin(A["stage"], big_stage) & ~np.isnan(A["p10"]))[0]
+        cases = []
+        if len(cidx):
+            top = cidx[np.argsort(-np.abs(A["p10"][cidx]))[:30]]
+            by_date = {}
+            for i in range(n_ev):
+                by_date.setdefault(int(A["t0"][i]), []).append(i)
+            for i in top:
+                same = [j for j in by_date.get(int(A["t0"][i]), []) if j != i and not np.isnan(A["p10"][j])]
+                move = [j for j in same if np.sign(A["p10"][j]) == np.sign(A["p10"][i]) and abs(A["p10"][j]) >= 0.03]
+                code_ = code_of_row[int(A["row"][i])]
+                cases.append(dict(stage=stage_names[A["stage"][i]], date=dt.date.fromordinal(int(A["t0"][i])).isoformat(), code=code_, name=names_by_code.get(code_, code_),
+                                  bill=bname.get(bill_keys[int(A["bill"][i])], ""), pre=round(float(A["pre"][i]) * 100, 2), post10=round(float(A["p10"][i]) * 100, 2),
+                                  tier=TIER_N[A["tier"][i]], sign=int(A["sign"][i]), same_n=len(same), same_move=len(move)))
+            # 무작위 날짜에서도 상위 30개 하한이 얼마나 되는지 (같은 규모의 이벤트를 무작위로 뽑아 비교)
+            lows = []
+            rows_c = A["row"][cidx]
+            _, clc = np.unique(A["t0"][cidx], return_inverse=True)
+            kc = int(clc.max()) + 1
+            for _ in range(60):
+                r = rng.integers(lo_pos, hi_pos, size=kc)
+                v = np.abs(mat_p10[rows_c, r[clc]].astype(np.float64))
+                v = v[~np.isnan(v)]
+                if len(v) >= 30:
+                    lows.append(float(np.partition(v, -30)[-30]))
+            ref30 = round(float(np.mean(lows)) * 100, 2) if lows else None
+        else:
+            ref30 = None
+        conn.execute("INSERT OR REPLACE INTO study_result VALUES ('사례', 'top', ?, ?)", (json.dumps(dict(cases=cases, ref30=ref30, n_pool=int(len(cidx))), ensure_ascii=False), today))
         conn.execute("INSERT OR REPLACE INTO study_meta VALUES ('computed', ?)", (dt.datetime.now().strftime("%Y-%m-%d %H:%M"),))
         conn.execute("INSERT OR REPLACE INTO study_meta VALUES ('n_events', ?)", (str(n_ev),))
+        conn.execute("INSERT OR REPLACE INTO study_meta VALUES ('sign_cover', ?)", (f"{sign_cover:.3f}",))
         conn.commit()
-        log(f"이벤트 스터디: 이벤트 {n_ev}건 · 저장된 묶음 {stored}")
-        return {"이벤트": n_ev, "묶음": stored}
+        log(f"이벤트 스터디: 이벤트 {n_ev}건 · 묶음 {stored} · 특징 {n_feat} · 방향 판정 범위 {sign_cover:.0%}")
+        return {"이벤트": n_ev, "묶음": stored, "특징": n_feat, "방향 판정": f"{sign_cover:.0%}"}
     finally:
         conn.close()
 
@@ -485,8 +814,9 @@ def run_all(db_path, assembly_key, status_path, log=print, law_oc=""):
     run(0, hist)
     run(1, lambda p: find_promulgations(db_path, law_oc, log=log, progress=p))
     run(2, lambda p: map_bills(db_path, log=log, progress=p))
-    run(3, lambda p: fetch_prices(db_path, log=log, progress=p))
-    run(4, lambda p: compute(db_path, log=log, progress=p))
+    run(3, lambda p: fetch_hist_texts(db_path, log=log, progress=p))
+    run(4, lambda p: fetch_prices(db_path, log=log, progress=p))
+    run(5, lambda p: compute(db_path, log=log, progress=p))
     st["running"] = False
     st["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
     save()

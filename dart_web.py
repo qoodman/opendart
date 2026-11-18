@@ -2661,6 +2661,115 @@ def _study_table(rows_html):
             f'<th>사후 20일</th><th>판정</th></tr>{rows_html}</table></div>')
 
 
+def _amp_verdict(p):
+    """움직임의 크기(방향 무시)가 평소(같은 종목의 무작위 날짜)보다 큰가: 표본 날짜 30개 이상, 우연 p<0.01, 배율 1.08 이상"""
+    if p["n_dates"] < 30:
+        return "표본 적음", ""
+    r, ap = p.get("abs_ratio"), p.get("abs_p")
+    if r is not None and ap is not None and ap < 0.01 and r >= 1.08:
+        return f"평소보다 큰 움직임 ({r:.2f}배)", "warn"
+    return "평소와 비슷", ""
+
+
+def study_amp_card(res, meta):
+    """입법 주가 분석: '평균은 작아 보여도 영향이 큰 경우' 구분 — ① 움직임의 크기(방향 무시) ② 방향별(수혜/부담) ③ 강하게 반응하는 조건(학습→검증) ④ 반응이 컸던 사례"""
+    order = ["발의", "소관위 회부", "소관위 상정", "소관위 처리", "법사위 처리", "본회의 처리", "공포", "시행"]
+    # ① 크기
+    rows1 = ""
+    for st_ in order:
+        p = res.get(("단계", st_))
+        if not p or p.get("abs_ratio") is None:
+            continue
+        v, cls = _amp_verdict(p)
+        small_mean = p.get("post10") is not None and abs(p["post10"]) < 1.0
+        hint = '<br><span class="muted" style="font-size:11px">평균은 작은데 크기는 큼 → 방향이 갈리거나 일부만 크게 움직여요</span>' if (cls == "warn" and small_mean) else ""
+        tail = "-" if p.get("tail") is None else f'{p["tail"]:.0%} <span class="muted" style="font-size:11px">(평소 {p["tail_exp"]:.0%}, p {_p_text(p.get("tail_p"))})</span>'
+        rows1 += (f'<tr><td>{escape(st_)}</td><td>{p["n_events"]:,}<br><span class="muted" style="font-size:11px">날짜 {p["n_dates"]:,}</span></td>'
+                  f'<td>{"-" if p.get("post10") is None else format(p["post10"], "+.1f") + "%"}</td>'
+                  f'<td><b>{p["abs_mean"]:.1f}%</b> <span class="muted" style="font-size:11px">(평소 {p["abs_base"]:.1f}%)</span></td>'
+                  f'<td>{p["abs_ratio"]:.2f}배 <span class="muted" style="font-size:11px">(p {_p_text(p.get("abs_p"))})</span></td><td>{tail}</td>'
+                  f'<td><span class="chip {cls}">{escape(v)}</span>{hint}</td></tr>')
+    t1 = ('<div class="scroll"><table><tr><th>단계</th><th>이벤트</th><th>평균<br><span class="muted" style="font-size:11px">사후 10일(방향 포함)</span></th>'
+          '<th>움직임의 크기<br><span class="muted" style="font-size:11px">|사후 10일| 평균</span></th><th>평소 대비</th>'
+          f'<th>큰 움직임 비율<br><span class="muted" style="font-size:11px">평소 상위 10% 크기 이상</span></th><th>판정</th></tr>{rows1}</table></div>') if rows1 else ""
+    # ② 방향별
+    rows2 = ""
+    cover = float(meta.get("sign_cover", 0) or 0)
+    for st_ in order:
+        a, b = res.get(("방향", f"{st_}|수혜 힌트")), res.get(("방향", f"{st_}|부담 힌트"))
+        whole = res.get(("단계", st_))
+        if not (a or b):
+            continue
+        cell = lambda p: ('<td class="muted">표본 부족</td>' if not p else
+                          f'<td>{p["post10"]:+.1f}%<br><span class="muted" style="font-size:11px">이벤트 {p["n_events"]:,} · p {_p_text(p.get("post10_p"))}</span></td>')
+        al = ""
+        if whole and whole.get("al_post10") is not None:
+            al = f'{whole["al_post10"]:+.1f}% <span class="muted" style="font-size:11px">(p {_p_text(whole.get("al_p"))}, 방향 있는 {whole.get("al_n", 0):,}건)</span>'
+        split = (a and b and a["post10"] is not None and b["post10"] is not None and a["post10"] > 1 and b["post10"] < -1
+                 and (a.get("post10_p") or 1) < 0.05 and (b.get("post10_p") or 1) < 0.05)
+        verdict = '<span class="chip warn">방향이 갈려 평균에서 상쇄</span>' if split else '<span class="chip">-</span>'
+        rows2 += f'<tr><td>{escape(st_)}</td>{cell(a)}{cell(b)}<td>{al or "-"}</td><td>{verdict}</td></tr>'
+    t2 = ('<div class="scroll"><table><tr><th>단계</th><th>수혜 힌트 법안</th><th>부담 힌트 법안</th><th>방향 보정 평균<br><span class="muted" style="font-size:11px">부담은 부호를 뒤집어 합침</span></th><th>판정</th></tr>'
+          f'{rows2}</table></div>') if rows2 else ""
+    # ③ 강하게 반응하는 조건
+    feat = {}
+    for (g, k), p in res.items():
+        if g == "특징":
+            feat.setdefault(p["set"], []).append(p)
+    t3 = ""
+    set_label = {"발의": "발의 단계", "심사": "심사 단계 (소관위 회부·상정·처리, 법사위)", "확정": "확정 단계 (본회의·공포·시행)"}
+    for sname in ("발의", "심사", "확정"):
+        ps = feat.get(sname)
+        if not ps:
+            continue
+        base = next((p for p in ps if p["status"] == "기준"), None)
+        good = sorted([p for p in ps if p["status"] == "재현됨"], key=lambda p: -(p["test"]["ratio"] or 0))
+        part = sorted([p for p in ps if p["status"] == "학습에서만"], key=lambda p: -(p["train"]["ratio"] or 0))[:5]
+        fmt = lambda d: ("-" if d["ratio"] is None else f'{d["ratio"]:.2f}배 <span class="muted" style="font-size:11px">(p {_p_text(d.get("p"))}, 날짜 {d["n_dates"]})</span>')
+        trs = ""
+        for p in good + part:
+            chip = '<span class="chip up">재현됨</span>' if p["status"] == "재현됨" else '<span class="chip">학습에서만 (검증에서 안 맞음)</span>'
+            trs += f'<tr><td>{escape(p["feature"])}: <b>{escape(p["bucket"])}</b></td><td>{fmt(p["train"])}</td><td>{fmt(p["test"])}</td><td>{chip}</td></tr>'
+        head_base = ""
+        if base:
+            head_base = (f'<div class="muted" style="font-size:12px">이 단계 묶음 전체의 평소 대비 크기: 학습 {fmt(base["train"])} · 검증 {fmt(base["test"])} '
+                         f'(학습/검증은 {escape(base.get("split", ""))}을 경계로 앞/뒤 기간)</div>')
+        if trs:
+            body = f'<div class="scroll"><table><tr><th>조건</th><th>학습 기간<br><span class="muted" style="font-size:11px">평소 대비 크기</span></th><th>검증 기간</th><th>판정</th></tr>{trs}</table></div>'
+        else:
+            body = '<div class="muted" style="margin-top:4px">재현된 조건이 없어요 — 구분되는 조건이 없거나, 표본이 작아 구분하기 어렵다는 뜻이에요.</div>'
+        t3 += f'<div style="margin-top:10px"><b style="font-size:13px">{escape(set_label[sname])}</b>{head_base}{body}</div>'
+    # ④ 사례
+    cs = res.get(("사례", "top"))
+    t4 = ""
+    if cs and cs.get("cases"):
+        trs = ""
+        for c in cs["cases"][:20]:
+            same = f'{c["same_move"]}/{c["same_n"]}' if c["same_n"] else "-"
+            sg = {1: "수혜", -1: "부담", 0: "-"}.get(c.get("sign", 0), "-")
+            trs += (f'<tr><td>{escape(c["name"])}<br><span class="muted" style="font-size:11px">{escape(c["code"])}</span></td><td>{escape(c["stage"])}<br><span class="muted" style="font-size:11px">{escape(c["date"])}</span></td>'
+                    f'<td style="font-size:13px">{escape(c["bill"][:44])}<br><span class="muted" style="font-size:11px">{escape(c["tier"])} · {sg}</span></td>'
+                    f'<td>{c["pre"]:+.1f}%</td><td><b class="{"up" if c["post10"] > 0 else "down"}">{c["post10"]:+.1f}%</b></td><td>{same}</td></tr>')
+        ref = f' 같은 규모의 이벤트를 <b>무작위 날짜</b>에서 뽑아도 상위 30개의 하한이 평균 {cs["ref30"]:.1f}% 나와요.' if cs.get("ref30") is not None else ""
+        t4 = ('<div style="margin-top:12px"><b style="font-size:13px">반응이 컸던 사례 (지수 대비 사후 10일 상위 20건)</b>'
+              f'<div class="muted" style="font-size:12px">⚠ 결과를 보고 고른 사례라서 법안 때문이라는 증거가 아니에요.{ref} 마지막 열은 같은 날 다른 이벤트 중 같은 방향으로 3% 넘게 움직인 수예요 — 많으면 시장·업종 전체 움직임일 가능성이 커요.</div>'
+              f'<div class="scroll"><table><tr><th>종목</th><th>단계</th><th>법안</th><th>사전</th><th>사후 10일</th><th>같은 날 동반</th></tr>{trs}</table></div></div>')
+    if not (t1 or t2 or t3 or t4):
+        return ""
+    cov = (f'<div class="muted" style="font-size:12px;margin-top:4px">방향(수혜/부담) 판정은 제안이유 본문이 있으면 본문 단어로, 없으면 제목 단어로 해서 거칠어요. 지금 이벤트의 {cover:.0%}만 방향이 정해졌어요 '
+           '(나머지는 방향 모름으로 두고 방향 분석에서 뺐어요).</div>') if t2 else ""
+    return ('<div class="card"><b>평균은 작아 보여도 영향이 큰 경우 구분하기</b>'
+            '<div class="muted" style="font-size:13px;margin:2px 0 6px">평균은 두 가지 이유로 영향을 가려요. ① 수혜 법안은 오르고 부담 법안은 내려 <b>방향이 상쇄</b>되거나, ② 대부분은 0 근처인데 <b>일부만 크게</b> 움직여 평균에 묻혀요. '
+            '그래서 방향을 무시한 <b>크기</b>, 방향을 맞춘 <b>방향별</b> 평균, 그리고 크게 움직이는 <b>조건</b>을 따로 봐요.</div>'
+            + (f'<div style="margin-top:8px"><b style="font-size:13px">① 움직임의 크기 (방향 무시)</b>{t1}</div>' if t1 else "")
+            + (f'<div style="margin-top:12px"><b style="font-size:13px">② 방향별 (수혜 힌트 / 부담 힌트)</b>{t2}{cov}</div>' if t2 else "")
+            + (f'<div style="margin-top:12px"><b style="font-size:13px">③ 강하게 반응하는 조건 — 학습 기간에서 찾고 검증 기간에서 재현될 때만 인정</b>'
+               '<div class="muted" style="font-size:12px">조건: 연결 확실도 · 점수 · 소속 테마 수 · 거래대금 규모 · 사전 거래량 급증 · 공동발의 인원 · 법안 성격 (한 가지 또는 두 가지 조합). '
+               '이벤트 날짜의 앞 60%에서 찾고 뒤 40%에서 같은 조건이 맞는지 확인해요. 효과가 뚜렷하면(평소의 약 1.3배↑) 거의 찾지만 약하면(약 1.2배) 절반쯤만 찾아요 — '
+               '못 찾았다고 없다는 뜻은 아니에요.</div>' + t3 + '</div>' if t3 else "")
+            + t4 + '</div>')
+
+
 def view_legstudy(conn, q):
     """아이디어 → 입법 주가 분석: 과거 법안의 단계 날짜 전후로, 연결된 기업의 주가가 지수보다 얼마나 더 움직였나 (이벤트 스터디)"""
     import bill_history
@@ -2710,14 +2819,15 @@ def view_legstudy(conn, q):
         return page("입법 주가 분석", flash + intro + prep + body, refresh=running)
     # ---- 요약
     sig = []
+    LEG = ("단계", "단계×연결", "단계×결과", "분야")
     for (grp, key), p in res.items():
-        if p["n_dates"] < 30:
+        if grp not in LEG or p["n_dates"] < 30:
             continue
         v, _ = _study_verdict(p)
         if "우연 밖" in v:
             sig.append((grp, key, p, v))
     sig.sort(key=lambda x: -x[2]["n_dates"])
-    n_tested = sum(1 for p in res.values() if p["n_dates"] >= 30)
+    n_tested = sum(1 for (g_, _k), p in res.items() if g_ in LEG and p["n_dates"] >= 30)
     lines = "".join(f'<li><b>{escape(g)} · {escape(k.replace("|", " · "))}</b>: {escape(v)} — 사전 {p["pre"]:+.1f}%, 사후 10일 {p["post10"]:+.1f}% (날짜 {p["n_dates"]:,}개)</li>' for g, k, p, v in sig[:8])
     summary = ('<div class="card"><b>한눈에 보기</b>'
                + (f'<ul style="margin:6px 0 0;padding-left:18px">{lines}</ul>' if sig else
@@ -2740,7 +2850,7 @@ def view_legstudy(conn, q):
         if rows:
             ct += f'<div style="margin-top:8px"><b style="font-size:13px">{escape(stage)} 단계</b>' + _study_table("".join(_study_row(c, p) for c, p in rows)) + "</div>"
     b4 = sec("분야별", "법안이 읽힌 분야(개념)별. 표본 15건·날짜 8개 이상인 묶음만 나와요.", ct)
-    return page("입법 주가 분석", flash + intro + prep + summary + b1 + b2 + b3 + b4, refresh=running)
+    return page("입법 주가 분석", flash + intro + prep + summary + study_amp_card(res, meta) + b1 + b2 + b3 + b4, refresh=running)
 
 
 def view_calendar(conn, q):
