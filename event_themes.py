@@ -100,7 +100,7 @@ RULES = [
  (r"^자동차|^조선|^철강|^종합 물류|^해운|^화장품|^음식료|^수산|^농업|^종합상사|^패션", [("trade_deal","+","main"),("fx_up","+","sub")]),
  (r"^자동차 대표|^조선|^반도체 대표|^S7|^철강 주요|^자동차부품|^갤럭시|^스마트폰", [("fx_up","+","main")]),
  (r"^환율하락|^항공|^여행|^소매유통|^음식료|^사료|^제지|^주류|^콩|^정유", [("fx_down","+","main")]),
- (r"^은행$|^증권$|^생명보험|^손해보험|^창투사|^인터넷은행|^카카오뱅크|^토스|^핀테크|^지역화폐|^화폐/금융", [("rate_up","+","main"),("rate_cut","+","main"),("platform_news","+","main")]),
+ (r"^은행$|^증권$|^생명보험|^손해보험|^창투사|^인터넷은행|^카카오뱅크|^토스|^핀테크", [("rate_up","+","main"),("rate_cut","+","main"),("platform_news","+","main")]),
  (r"^증권$|^창투사|^기업인수목적|^지주사|^코리아 밸류업|^밸류업|^부동산 보유|^은행$|^생명보험|^손해보험", [("val_up","+","main")]),
  (r"^가상화폐|^스테이블코인|^STO|^블록체인|^NFT|^두나무|^마이데이터|^화폐/금융|^핀테크|^전자결제", [("crypto_policy","+","main")]),
  (r"^마이데이터|^핀테크|^인터넷은행|^카카오뱅크|^토스|^쿠팡|^마켓컬리|^야놀자|^두나무|^전자결제|^재택|^콜드체인|^인터넷 대표", [("platform_news","±","main")]),
@@ -130,10 +130,6 @@ SUGGEST = []      # 예시는 두지 않아요 (이벤트는 직접 기록)
 CALENDAR = [
     dict(d="2026-11-26", end="", title="한국은행 금융통화위원회 기준금리 결정", events=["rate_cut", "rate_up", "fx_up"],
          src="https://tilnote.io/pages/6af7a5e20d16e5ce54843318", note="2026년 마지막 통화정책방향 회의."),
-    dict(d="2026-12-01", end="", title="MSCI 정기 리뷰 적용 (11/30 장 마감 기준)", events=["index_change"],
-         src="https://www.newstomato.com/ReadNews.aspx?no=1320085", note="발표는 11월 12일에 이미 나왔어요."),
-    dict(d="2026-12-08", end="2026-12-09", title="미국 FOMC 정례회의 (결과는 한국시간 12/10 새벽)", events=["rate_cut", "rate_up", "fx_up"],
-         src="https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm", note="출처마다 날짜가 달라 연준 공식 일정으로 한 번 더 확인하세요."),
     dict(d="2026-12-14", end="2026-12-15", title="G20 정상회의 (미국 마이애미)", events=["trade_deal", "us_cn_trade"],
          src="https://biz.sbs.co.kr/amp/article/20000292334", note="미 재무부 발표 보도 기준."),
     dict(d="2027-01-06", end="2027-01-09", title="CES 2027 (라스베이거스)", events=["device_launch", "robot_news", "ev_news", "auto_chip", "nvidia_ai"],
@@ -157,6 +153,43 @@ def second_thursday(y, m):
     return d + dt.timedelta(days=(3 - d.weekday()) % 7 + 7)
 
 
+_CAL_MAP = [       # (달력 분류, 제목 정규식) → 개념 이벤트. 위에서부터 처음 맞는 것
+    ("통화정책", r"FOMC|금통위|ECB|BOJ|일본은행|금리 결정", ["rate_cut", "rate_up", "fx_up"]),
+    ("지수", r"MSCI|코스피200|코스닥150|정기변경|리밸런싱", ["index_change"]),
+    ("만기", r".", ["derivs_expiry"]),
+    ("정치", r"예산안", ["budget"]),
+    ("정치", r"선거", ["election"]),
+    ("정치", r"중앙경제공작회의", ["cn_reopen", "us_cn_trade"]),
+    ("해외 지표", r"고용보고서|CPI|물가", ["rate_cut", "rate_up"]),
+]
+
+
+def _from_calendar(conn, today, days):
+    """금융 달력(market_calendar: 휴장·만기·지수 변경·통화정책·정치 일정 등)의 일정 → 개념 이벤트에 이어 붙임. 휴장·명절은 뺌."""
+    import datetime as dt
+    import re
+    try:
+        import market_calendar as mc
+        evs = mc.events_between(today, today + dt.timedelta(days=days), conn)
+    except Exception:
+        return []
+    out = []
+    for e in evs:
+        if e["cat"] in ("휴장", "유대"):
+            continue
+        ids = []
+        for cat, pat, eids in _CAL_MAP:
+            if e["cat"] == cat and re.search(pat, e["title"]):
+                ids = eids
+                break
+        # 시장 전체 일정(만기 등)은 중요 표시가 있는 것만 — 매달 반복되는 해외 만기는 숨김 대상이라 events=[]로 둠
+        if e["cat"] == "만기" and not e.get("important") and e.get("region") != "국내":
+            ids = []
+        out.append(dict(d=e["date"].isoformat(), end="", title=e["title"] + (" (예상)" if e.get("approx") and "예상" not in e["title"] else ""), events=ids, kind="시장 달력",
+                        src="", note=" · ".join(x for x in (e.get("region", ""), e.get("note", "")) if x), important=bool(e.get("important"))))
+    return out
+
+
 def upcoming(conn, today=None, days=150, law_rows=()):
     """앞으로 days일 안의 계획된 이벤트 → [dict(d, end, title, kind, events[id...], src, note)] 날짜순.
     kind: 공표 일정(CALENDAR) · 계산(선물옵션 만기) · 직접 입력(event_log의 미래 날짜) · 법 시행(law_rows: 법안 시행 예정)"""
@@ -167,25 +200,7 @@ def upcoming(conn, today=None, days=150, law_rows=()):
     for c in CALENDAR:
         if (c["end"] or c["d"]) >= lo and c["d"] <= hi:
             out.append(dict(c, kind="공표 일정"))
-    y, m = today.year, today.month
-    for k in range(0, days // 28 + 2):
-        yy, mm = y + (m - 1 + k) // 12, (m - 1 + k) % 12 + 1
-        d = second_thursday(yy, mm).isoformat()
-        if lo <= d <= hi:
-            q = mm in (3, 6, 9, 12)
-            out.append(dict(d=d, end="", title="선물·옵션 " + ("동시만기일 (분기)" if q else "만기일"), events=["derivs_expiry"], kind="계산", src="", note="매월 둘째 목요일 · 휴장이면 앞당겨져요"))
-    for yy in (today.year, today.year + 1):
-        d = f"{yy}-12-02"
-        if lo <= d <= hi:
-            out.append(dict(d=d, end="", title="정부 예산안 국회 처리 법정 시한", events=["budget"], kind="계산", src="", note="헌법상 회계연도 개시 30일 전 · 실제 처리는 늦어지는 해가 많아요"))
-        dd = dt.date(yy, 12, 31)
-        while dd.weekday() >= 5:
-            dd -= dt.timedelta(days=1)
-        dd -= dt.timedelta(days=1)                                   # 12/31은 휴장 → 직전 거래일이 연말 마지막 거래일(주말이면 더 앞)
-        while dd.weekday() >= 5:
-            dd -= dt.timedelta(days=1)
-        if lo <= dd.isoformat() <= hi:
-            out.append(dict(d=dd.isoformat(), end="", title="연말 마지막 거래일 (12/31 휴장)", events=["derivs_expiry"], kind="계산", src="", note="배당·절세 매매와 연말 수급 이슈 · 임시공휴일 등으로 달라질 수 있어요"))
+    out += _from_calendar(conn, today, days)
     for lr in log_rows(conn):
         if lo <= lr["d"] <= hi:
             out.append(dict(d=lr["d"], end="", title=lr["title"], events=[lr["event_id"]], kind="직접 입력", src="", note=lr["note"] or "", log_id=lr["id"]))

@@ -1490,7 +1490,7 @@ def view_market(conn):
             + f'<div class="muted">{escape(i.reason)}</div>'
             + sparkline(i.points)
             + (f'<div class="muted" style="font-size:12px">{escape(i.note)}</div>' if i.note else "") + "</div>")
-    return page("시장", hero + cycle_brief_card(conn) + "".join(cards) + presidents_card(conn))
+    return page("시장", hero + cycle_brief_card(conn) + events_brief_card(conn) + "".join(cards) + presidents_card(conn))
 
 
 def cycle_brief_card(conn):
@@ -1509,6 +1509,40 @@ def cycle_brief_card(conn):
     return ('<div class="card"><div class="row"><b>투자 사이클 — 여러 이론에 비춰 본 지금</b><a class="chip" href="/cycle">자세히 →</a></div>'
             f'<div style="margin:6px 0"><span class="chip" style="font-weight:700">{escape(sit["label"])}</span> {chips}</div>'
             f'<div class="muted" style="font-size:12px">{escape(sit["desc"])} 이론 8개가 같은 가격·금리를 보는 후보 판단이라 판정이 아니에요.</div></div>')
+
+
+def events_brief_card(conn):
+    """시장 온도 화면: 다가오는 이벤트 몇 개와 반응할 수 있는 테마 (자료가 없으면 빈 문자열)"""
+    try:
+        import event_themes as et
+        import theme_map
+        data = theme_map.load(conn)
+        if not data["테마"]:
+            return ""
+        today = dt.date.today()
+        rows = ""
+        n = 0
+        for u in et.upcoming(conn, today, 60, ()):
+            ids = [e for e in u["events"] if e in et.EVENT_BY_ID and e != "derivs_expiry"]
+            if not ids or not (u.get("important") or u["kind"] != "시장 달력"):
+                continue
+            hit = {}
+            for eid in ids:
+                for k_, n_, r_, c_, sg_ in et.groups(et.EVENT_BY_ID[eid], data):
+                    if r_ == "main":
+                        hit[n_] = hit.get(n_, 0) + 1
+            top = [n_ for n_, _ in sorted(hit.items(), key=lambda kv: -kv[1])[:4]]
+            dd = (dt.date.fromisoformat(u["d"]) - today).days
+            rows += (f'<div style="border-top:1px solid var(--line);padding:5px 0;font-size:13px"><b>{"오늘" if dd == 0 else f"D-{dd}"}</b> {escape(u["d"][5:])} · {escape(u["title"])}'
+                     + (f'<div class="muted" style="font-size:12px">반응할 수 있는 테마: {escape(", ".join(top))}</div>' if top else "") + '</div>')
+            n += 1
+            if n >= 5:
+                break
+        if not rows:
+            return ""
+        return ('<div class="card"><div class="row"><b>다가오는 이벤트와 테마</b><a class="chip" href="/events">전체 일정 →</a></div>' + rows + '</div>')
+    except Exception:
+        return ""
 
 
 def presidents_card(conn):
@@ -2824,7 +2858,7 @@ def _ev_chip(t, with_link=True):
     arrow = {"+": "▲", "-": "▼", "±": "▲▼"}[t["sign"]]
     cls = "up" if t["sign"] == "+" else "down" if t["sign"] == "-" else ""
     sub = ' <span class="muted" style="font-size:10px">간접</span>' if t["role"] == "sub" else ""
-    return (f'<a class="chip {cls}" style="text-decoration:none;display:inline-block;margin:1px" href="/ideas?t=events&ev={ev["id"]}" '
+    return (f'<a class="chip {cls}" style="text-decoration:none;display:inline-block;margin:1px" href="/events?ev={ev["id"]}" '
             f'title="{escape(ev["why"])}">{arrow} {escape(ev["name"].split(" (")[0])}{sub}</a>')
 
 
@@ -2890,7 +2924,7 @@ def view_events(conn, q):
                 blocks += (f'<details style="margin-top:6px"{" open" if len(evs_) == 1 else ""}><summary style="cursor:pointer"><b>{"결과가 이렇다면 — " if len(evs_) > 1 else ""}{escape(ev_["name"])}</b>'
                            f'<span class="muted" style="font-size:12px"> — {escape(ev_["why"])}</span></summary>'
                            + theme_line("+", tr_["+"]) + theme_line("±", tr_["±"]) + theme_line("-", tr_["-"])
-                           + f'<div class="muted" style="font-size:11px;margin-top:2px">⚠ {escape(ev_["note"])} <a href="/ideas?t=events&ev={ev_["id"]}">이 이벤트 전체 보기</a></div></details>')
+                           + f'<div class="muted" style="font-size:11px;margin-top:2px">⚠ {escape(ev_["note"])} <a href="/events?ev={ev_["id"]}">이 이벤트 전체 보기</a></div></details>')
         if u.get("themes"):
             blocks += '<div style="margin-top:6px"><b style="font-size:12px">이 법과 닿는 테마·업종</b> ' + " ".join(f'<span class="chip">{escape(n_)}</span>' for n_ in u["themes"]) + '</div>'
         dd = (_dt1.date.fromisoformat(u["d"]) - today).days
@@ -2907,13 +2941,13 @@ def view_events(conn, q):
         n_up += 1
         ucards += (f'<details{" open" if n_up <= 1 else ""} style="border-top:1px solid var(--line);padding:6px 0"><summary style="cursor:pointer">{head}</summary>{blocks}</details>')
     sel_ud = "".join(f'<option value="{v}"{" selected" if v == str(udays) else ""}>{lab}</option>' for v, lab in (("60", "60일 안"), ("150", "150일 안"), ("365", "1년 안")))
-    uflt = ('<form method="get" action="/ideas" class="filters" style="margin:6px 0"><input type="hidden" name="t" value="events">'
+    uflt = ('<form method="get" action="/events" class="filters" style="margin:6px 0">'
             f'<select name="ud">{sel_ud}</select> <label style="font-size:13px"><input type="checkbox" name="um" value="1"{" checked" if show_mkt else ""}> 시장 전체 일정(만기일 등)도 보기</label><button>보기</button></form>')
     upcard = ('<div class="card"><b>이벤트 일정 — 앞으로 계획된 이벤트와 그때 뜰 수 있는 테마</b>'
-              '<div class="muted" style="font-size:12px">이미 공표된 일정, 매월 반복되는 일정(계산), 시행이 정해진 법, 직접 넣은 예정 이벤트를 날짜순으로 모았어요. 이벤트마다 그 종류에 반응한다고 사전에 적힌 테마와 대표 종목(시가총액 순)을 붙였어요. '
+              '<div class="muted" style="font-size:12px">시장 달력(만기·지수 변경·통화정책·정치 일정), 이미 공표된 행사 일정, 시행이 정해진 법, 직접 넣은 예정 이벤트를 날짜순으로 모았어요. 이벤트마다 그 종류에 반응한다고 사전에 적힌 테마와 대표 종목(시가총액 순)을 붙였어요. '
               '날짜는 출처 기준이라 바뀔 수 있고, 테마의 방향과 크기는 이벤트 결과에 달려 있어요.</div>' + uflt
               + (ucards if ucards else '<div class="muted" style="margin-top:6px">이 기간에 알려진 일정이 없어요. 아래 “이벤트 기록·예정 추가”로 직접 넣을 수 있어요.</div>')
-              + (f'<div class="muted" style="font-size:12px;margin-top:6px">테마 직접 연결이 없는 시장 일정 {n_hid}건은 숨겼어요 (위 체크박스로 보기).</div>' if n_hid else "")
+              + (f'<div class="muted" style="font-size:12px;margin-top:6px">테마 직접 연결이 없는 시장 일정 {n_hid}건(휴장 제외)은 숨겼어요 (위 체크박스로 보기). 전체 달력은 시장 → 달력에서 볼 수 있어요.</div>' if n_hid else "")
               + '</div>')
     # ---- 이벤트 하나 보기
     evcard = ""
@@ -2923,7 +2957,7 @@ def view_events(conn, q):
         rows = "".join(f'<tr><td><b>{escape(n)}</b></td><td>{"▲" if sg == "+" else "▼" if sg == "-" else "▲▼"}{" (간접)" if r == "sub" else ""}</td><td>{len(c)}</td><td style="font-size:12px">{stocks_html(c)}</td></tr>'
                        for k, n, r, c, sg in sorted(gs, key=lambda g: (0 if g[2] == "main" else 1, -len(g[3]))))
         mem = et.members(sel, data, top=15, mcap=mc)
-        evcard = (f'<div class="card"><b>{escape(sel["name"])}</b> <span class="chip">{escape(sel["cat"])}</span> <a href="/ideas?t=events" class="muted" style="font-size:12px">닫기</a>'
+        evcard = (f'<div class="card"><b>{escape(sel["name"])}</b> <span class="chip">{escape(sel["cat"])}</span> <a href="/events" class="muted" style="font-size:12px">닫기</a>'
                   f'<div style="font-size:13px;margin:4px 0">{escape(sel["why"])}</div><div class="muted" style="font-size:12px">⚠ {escape(sel["note"])}</div>'
                   + (f'<div class="scroll"><table><tr><th>테마</th><th>방향</th><th>종목 수</th><th>대표 종목 (시총 순)</th></tr>{rows}</table></div>' if rows else '<div class="muted">지금 네이버 테마 목록에 맞는 테마가 없어요.</div>')
                   + (f'<div style="font-size:13px;margin-top:6px"><b>{"시가총액 큰 순" if mc else "점수 순"} 종목</b> ' + stocks_html([m[0] for m in mem], 15) + '</div>' if mem else "")
@@ -2950,9 +2984,9 @@ def view_events(conn, q):
         trs += (f'<tr><td><b>{escape(tname)}</b><br><span class="muted" style="font-size:11px">{len(codes)}종목</span></td>'
                 f'<td>{"".join(_ev_chip(t) for t in te[:7])}</td><td style="font-size:12px">{stocks_html(codes, 6)}</td></tr>')
     cat_opts = '<option value="">모든 분류</option>' + "".join(f'<option value="{escape(c)}"{" selected" if c == ecat else ""}>{escape(c)}</option>' for c in et.CATS)
-    flt = ('<form method="get" action="/ideas" class="filters"><input type="hidden" name="t" value="events">'
+    flt = ('<form method="get" action="/events" class="filters">'
            f'<input name="th" value="{escape(kw)}" placeholder="테마 이름 또는 종목" size="22"> <select name="ec">{cat_opts}</select><button>찾기</button></form>')
-    more = (f'<div class="muted" style="margin-top:6px">{n_match}개 중 {n_show}개를 보여 줘요. <a href="/ideas?{urlencode({"t": "events", "th": kw, "ec": ecat, "all": "1"})}">전체 보기</a></div>'
+    more = (f'<div class="muted" style="margin-top:6px">{n_match}개 중 {n_show}개를 보여 줘요. <a href="/events?{urlencode({"th": kw, "ec": ecat, "all": "1"})}">전체 보기</a></div>'
             if n_match > n_show else f'<div class="muted" style="margin-top:6px">{n_match}개 테마</div>')
     table = ('<div class="card"><b>테마별로 보기 — 이런 이벤트가 생기면 뜬다(▲)</b>' + flt
              + (f'<div class="scroll"><table><tr><th>테마</th><th>반응하는 이벤트 (누르면 상세)</th><th>대표 종목{' (시총 순)' if mc else ''}</th></tr>{trs}</table></div>' if trs else '<div class="muted" style="margin-top:6px">조건에 맞는 테마가 없어요.</div>')
@@ -3548,12 +3582,12 @@ IDEA_TABS = {"overall": "종합", "mine": "내 종목 점수", "cheap": "기관 
              "rank": "종목 순위", "score": "점수표 (오일전문가)", "perf": "운용사 성적표",
              "lynch": "피터 린치", "buffett": "워렌 버핏",
              "graham": "벤저민 그레이엄", "magic": "마법공식", "fscore": "F-스코어", "momentum": "모멘텀",
-             "legis": "입법 영향 기업", "legstudy": "입법 주가 분석", "events": "이벤트 테마"}
-IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "legis", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf", "legstudy", "events"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
+             "legis": "입법 영향 기업", "legstudy": "입법 주가 분석"}
+IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "legis", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf", "legstudy"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
 
 
 IDEA_SECTIONS = [("점수", ["overall", "mine"]), ("투자 방법", ["lynch", "buffett", "graham", "magic", "fscore", "momentum"]),
-                 ("종목 찾기", ["cheap", "cluster", "super", "legis", "events", "rank"]), ("평가·성적", ["score", "perf", "legstudy"])]
+                 ("종목 찾기", ["cheap", "cluster", "super", "legis", "rank"]), ("평가·성적", ["score", "perf", "legstudy"])]
 
 
 def idea_tab_html(active, link=None):
@@ -3963,7 +3997,7 @@ def perf_url(**kw):
     return "/ideas?" + urlencode({"t": "perf", **kw})
 
 
-MARKET_HUB = {"/market": "시장 온도", "/cycle": "투자 사이클", "/policy": "정책", "/radar": "대비 레이더", "/diag": "하락 점검", "/bills": "법안·종목", "/news": "속보", "/shorts": "공매도 리포트", "/derivs": "선물·채권", "/calendar": "달력"}
+MARKET_HUB = {"/market": "시장 온도", "/cycle": "투자 사이클", "/events": "이벤트·테마", "/policy": "정책", "/radar": "대비 레이더", "/diag": "하락 점검", "/bills": "법안·종목", "/news": "속보", "/shorts": "공매도 리포트", "/derivs": "선물·채권", "/calendar": "달력"}
 
 
 REPORT_HUB = {"/": "보고서", "/new": "새 공시", "/reports": "증권사 리포트"}
@@ -3984,12 +4018,6 @@ def view_ideas(conn, q):
         q = {**q, "t": "overall"}
     if q.get("t") == "mine":
         return view_mine(conn, q)
-    if q.get("t") == "events":
-        _CTX.pre = idea_tabs_row("events")
-        try:
-            return view_events(conn, q)
-        finally:
-            _CTX.pre = ""
     if q.get("t") == "legstudy":
         _CTX.pre = idea_tabs_row("legstudy")
         try:
@@ -5771,6 +5799,10 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     body = view_investor(conn, q.get("name", ""), int(w))
                 elif url.path == "/performance":
                     return self._redirect(perf_url(**{k: v for k, v in q.items() if not k.startswith("_")}))
+                elif url.path == "/ideas" and q.get("t") == "events":      # 이벤트·테마는 시장 묶음으로 옮겼어요 (예전 주소 호환)
+                    return self._redirect("/events" + (("?" + urlencode({k: v for k, v in q.items() if k != "t" and not k.startswith("_")})) if len(q) > 1 else ""))
+                elif url.path == "/events":
+                    body = view_events(conn, q)
                 elif url.path == "/ideas" and q.get("t") == "cycle":      # 투자 사이클은 시장 묶음으로 옮겼어요 (예전 주소 호환)
                     return self._redirect("/cycle" + (("?" + urlencode({"cr": q["cr"]})) if q.get("cr") else ""))
                 elif url.path == "/cycle":
@@ -5993,12 +6025,12 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
             if path.startswith("/events/") and settings_api:
                 act = path[len("/events/"):]
                 if act not in ("add", "del", "px"):
-                    return self._redirect("/ideas?t=events")
+                    return self._redirect("/events")
                 n = min(int(self.headers.get("Content-Length") or 0), 8192)
                 form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore")).items()}
                 S = settings()
                 ok, why = S["event_action"](act, form) if "event_action" in S else (False, "이 서버 버전은 지원하지 않아요")
-                return self._redirect("/ideas?" + urlencode({"t": "events", "msg": ("✔ " if ok else "✖ ") + why}))
+                return self._redirect("/events?" + urlencode({"msg": ("✔ " if ok else "✖ ") + why}))
             if path.startswith("/legis/") and path != "/legis/prepare" and settings_api:
                 act = path[len("/legis/"):]
                 if act not in ("watch_add", "watch_del", "watch_import", "fb_no", "fb_yes", "fb_del", "px_bill"):
