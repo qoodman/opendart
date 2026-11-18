@@ -2114,6 +2114,36 @@ def _ab_td(v, raw=False):
     return f'<td><b class="{"up" if v > 0 else "down" if v < 0 else ""}">{v:+.1f}%p</b></td>'
 
 
+def study_match_card(conn, title, text, stocks, tdata):
+    """법안 상세: 입법 주가 분석에서 '재현됨'으로 나온 조건(평소보다 크게 움직였던 조건)에 이 법안의 후보 종목이 해당하는지. 해당이 없으면 빈 문자열"""
+    try:
+        import legis_study as ls
+        conds, _ = ls.match_bill(conn, title, text, stocks, tdata)
+    except Exception:
+        return ""
+    if not conds:
+        return ""
+    fm = lambda d: "-" if d.get("ratio") is None else f'{d["ratio"]:.2f}배'
+    known = sorted([c for c in conds if c["hits"]], key=lambda c: -((c["test"] or {}).get("ratio") or 0))
+    n_unk = sum(1 for c in conds if not c["hits"] and c["unknown"])
+    rows = ""
+    for c in known[:6]:
+        unk = f'<br><span class="muted" style="font-size:11px">그 밖의 특징({escape(", ".join(c["unknown"]))})은 확인 못 했어요</span>' if c["unknown"] else ""
+        rows += (f'<tr><td>{escape(c["set"])} 단계</td><td><b>{escape(c["feature"])}</b>: {escape(c["bucket"])}</td><td>{fm(c["train"])} → {fm(c["test"])}</td>'
+                 f'<td>{escape(", ".join(c["hits"][:6]))}{unk}</td></tr>')
+    if not rows:
+        return ""
+    more = ""
+    if len(known) > 6 or n_unk:
+        more = (f'<div class="muted" style="font-size:12px;margin-top:4px">'
+                + (f'해당하는 조건이 {len(known)}개라 상위 6개만 보여 줘요. ' if len(known) > 6 else "")
+                + (f'거래대금·사전 거래량·공동발의가 필요한 조건 {n_unk}개는 이 화면에서 알 수 없어 뺐어요.' if n_unk else "") + '</div>')
+    return ('<div class="card"><b>과거에 평소보다 크게 움직였던 조건과 비교</b>'
+            '<div class="muted" style="font-size:12px">입법 주가 분석에서 앞 기간에 찾고 뒤 기간에서도 맞았던(재현된) 조건이에요. 이 법안의 후보 종목 중 해당하는 종목을 보여 줘요. '
+            '움직임의 <b>크기</b>가 평소보다 컸다는 뜻이고 오를지 내릴지는 말해 주지 않아요. 효과가 약해 못 찾는 경우도 많고, 우연히 맞았을 수도 있어서 참고만 하세요.</div>'
+            f'<div class="scroll"><table><tr><th>단계</th><th>조건</th><th>학습 → 검증<br><span class="muted" style="font-size:11px">평소 대비 크기</span></th><th>해당 종목</th></tr>{rows}</table></div>{more}</div>')
+
+
 def stage_prices_card(conn, key, cand, related=()):
     """법안 상세: 입법 과정별 주가 변화. 이 법안이 지나온 단계(발의…본회의·공포·시행)마다 관심·연결·후보 종목의 지수 대비 초과수익을,
     과거 평균('입법 주가 분석')과 나란히. cand=[(코드, 이름)] 후보 종목 (후보 수정 반영)"""
@@ -2248,6 +2278,7 @@ def view_bills(conn, q):
             res = _impact_html(_r, key, fb=(_rem, _add), concepts=_cn)
             _rel = {x["code"] for x in _r["stocks"]} | {c_ for m_ in _r["members"] for c_, _n in m_["stocks"]}
             _stage_card = stage_prices_card(conn, key, [(x[0], x[1]) for x in _new[:5]], related=_rel)
+            _stage_card += study_match_card(conn, title, text, _r["stocks"][:8], data)
         return page("법안·종목", _bills_tabs("list") + flash + warn + head + _stage_card + (f'<div class="card">{res}</div>' if res else "")
                     + '<div class="muted" style="font-size:12px">후보는 법안 문구와 테마·업종 이름·개념 사전을 이은 짐작이에요. 같은 법안이 기업마다 호재일 수도 악재일 수도 있어서 방향은 판단하지 않아요. '
                       '\'연결\'을 누르면 그 종목에 법안을 이어 단계별 주가 반응을 볼 수 있어요.</div>')

@@ -746,6 +746,11 @@ def compute(db_path, log=print, B=500, seed=7, progress=None):
         conn.execute("INSERT OR REPLACE INTO study_meta VALUES ('computed', ?)", (dt.datetime.now().strftime("%Y-%m-%d %H:%M"),))
         conn.execute("INSERT OR REPLACE INTO study_meta VALUES ('n_events', ?)", (str(n_ev),))
         conn.execute("INSERT OR REPLACE INTO study_meta VALUES ('sign_cover', ?)", (f"{sign_cover:.3f}",))
+        for k_, arr_ in (("thr_score", A["score"]), ("thr_liq", A["liq"])):          # 법안 상세에서 같은 기준(상·하위 절반)으로 조건을 맞춰 보려고 중앙값을 남김
+            v_ = arr_.astype(float)
+            v_ = v_[~np.isnan(v_)]
+            if len(v_) >= 30:
+                conn.execute("INSERT OR REPLACE INTO study_meta VALUES (?, ?)", (k_, f"{float(np.quantile(v_, 0.5)):.6f}"))
         conn.commit()
         log(f"이벤트 스터디: 이벤트 {n_ev}건 · 묶음 {stored} · 특징 {n_feat} · 방향 판정 범위 {sign_cover:.0%}")
         return {"이벤트": n_ev, "묶음": stored, "특징": n_feat, "방향 판정": f"{sign_cover:.0%}"}
@@ -821,3 +826,58 @@ def run_all(db_path, assembly_key, status_path, log=print, law_oc=""):
     st["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
     save()
     return st
+
+
+STAGE_SET_OF = {"발의": "발의", "소관위 회부": "심사", "소관위 상정": "심사", "소관위 처리": "심사", "법사위 처리": "심사", "본회의 처리": "확정", "공포": "확정", "시행": "확정"}
+
+
+def match_bill(conn, title, text, stocks, tdata, proposer=""):
+    """지금 보는 법안 × 후보 종목이 입법 주가 분석에서 '재현됨'으로 나온 조건에 해당하는지.
+    stocks=[dict(code, name, score, evidence)] → (conds, thr_ok): conds=[dict(set, feature, bucket, train, test, hits=[종목 이름], unknown=[필요한데 모르는 특징])]
+    계산할 수 있는 특징: 연결 확실도 · 점수 · 소속 테마 수 · 공동발의(발의자 정보가 있을 때) · 법안 성격. 거래대금·사전 거래량은 주가·거래량이 있어야 해서 '확인 불가'로 둬요."""
+    res, meta = results(conn)
+    conds = [p for (g, _), p in res.items() if g == "특징" and p.get("status") == "재현됨"]
+    if not conds:
+        return [], True
+    thr = {k: float(meta[k]) for k in ("thr_score", "thr_liq") if k in meta}
+    n_theme = {}
+    for _, codes_ in (tdata.get("테마") or {}).items():
+        for c_ in codes_:
+            n_theme[c_] = n_theme.get(c_, 0) + 1
+    sign = bill_sign(title, text)
+    spn = sponsors(proposer) if proposer else None
+    feats = {}
+    for st in stocks:
+        f = {}
+        f["연결"] = "직접 언급" if (st.get("evidence") and str(st["evidence"][0]).startswith("법안 문구에 기업명")) else "개념·테마 짐작"
+        if "thr_score" in thr:
+            f["점수"] = "높음" if st["score"] > thr["thr_score"] else "낮음"
+        nt = n_theme.get(st["code"], 0)
+        if nt > 0:
+            f["소속 테마 수"] = "1개(특화)" if nt == 1 else "2개 이상"
+        if spn is not None and spn >= 0:
+            f["공동발의"] = "정부안" if spn == 0 else "1~9인" if spn < 10 else "10인 이상"
+        if sign:
+            f["법안 성격"] = "수혜 힌트" if sign > 0 else "부담 힌트"
+        feats[st["code"]] = (st["name"], f)
+    out = []
+    for p in conds:
+        names = p["feature"].split("+")
+        labs = [x.strip() for x in p["bucket"].split(" + ")] if "+" in p["feature"] else [p["bucket"]]
+        hits, unknown = [], set()
+        for code, (nm, f) in feats.items():
+            ok, miss = True, []
+            for fn, lab in zip(names, labs):
+                if fn not in f:
+                    miss.append(fn)
+                elif f[fn] != lab:
+                    ok = False
+            if not ok:
+                continue
+            if miss:
+                unknown.update(miss)
+            else:
+                hits.append(nm)
+        if hits or unknown:
+            out.append(dict(set=p["set"], feature=p["feature"], bucket=p["bucket"], train=p["train"], test=p["test"], hits=hits, unknown=sorted(unknown)))
+    return out, True
