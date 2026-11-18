@@ -2792,6 +2792,14 @@ def _ev_react_table(rs, mc=None):
             '<div class="muted" style="font-size:11px">지수 대비 초과수익(%p). 기준은 이벤트 직전 종가, 사전은 이벤트 5거래일 전부터.</div>')
 
 
+def _fold(card_html, open_=False):
+    """'<div class="card"><b>제목</b>…</div>' → 제목을 눌러 접고 펼 수 있는 카드"""
+    m = re.match(r'<div class="card"><b>(.*?)</b>(.*)</div>\Z', card_html, re.S)
+    if not m:
+        return card_html
+    return (f'<div class="card"><details{" open" if open_ else ""}><summary style="cursor:pointer"><b>{m.group(1)}</b></summary>{m.group(2)}</details></div>')
+
+
 def _ev_chip(t, with_link=True):
     import event_themes as et
     ev = et.EVENT_BY_ID[t["event_id"]]
@@ -2861,10 +2869,10 @@ def view_events(conn, q):
         for ev_ in evs_:
             tr_ = theme_rows(ev_)
             if any(tr_.values()):
-                blocks += (f'<div style="margin-top:8px"><a href="/ideas?t=events&ev={ev_["id"]}"><b>{"결과가 이렇다면 — " if len(evs_) > 1 else ""}{escape(ev_["name"])}</b></a>'
-                           f'<span class="muted" style="font-size:12px"> — {escape(ev_["why"])}</span>'
+                blocks += (f'<details style="margin-top:6px"{" open" if len(evs_) == 1 else ""}><summary style="cursor:pointer"><b>{"결과가 이렇다면 — " if len(evs_) > 1 else ""}{escape(ev_["name"])}</b>'
+                           f'<span class="muted" style="font-size:12px"> — {escape(ev_["why"])}</span></summary>'
                            + theme_line("+", tr_["+"]) + theme_line("±", tr_["±"]) + theme_line("-", tr_["-"])
-                           + f'<div class="muted" style="font-size:11px;margin-top:2px">⚠ {escape(ev_["note"])}</div></div>')
+                           + f'<div class="muted" style="font-size:11px;margin-top:2px">⚠ {escape(ev_["note"])} <a href="/ideas?t=events&ev={ev_["id"]}">이 이벤트 전체 보기</a></div></details>')
         if u.get("themes"):
             blocks += '<div style="margin-top:6px"><b style="font-size:12px">이 법과 닿는 테마·업종</b> ' + " ".join(f'<span class="chip">{escape(n_)}</span>' for n_ in u["themes"]) + '</div>'
         dd = (_dt1.date.fromisoformat(u["d"]) - today).days
@@ -2879,7 +2887,7 @@ def view_events(conn, q):
                 n_hid += 1
             continue
         n_up += 1
-        ucards += (f'<details{" open" if n_up <= 3 else ""} style="border-top:1px solid var(--line);padding:6px 0"><summary style="cursor:pointer">{head}</summary>{blocks}</details>')
+        ucards += (f'<details{" open" if n_up <= 1 else ""} style="border-top:1px solid var(--line);padding:6px 0"><summary style="cursor:pointer">{head}</summary>{blocks}</details>')
     sel_ud = "".join(f'<option value="{v}"{" selected" if v == str(udays) else ""}>{lab}</option>' for v, lab in (("60", "60일 안"), ("150", "150일 안"), ("365", "1년 안")))
     uflt = ('<form method="get" action="/ideas" class="filters" style="margin:6px 0"><input type="hidden" name="t" value="events">'
             f'<select name="ud">{sel_ud}</select> <label style="font-size:13px"><input type="checkbox" name="um" value="1"{" checked" if show_mkt else ""}> 시장 전체 일정(만기일 등)도 보기</label><button>보기</button></form>')
@@ -2942,6 +2950,7 @@ def view_events(conn, q):
                       f'<input type="hidden" name="title" value="{escape(t)}"><input type="hidden" name="note" value="{escape(n)}"><button class="chip" style="cursor:pointer">+ {d} {escape(t)}</button></form> '
                       for a, d, t, n in et.SUGGEST) + '</div>')
     logs = et.log_rows(conn)
+    logs_n = 0
     ordtxt = "시가총액 큰 순" if mc else "점수 순 (KRX 시세가 없어 시가총액은 못 썼어요)"
     body = ""
     for lr in logs:
@@ -2953,7 +2962,8 @@ def view_events(conn, q):
         need = [x["code"] for x in rs if not x["has_prices"]]
         pxb = ('<form method="post" action="/events/px" class="filters" style="margin:6px 0 0">'
                f'<input type="hidden" name="codes" value="{",".join(x["code"] for x in rs)}"><button>주가 받기 ({len(need)}종목 없음)</button></form>') if need else ""
-        body += (f'<div class="card"><div style="display:flex;justify-content:space-between;gap:8px"><div><b>{escape(lr["d"])} · {escape(lr["title"])}</b> '
+        logs_n += 1
+        body += (f'<div style="border-top:1px solid var(--line);padding:8px 0"><div style="display:flex;justify-content:space-between;gap:8px"><div><b>{escape(lr["d"])} · {escape(lr["title"])}</b> '
                  f'<span class="chip">{escape(ev["cat"])}</span>'
                  + (f'<div class="muted" style="font-size:12px">{escape(lr["note"])}</div>' if lr["note"] else "") +
                  f'</div><form method="post" action="/events/del"><input type="hidden" name="id" value="{lr["id"]}"><button class="chip" style="cursor:pointer">삭제</button></form></div>'
@@ -2961,7 +2971,8 @@ def view_events(conn, q):
                  + _ev_react_table(rs, mc) + pxb + '</div>')
     if not logs:
         body = '<div class="card muted">지난 이벤트 기록이 아직 없어요. 위에서 이벤트와 날짜를 추가하면 연결 종목의 주가 반응이 나와요.</div>'
-    return page("이벤트 테마", flash + intro + upcard + evcard + table + addf + body)
+    logfold = _fold('<div class="card"><b>이벤트 기록과 주가 반응</b>' + body + '</div>') if logs_n else body
+    return page("이벤트 테마", flash + _fold(intro) + _fold(upcard, True) + evcard + _fold(table) + _fold(addf) + logfold)
 
 
 def view_legstudy(conn, q):
