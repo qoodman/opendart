@@ -16,6 +16,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 
 
+# 모든 시각(수집·업데이트 확인·알림·D-day 계산)을 한국 시간으로. 다른 지역 서버여도 같게 보이게 하고, 별도 프로세스(수집·분석)도 이 환경변수를 이어받아요.
+# 다른 시간대를 쓰려면 .env/환경변수 DART_TZ (예: UTC). 서버가 이미 한국 시간이면 아무 일도 안 해요.
+os.environ["TZ"] = os.environ.get("DART_TZ", "Asia/Seoul")
+if hasattr(time, "tzset"):
+    time.tzset()
+
+
 # ---------------- 설정 ----------------
 DOTENV_KEYS = set()   # .env에서 읽어 온 값들 (대시보드가 수집을 시작할 때 다시 읽게 빼 줌)
 
