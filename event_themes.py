@@ -61,12 +61,15 @@ EVENT_DEFS = {
  "sports_event": ("계절·행사", "대형 스포츠 행사", "스포츠행사·광고·미디어·치킨/주류", "개최 몇 달 전부터 선반영돼요."),
  "ipo": ("계절·행사", "신규상장 열풍·스팩 합병 발표", "신규상장·기업인수목적회사·창투사", "상장 직후 급등락이 커요."),
  "derivs_expiry": ("시장 일정", "선물·옵션 만기일", "만기일 전후 지수·대형주 변동성 확대, 프로그램 매매 영향", "테마와 직접 연결되진 않고 시장 전체에 영향을 줘요. 휴장일이면 앞당겨져요."),
+ "index_change": ("시장 일정", "주요 지수 정기변경·편입 적용", "편입 종목에 패시브 자금 유입·편출 종목에 매도 압력", "발표 전 기대가 먼저 반영되고 적용일 종가 부근에 수급이 몰려요."),
+ "budget": ("정책", "정부 예산안 확정·국회 처리", "SOC·방산·AI·에너지·복지 등 증액 분야", "증액 규모가 확정돼야 의미가 있고, 감액 분야는 반대예요."),
  "auto_chip": ("기술·산업", "자율주행 규제 완화·상용화 발표", "자율주행·스마트카·전기차·UAM", "허가 일정 확인이 필요해요."),
 }
 # (테마 이름 정규식, [(이벤트 id, 부호 +/-, 역할 'main'|'sub')...])  — 위에서부터 모두 적용
 RULES = [
  (r"^엔터테인먼트$|^음원/음반$|^영화$|^영상콘텐츠$|^웹툰$|^캐릭터상품$", [("cn_warm","+","main"),("cn_cold","-","main"),("game_content","+","main"),("jp_warm","+","sub")]),
  (r"^화장품$|^면세점$|^백화점$|호텔/리조트|^카지노$|^여행$|^테마파크$|^야놀자|^미용기기|^보톡스", [("cn_warm","+","main"),("cn_cold","-","main"),("cn_reopen","+","main")]),
+ (r"^건설 |^철도$|^GTX|해저터널|^시멘트|^아스콘|방위산업|우주항공|^드론|^고령화|^출산장려|^일자리|^지역화폐|^원자력발전$|^스마트그리드|^전력설비|^지능형로봇|^AI 챗봇|^데이터센터", [("budget","+","main")]),
  (r"^렌터카", [("rate_cut","+","sub"),("oil_up","-","sub"),("cn_reopen","+","sub")]),
  (r"^여행$|^항공/저가|^야놀자|^호텔/리조트", [("jp_warm","+","main"),("fx_down","+","sub"),("oil_up","-","sub"),("pandemic","-","sub")]),
  (r"국내 상장 중국기업", [("cn_warm","+","main"),("cn_cold","-","main"),("cn_reopen","+","main")]),
@@ -125,14 +128,26 @@ SUGGEST = []      # 예시는 두지 않아요 (이벤트는 직접 기록)
 
 # 이미 공표된 앞으로의 일정. 날짜는 보도·공식 안내 기준이고 바뀔 수 있어서 출처를 같이 적어요 (확인일 2026-11-18).
 CALENDAR = [
+    dict(d="2026-11-26", end="", title="한국은행 금융통화위원회 기준금리 결정", events=["rate_cut", "rate_up", "fx_up"],
+         src="https://tilnote.io/pages/6af7a5e20d16e5ce54843318", note="2026년 마지막 통화정책방향 회의."),
+    dict(d="2026-12-01", end="", title="MSCI 정기 리뷰 적용 (11/30 장 마감 기준)", events=["index_change"],
+         src="https://www.newstomato.com/ReadNews.aspx?no=1320085", note="발표는 11월 12일에 이미 나왔어요."),
     dict(d="2026-12-08", end="2026-12-09", title="미국 FOMC 정례회의 (결과는 한국시간 12/10 새벽)", events=["rate_cut", "rate_up", "fx_up"],
          src="https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm", note="출처마다 날짜가 달라 연준 공식 일정으로 한 번 더 확인하세요."),
     dict(d="2026-12-14", end="2026-12-15", title="G20 정상회의 (미국 마이애미)", events=["trade_deal", "us_cn_trade"],
          src="https://biz.sbs.co.kr/amp/article/20000292334", note="미 재무부 발표 보도 기준."),
     dict(d="2027-01-06", end="2027-01-09", title="CES 2027 (라스베이거스)", events=["device_launch", "robot_news", "ev_news", "auto_chip", "nvidia_ai"],
          src="https://www.ces.tech/about", note="주최측 안내 기준."),
+    dict(d="2027-01-14", end="", title="한국은행 금융통화위원회 기준금리 결정", events=["rate_cut", "rate_up", "fx_up"],
+         src="https://biz.sbs.co.kr/amp/article/20000343023", note="2027년 첫 금리 결정. 이후 2/25 · 4/9 · 5/27 · 7/15 · 8/26 · 10/15 · 11/25."),
+    dict(d="2027-02-25", end="", title="한국은행 금융통화위원회 기준금리 결정", events=["rate_cut", "rate_up", "fx_up"],
+         src="https://biz.sbs.co.kr/amp/article/20000343023", note="2차 자료 기준 날짜."),
+    dict(d="2027-03-01", end="2027-03-04", title="MWC 바르셀로나 2027", events=["device_launch", "nvidia_ai"],
+         src="https://www.gsma.com/get-involved/gsma-membership/gsma_events/gsma-membership-at-mwc-barcelona-2027/", note="GSMA 안내 기준."),
     dict(d="2027-03-14", end="2027-03-18", title="NVIDIA GTC 2027 (산호세)", events=["nvidia_ai", "memory_up", "robot_news"],
          src="https://www.nvidia.com/en-us/gtc/faq/", note="본 프로그램은 15~18일로 안내되기도 해요."),
+    dict(d="2027-04-09", end="", title="한국은행 금융통화위원회 기준금리 결정", events=["rate_cut", "rate_up", "fx_up"],
+         src="https://biz.sbs.co.kr/amp/article/20000343023", note="2차 자료 기준 날짜."),
 ]
 
 
@@ -159,6 +174,18 @@ def upcoming(conn, today=None, days=150, law_rows=()):
         if lo <= d <= hi:
             q = mm in (3, 6, 9, 12)
             out.append(dict(d=d, end="", title="선물·옵션 " + ("동시만기일 (분기)" if q else "만기일"), events=["derivs_expiry"], kind="계산", src="", note="매월 둘째 목요일 · 휴장이면 앞당겨져요"))
+    for yy in (today.year, today.year + 1):
+        d = f"{yy}-12-02"
+        if lo <= d <= hi:
+            out.append(dict(d=d, end="", title="정부 예산안 국회 처리 법정 시한", events=["budget"], kind="계산", src="", note="헌법상 회계연도 개시 30일 전 · 실제 처리는 늦어지는 해가 많아요"))
+        dd = dt.date(yy, 12, 31)
+        while dd.weekday() >= 5:
+            dd -= dt.timedelta(days=1)
+        dd -= dt.timedelta(days=1)                                   # 12/31은 휴장 → 직전 거래일이 연말 마지막 거래일(주말이면 더 앞)
+        while dd.weekday() >= 5:
+            dd -= dt.timedelta(days=1)
+        if lo <= dd.isoformat() <= hi:
+            out.append(dict(d=dd.isoformat(), end="", title="연말 마지막 거래일 (12/31 휴장)", events=["derivs_expiry"], kind="계산", src="", note="배당·절세 매매와 연말 수급 이슈 · 임시공휴일 등으로 달라질 수 있어요"))
     for lr in log_rows(conn):
         if lo <= lr["d"] <= hi:
             out.append(dict(d=lr["d"], end="", title=lr["title"], events=[lr["event_id"]], kind="직접 입력", src="", note=lr["note"] or "", log_id=lr["id"]))

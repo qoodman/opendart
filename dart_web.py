@@ -2835,35 +2835,59 @@ def view_events(conn, q):
                 law_rows.append(dict(d=pm["effective"], end="", title="법 시행: " + r["name"][:48], kind="법 시행", events=[], src="", note="공포 " + (pm.get("date") or ""), themes=gnames))
     except Exception:
         law_rows = []
-    ups = et.upcoming(conn, today, 150, law_rows)
-    ucards = ""
+    udays = {"60": 60, "150": 150, "365": 365}.get(q.get("ud", ""), 150)
+    show_mkt = q.get("um") == "1"
+    ups = et.upcoming(conn, today, udays, law_rows)
+
+    def theme_rows(ev_, top_n=6):
+        out_ = {"+": [], "-": [], "±": []}
+        for k_, n_, r_, c_, sg_ in sorted(et.groups(ev_, data), key=lambda g: (0 if g[2] == "main" else 1, -len(g[3]))):
+            if r_ == "main" and len(out_[sg_]) < top_n:
+                out_[sg_].append((n_, c_))
+        return out_
+
+    def theme_line(sg, items):
+        if not items:
+            return ""
+        lab = {"+": "▲ 오를 수 있는 테마", "-": "▼ 내릴 수 있는 테마", "±": "▲▼ 방향이 갈리는 테마"}[sg]
+        cls = "up" if sg == "+" else "down" if sg == "-" else ""
+        lis = "".join(f'<div style="margin:3px 0"><span class="chip {cls}">{escape(n_)}</span> <span class="muted" style="font-size:11px">{len(c_)}종목</span> '
+                      f'<span style="font-size:12px">{stocks_html(c_, 5)}</span></div>' for n_, c_ in items)
+        return f'<div style="margin-top:4px"><b style="font-size:12px">{lab}</b>{lis}</div>'
+    ucards, n_up, n_hid = "", 0, 0
     for u in ups:
+        evs_ = [et.EVENT_BY_ID[e_] for e_ in u["events"] if e_ in et.EVENT_BY_ID]
+        blocks = ""
+        for ev_ in evs_:
+            tr_ = theme_rows(ev_)
+            if any(tr_.values()):
+                blocks += (f'<div style="margin-top:8px"><a href="/ideas?t=events&ev={ev_["id"]}"><b>{"결과가 이렇다면 — " if len(evs_) > 1 else ""}{escape(ev_["name"])}</b></a>'
+                           f'<span class="muted" style="font-size:12px"> — {escape(ev_["why"])}</span>'
+                           + theme_line("+", tr_["+"]) + theme_line("±", tr_["±"]) + theme_line("-", tr_["-"])
+                           + f'<div class="muted" style="font-size:11px;margin-top:2px">⚠ {escape(ev_["note"])}</div></div>')
+        if u.get("themes"):
+            blocks += '<div style="margin-top:6px"><b style="font-size:12px">이 법과 닿는 테마·업종</b> ' + " ".join(f'<span class="chip">{escape(n_)}</span>' for n_ in u["themes"]) + '</div>'
         dd = (_dt1.date.fromisoformat(u["d"]) - today).days
-        chips, hit = "", {}
-        for eid in u["events"]:
-            ev_ = et.EVENT_BY_ID.get(eid)
-            if ev_:
-                for k_, n_, r_, c_, sg_ in et.groups(ev_, data):
-                    if r_ == "main":
-                        h_ = hit.setdefault(n_, [0, len(c_), sg_])
-                        h_[0] += 1
-                        if h_[2] != sg_:
-                            h_[2] = "±"
-        for n_, (h0, sz, sg_) in sorted(hit.items(), key=lambda kv: (-kv[1][0], -kv[1][1]))[:8]:
-            chips += f'<span class="chip {"up" if sg_ == "+" else "down" if sg_ == "-" else ""}" style="margin:1px">{"▲" if sg_ == "+" else "▼" if sg_ == "-" else "▲▼"} {escape(n_)}</span>'
-        for n_ in u.get("themes", []):
-            chips += f'<span class="chip" style="margin:1px">{escape(n_)}</span>'
-        evl = " ".join(f'<a class="chip" style="text-decoration:none" href="/ideas?t=events&ev={e_}">{escape(et.EVENT_BY_ID[e_]["name"].split(" (")[0])}</a>' for e_ in u["events"] if e_ in et.EVENT_BY_ID)
         when = u["d"] + (f" ~ {u['end'][5:]}" if u.get("end") else "")
         srcl = f' · <a href="{escape(u["src"])}" target="_blank" rel="noopener noreferrer">출처</a>' if u.get("src") else ""
-        ucards += (f'<tr><td style="white-space:nowrap"><b>{"오늘" if dd == 0 else f"D-{dd}"}</b><br><span class="muted" style="font-size:11px">{escape(when)}</span></td>'
-                   f'<td><b>{escape(u["title"])}</b> <span class="chip">{escape(u["kind"])}</span>'
-                   + (f'<div class="muted" style="font-size:11px">{escape(u["note"])}{srcl}</div>' if (u.get("note") or srcl) else "")
-                   + (f'<div style="margin-top:2px">{evl}</div>' if evl else "")
-                   + '</td><td style="font-size:12px">' + (chips or '<span class="muted">테마 직접 연결 없음 (시장 전체)</span>') + '</td></tr>')
-    upcard = ('<div class="card"><b>앞으로 계획된 이벤트 (150일 안)</b>'
-              '<div class="muted" style="font-size:12px">이미 공표된 일정, 매월 반복되는 일정(계산), 시행이 정해진 법, 직접 넣은 예정 이벤트를 모았어요. 날짜는 출처 기준이고 바뀔 수 있어요. 테마는 그 종류의 이벤트에 반응한다고 사전에 적힌 테마로, 반응의 방향과 크기는 이벤트 결과에 달려 있어요.</div>'
-              + (f'<div class="scroll"><table><tr><th>언제</th><th>이벤트</th><th>반응할 수 있는 테마</th></tr>{ucards}</table></div>' if ucards else '<div class="muted" style="margin-top:6px">150일 안에 알려진 일정이 없어요. 아래 \'예정 이벤트 추가\'로 직접 넣을 수 있어요.</div>')
+        head = (f'<b>{"오늘" if dd == 0 else f"D-{dd}"}</b> · {escape(when)} · <b>{escape(u["title"])}</b> <span class="chip">{escape(u["kind"])}</span>'
+                f'<span class="muted" style="font-size:11px"> {escape(u.get("note") or "")}{srcl}</span>')
+        if not blocks:
+            if show_mkt:
+                ucards += f'<div style="padding:5px 0;border-top:1px solid var(--line);font-size:13px">{head} <span class="muted" style="font-size:11px">· 시장 전체에 영향 (테마 직접 연결 없음)</span></div>'
+            else:
+                n_hid += 1
+            continue
+        n_up += 1
+        ucards += (f'<details{" open" if n_up <= 3 else ""} style="border-top:1px solid var(--line);padding:6px 0"><summary style="cursor:pointer">{head}</summary>{blocks}</details>')
+    sel_ud = "".join(f'<option value="{v}"{" selected" if v == str(udays) else ""}>{lab}</option>' for v, lab in (("60", "60일 안"), ("150", "150일 안"), ("365", "1년 안")))
+    uflt = ('<form method="get" action="/ideas" class="filters" style="margin:6px 0"><input type="hidden" name="t" value="events">'
+            f'<select name="ud">{sel_ud}</select> <label style="font-size:13px"><input type="checkbox" name="um" value="1"{" checked" if show_mkt else ""}> 시장 전체 일정(만기일 등)도 보기</label><button>보기</button></form>')
+    upcard = ('<div class="card"><b>이벤트 일정 — 앞으로 계획된 이벤트와 그때 뜰 수 있는 테마</b>'
+              '<div class="muted" style="font-size:12px">이미 공표된 일정, 매월 반복되는 일정(계산), 시행이 정해진 법, 직접 넣은 예정 이벤트를 날짜순으로 모았어요. 이벤트마다 그 종류에 반응한다고 사전에 적힌 테마와 대표 종목(시가총액 순)을 붙였어요. '
+              '날짜는 출처 기준이라 바뀔 수 있고, 테마의 방향과 크기는 이벤트 결과에 달려 있어요.</div>' + uflt
+              + (ucards if ucards else '<div class="muted" style="margin-top:6px">이 기간에 알려진 일정이 없어요. 아래 “이벤트 기록·예정 추가”로 직접 넣을 수 있어요.</div>')
+              + (f'<div class="muted" style="font-size:12px;margin-top:6px">테마 직접 연결이 없는 시장 일정 {n_hid}건은 숨겼어요 (위 체크박스로 보기).</div>' if n_hid else "")
               + '</div>')
     # ---- 이벤트 하나 보기
     evcard = ""
