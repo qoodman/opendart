@@ -3248,6 +3248,195 @@ def view_cycle(conn, q):
     return page("투자 사이클", intro + acard + live + gcard + tipc + _fold(thc, False))
 
 
+FIN_SORTS = {"score": ("점수 높은 순", lambda r: -(r["score"] or -1)), "rev": ("매출 증가율 순", lambda r: -(r["m"].get("rev_yoy") if r["m"].get("rev_yoy") is not None else -9)),
+             "op": ("영업이익 증가율 순", lambda r: -(r["m"].get("op_yoy") if r["m"].get("op_yoy") is not None else -9)),
+             "opm": ("영업이익률 순", lambda r: -(r["m"].get("opm") if r["m"].get("opm") is not None else -9)),
+             "cash": ("현금 전환(영업CF/순이익) 순", lambda r: -(r["m"].get("ocf_to_ni") if r["m"].get("ocf_to_ni") is not None else -9)),
+             "debt": ("부채비율 낮은 순", lambda r: (r["m"].get("debt_ratio") if r["m"].get("debt_ratio") is not None else 99))}
+
+
+FIN_RNAME = {"11013": "1분기", "11012": "반기", "11014": "3분기", "11011": "사업"}
+
+
+def _fin_label(r):
+    return f'{r["year"]} {FIN_RNAME.get(r["rcode"], r["rcode"])}' + (" · 별도" if r["fs"] == "OFS" else "")
+
+
+def _fin_pct(v, plus=True):
+    return '<span class="muted">-</span>' if v is None else f'<span class="{"up" if v > 0 else "down" if v < 0 else ""}">{v:+.0%}</span>' if plus else f"{v:.0%}"
+
+
+def view_fin(conn, q):
+    """아이디어 → 재무제표 분석: 종목마다 최근 정기보고서(DART 전체 재무제표)를 분석한 투자 지표·점수 목록과 종목별 상세"""
+    import fin_analyzer as fa
+    import legis as lg
+    d = Path(_DATA_DIR["path"] or ".")
+    st = lg.read_status(str(d / "fin_status.json"))
+    running = bool(st and st.get("running"))
+    rows = fa.latest(conn)
+    by_code = {r["code"]: r for r in rows}
+    msg = q.get("msg", "")
+    flash = f'<div class="card {"warn" if msg.startswith("✖") else ""}">{escape(msg)}</div>' if msg else ""
+    mc = {}
+    try:
+        mc = {c: m for c, m in conn.execute("SELECT code, mktcap FROM krx_daily WHERE bas_dd=(SELECT MAX(bas_dd) FROM krx_daily)")}
+    except sqlite3.Error:
+        pass
+    val = {}
+    try:
+        val = {c: (p, b) for c, p, b in conn.execute("SELECT code, per, pbr FROM valuation")}
+    except sqlite3.Error:
+        pass
+    icon = {"ok": "✔", "fail": "✖", "run": "…", "wait": "·"}
+    steps = ""
+    if st:
+        for s_ in st.get("steps", []):
+            steps += (f'<div style="margin:3px 0"><b>{icon.get(s_["state"], "")} {escape(s_["name"])}</b> '
+                      f'<span class="{"warn" if s_["state"] == "fail" else "muted"}" style="font-size:12px">{escape(s_.get("msg", ""))}</span></div>')
+        steps = (f'<div style="margin-top:8px"><b style="font-size:13px">{"진행 중" if running else "마지막 실행 결과"}</b> '
+                 f'<span class="muted" style="font-size:12px">{escape(st.get("started", ""))} ~ {escape(st.get("finished", "") or "…")}</span>{steps}</div>')
+    n_scored = sum(1 for r in rows if r["score"] is not None)
+    prep = ('<div class="card"><b>재무제표 분석</b>'
+            f'<div class="muted" style="font-size:13px">분석한 종목 {len(rows):,}개 (점수 {n_scored:,}개)' + (f' · 마지막 {escape(max(r["fetched"] for r in rows))}' if rows else "") + '</div>'
+            '<form method="post" action="/fin/run" class="filters" style="margin:8px 0 0">'
+            f'<button{" disabled" if running else ""}>{"진행 중…" if running else ("다시 받고 분석하기" if rows else "최근 보고서 받고 분석하기")}</button>'
+            '<span class="muted" style="font-size:12px">시가총액 상위·공시에 나온·관심 종목의 최근 정기보고서를 DART에서 받아요 (별도 프로세스). 최근 5일 안에 받은 종목은 건너뛰어요.</span></form>'
+            + steps + '</div>')
+    how = ('<div class="card"><details><summary><b>이 점수는 어떻게 매기나요? (꼭 알아 둘 한계)</b></summary>'
+           '<div style="font-size:13px;margin-top:6px">종목마다 가장 최근 정기보고서(1분기·반기·3분기·사업보고서)의 <b>전체 재무제표</b>를 받아 <b>누적 기준으로 전년 같은 기간과 비교</b>해요. 연결 재무제표를 우선 쓰고 없으면 별도를 써요.</div>'
+           '<ul class="muted" style="font-size:13px;padding-left:18px"><li><b>성장 30</b> 누적 매출 · 누적 영업이익(흑자 전환 포함) · 최근 분기 영업이익의 전년 대비</li>'
+           '<li><b>수익성 20</b> 영업이익률 수준과 전년 대비 변화</li><li><b>현금 25</b> 영업현금흐름 흑자 · 영업현금흐름 ÷ 순이익 · 잉여현금흐름(영업CF − 유형자산 취득)</li>'
+           '<li><b>안정성 20</b> 부채비율 · 유동비율 · 이자보상배율</li><li><b>이익의 질 5</b> 매출채권·재고가 매출보다 훨씬 빨리 늘었나, 순이익이 영업 외 이익에서 왔나 (감점), 자본잠식은 −10</li></ul>'
+           '<ul class="muted" style="font-size:12px;padding-left:18px"><li>기준값은 제가 정한 단순 기준이에요. 업종마다 정상 범위가 달라요 (건설·유통·조선은 부채비율이 높고, 플랫폼은 영업이익률이 낮을 수 있어요).</li>'
+           '<li>금융업(은행·보험·증권 등)은 영업이익·부채 개념이 달라 점수를 매기지 않아요.</li><li>한 분기 숫자라 계절성과 일회성(자산 매각·충당금·환율)이 섞여요. 보고서 기준 날짜가 종목마다 다를 수 있어요.</li>'
+           '<li>재무제표는 지나간 숫자예요. 주가는 이미 이 숫자를 일부 반영했을 수 있고, 점수가 높다고 오른다는 보장은 없어요. 투자 추천이 아니라 보고서를 빠르게 훑어보는 도구예요.</li></ul></details></div>')
+    code = (q.get("code") or "").strip()
+    if code:
+        return page("재무제표 분석", flash + _fin_detail(conn, by_code.get(code), code, rows, mc, val, fa))
+    if not rows:
+        return page("재무제표 분석", flash + prep + how + '<div class="card muted">아직 분석한 종목이 없어요. 위 버튼으로 받아 주세요 (DART 키가 설정에 있어야 해요).</div>', refresh=running)
+    kw = (q.get("kw") or "").strip()
+    gr = q.get("g") if q.get("g") in ("A", "B", "C", "D") else ""
+    flt = q.get("f") if q.get("f") in ("turn", "cash", "warn", "clean", "grow") else ""
+    sort = q.get("s") if q.get("s") in FIN_SORTS else "score"
+    sel = []
+    for r in rows:
+        m = r["m"]
+        if kw and kw not in (r["name"] or "") and kw not in r["code"]:
+            continue
+        if gr and r["grade"] != gr:
+            continue
+        if flt == "turn" and not (m.get("op_py") is not None and m["op_py"] <= 0 < (m.get("op") or 0)):
+            continue
+        if flt == "cash" and not ((m.get("ocf_to_ni") or 0) >= 1.0 and (m.get("fcf") or 0) > 0):
+            continue
+        if flt == "warn" and not any(k == "warn" for k, _ in r["signals"]):
+            continue
+        if flt == "clean" and (r["score"] is None or any(k == "warn" for k, _ in r["signals"])):
+            continue
+        if flt == "grow" and not ((m.get("rev_yoy") or 0) >= 0.1 and (m.get("op_yoy") or 0) >= 0.1 and (m.get("ocf") or 0) > 0):
+            continue
+        sel.append(r)
+    sel.sort(key=FIN_SORTS[sort][1])
+    scored_only = [r for r in sel if r["score"] is not None]
+    show = scored_only if sort != "score" or True else sel
+    limit = 500 if q.get("all") == "1" else 80
+    opts = lambda cur, items: "".join(f'<option value="{k}"{" selected" if k == cur else ""}>{escape(v)}</option>' for k, v in items)
+    form = ('<form method="get" action="/ideas" class="filters"><input type="hidden" name="t" value="fin">'
+            f'<input type="search" name="kw" value="{escape(kw)}" placeholder="종목 이름·코드">'
+            f'<select name="g">{opts(gr, [("", "모든 등급"), ("A", "A (75+)"), ("B", "B (60~)"), ("C", "C (45~)"), ("D", "D")])}</select>'
+            f'<select name="f">{opts(flt, [("", "모든 종목"), ("grow", "성장 + 현금 흑자"), ("turn", "영업이익 흑자 전환"), ("cash", "현금 전환 우수 (영업CF≥순이익, FCF 흑자)"), ("clean", "경고 없음"), ("warn", "경고 있음")])}</select>'
+            f'<select name="s">{opts(sort, [(k, v[0]) for k, v in FIN_SORTS.items()])}</select><button>보기</button></form>')
+    trs = ""
+    for r in show[:limit]:
+        m = r["m"]
+        pr = r["parts"]
+        n_warn = sum(1 for k, _ in r["signals"] if k == "warn")
+        per, pbr = val.get(r["code"], (None, None))
+        cls = {"A": "up", "B": "", "C": "", "D": "down"}.get(r["grade"], "")
+        parts = " · ".join(f'{k[:2]} {int(pr.get(k, 0))}' for k in ("성장", "수익성", "현금", "안정성"))
+        opm_t = "-" if m.get("opm") is None else f'{m["opm"]:.1%}'
+        cash_t = "-" if m.get("ocf_to_ni") is None else f'{m["ocf_to_ni"]:.1f}배'
+        debt_t = "-" if m.get("debt_ratio") is None else _fin_pct(m["debt_ratio"], False)
+        turn_t = "흑전" if (m.get("op_py") is not None and m["op_py"] <= 0 < (m.get("op") or 0)) else _fin_pct(m.get("op_yoy"))
+        warn_t = "" if not n_warn else f'<span class="down">⚠ {n_warn}</span>'
+        pp_t = f'{"-" if per is None else f"{per:.1f}"}/{"-" if pbr is None else f"{pbr:.1f}"}'
+        trs += (f'<tr><td><a href="/ideas?{urlencode({"t": "fin", "code": r["code"]})}"><b>{escape(r["name"] or r["code"])}</b></a><br><span class="muted" style="font-size:11px">{escape(r["code"])} · {escape(_fin_label(r))}</span></td>'
+                f'<td><span class="chip {cls}" style="font-weight:700">{r["grade"]} {int(r["score"])}</span><br><span class="muted" style="font-size:10px">{parts}</span></td>'
+                f'<td>{_fin_pct(m.get("rev_yoy"))}</td><td>{turn_t}</td><td>{opm_t}</td><td>{cash_t}</td><td>{debt_t}</td><td>{warn_t}</td>'
+                f'<td class="muted" style="font-size:12px">{pp_t}<br>{_mcap_text(mc.get(r["code"]))}</td></tr>')
+    more = (f'<div class="muted" style="margin-top:6px">{len(show)}개 중 {min(limit, len(show))}개를 보여 줘요. <a href="/ideas?{urlencode({"t": "fin", "kw": kw, "g": gr, "f": flt, "s": sort, "all": "1"})}">더 보기</a></div>'
+            if len(show) > limit else f'<div class="muted" style="margin-top:6px">{len(show)}개 종목</div>')
+    table = ('<div class="card"><b>종목별 재무 점수</b>' + form
+             + (f'<div class="scroll"><table><tr><th>종목</th><th>점수<br><span class="muted" style="font-size:10px">성장·수익·현금·안정</span></th><th>매출<br>전년비</th><th>영업이익<br>전년비</th><th>영업<br>이익률</th><th>영업CF<br>/순이익</th><th>부채<br>비율</th><th>경고</th><th>PER/PBR<br>시총</th></tr>{trs}</table></div>' if trs else '<div class="muted">조건에 맞는 종목이 없어요.</div>')
+             + more + '</div>')
+    return page("재무제표 분석", flash + prep + table + how, refresh=running)
+
+
+def _fin_detail(conn, r, code, rows, mc, val, fa):
+    if not r:
+        return ('<div class="card"><a href="/ideas?t=fin" class="muted">← 목록</a><div style="margin-top:6px">이 종목은 아직 분석하지 않았어요 '
+                f'({escape(code)}). 시가총액 상위·공시에 나온·관심 종목이 대상이에요.</div></div>')
+    m = r["m"]
+    won_ = lambda v: "-" if v is None else _mcap_text(abs(v)) if v >= 0 else "−" + _mcap_text(abs(v))
+    pct_ = lambda v: "-" if v is None else f"{v:+.0%}" if abs(v) < 20 else f"{v + 1:.1f}배"
+
+    def row(label, cur, prev, fmt, chg=None, note=""):
+        c = "" if chg is None else f'<span class="{"up" if chg > 0 else "down" if chg < 0 else ""}">{pct_(chg)}</span>'
+        return f'<tr><td>{label}{f"<br><span class=muted style=font-size:11px>{note}</span>" if note else ""}</td><td>{fmt(cur)}</td><td class="muted">{fmt(prev)}</td><td>{c}</td></tr>'
+    pf = lambda v: "-" if v is None else f"{v:.1%}"
+    ic_t = "-" if m.get("interest_cover") is None else f'{m["interest_cover"]:.1f}배'
+    zero = lambda v: "-" if v is None else f"{v:.0%}"
+    body = (row("매출 (누적)", m.get("rev"), m.get("rev_py"), won_, m.get("rev_yoy"))
+            + row("매출 (최근 분기)", m.get("rev_q"), m.get("rev_q_py"), won_, m.get("rev_q_yoy"))
+            + row("영업이익 (누적)", m.get("op"), m.get("op_py"), won_, m.get("op_yoy"))
+            + row("영업이익 (최근 분기)", m.get("op_q"), m.get("op_q_py"), won_, m.get("op_q_yoy"))
+            + row("순이익 (누적)", m.get("ni"), m.get("ni_py"), won_, m.get("ni_yoy"))
+            + row("영업이익률", m.get("opm"), m.get("opm_py"), pf)
+            + row("영업활동현금흐름 (누적)", m.get("ocf"), m.get("ocf_py"), won_)
+            + row("유형자산 취득 (누적)", abs(m["capex"]) if m.get("capex") is not None else None, abs(m["capex_py"]) if m.get("capex_py") is not None else None, won_)
+            + row("잉여현금흐름", m.get("fcf"), None, won_, note="영업CF − 유형자산 취득"))
+    bs = (f'<tr><td>자산 / 부채 / 자본</td><td>{won_(m.get("assets"))} / {won_(m.get("liab"))} / {won_(m.get("equity"))}</td><td class="muted">{won_(m.get("assets_ye"))} / {won_(m.get("liab_ye"))} / {won_(m.get("equity_ye"))}</td><td></td></tr>'
+          f'<tr><td>부채비율</td><td>{zero(m.get("debt_ratio"))}</td><td class="muted">{zero(m.get("debt_ratio_ye"))}</td><td></td></tr>'
+          f'<tr><td>유동비율</td><td>{zero(m.get("current_ratio"))}</td><td class="muted">-</td><td></td></tr>'
+          f'<tr><td>현금성자산 / 차입금(추정)</td><td>{won_(m.get("cash"))} / {won_(m.get("borrow"))}</td><td class="muted">{won_(m.get("cash_ye"))} / {won_(m.get("borrow_ye"))}</td><td></td></tr>'
+          f'<tr><td>순차입금</td><td>{won_(m.get("net_debt"))}</td><td class="muted">-</td><td></td></tr>'
+          f'<tr><td>이자보상배율</td><td>{ic_t}</td><td class="muted">-</td><td></td></tr>'
+          f'<tr><td>매출채권 / 재고자산</td><td>{won_(m.get("rec"))} / {won_(m.get("inv"))}</td><td class="muted">{won_(m.get("rec_ye"))} / {won_(m.get("inv_ye"))}</td><td></td></tr>'
+          f'<tr><td>ROE (연환산)</td><td>{pf(m.get("roe"))}</td><td class="muted">-</td><td></td></tr>')
+    sig = {"good": [], "warn": [], "info": []}
+    for k, t in r["signals"]:
+        sig.get(k, sig["info"]).append(t)
+    sg = "".join(f'<div style="margin:3px 0">{ic} {escape(t)}</div>' for ic, k in (("✔", "good"), ("⚠", "warn"), ("·", "info")) for t in sig[k])
+    pbar = "".join(f'<div style="display:flex;align-items:center;gap:8px;margin:3px 0;font-size:13px"><span style="width:64px">{k}</span>'
+                   f'<div style="flex:1;height:10px;background:var(--chip);border-radius:5px"><div style="width:{(r["parts"].get(k, 0) / mx) * 100:.0f}%;height:10px;background:var(--s1);border-radius:5px"></div></div>'
+                   f'<span style="width:52px;text-align:right">{int(r["parts"].get(k, 0))} / {mx}</span></div>' for k, mx in fa.SCORE_MAX.items()) if r["score"] is not None else ""
+    scored = [x["score"] for x in rows if x["score"] is not None]
+    rank = ""
+    if r["score"] is not None and scored:
+        better = sum(1 for v in scored if v > r["score"])
+        rank = f'<div class="muted" style="font-size:12px">분석한 {len(scored):,}개 종목 중 {better + 1}위 (상위 {(better + 1) / len(scored):.0%})</div>'
+    hist = fa.history(conn, code)
+    hl = ""
+    if len(hist) > 1:
+        short = {"11013": "1Q", "11012": "반기", "11014": "3Q", "11011": "연간"}
+        pts = " → ".join(f'{h["year"]} {short.get(h["rcode"], "")} {"-" if h["score"] is None else int(h["score"])}' for h in hist)
+        hl = f'<div style="margin-top:6px;font-size:13px"><b>점수 추이</b> {pts}</div>'
+    per, pbr = val.get(code, (None, None))
+    cls = {"A": "up", "D": "down"}.get(r["grade"], "")
+    head = (f'<div class="card"><a href="/ideas?t=fin" class="muted" style="font-size:12px">← 목록</a>'
+            f'<div style="margin-top:4px"><b style="font-size:18px">{escape(r["name"] or code)}</b> <span class="muted">{escape(code)}</span> '
+            f'<a class="chip" href="{naver_link(code)}" target="_blank" rel="noopener noreferrer">네이버 증권 ↗</a> '
+            + (f'<a class="chip" href="{dart_link(r["rcept_no"])}" target="_blank" rel="noopener noreferrer">DART 보고서 ↗</a>' if r["rcept_no"] else "") + '</div>'
+            f'<div class="muted" style="font-size:12px">기준 보고서 {escape(_fin_label(r))} · {"연결" if r["fs"] == "CFS" else "별도"} 재무제표 · 받은 날 {escape(r["fetched"])}'
+            + (f' · PER {per:.1f} / PBR {pbr:.1f}' if per is not None and pbr is not None else "") + (f' · 시총 {_mcap_text(mc.get(code))}' if mc.get(code) else "") + '</div>'
+            + (f'<div style="margin:8px 0"><span class="chip {cls}" style="font-size:18px;font-weight:700">{r["grade"]} · {int(r["score"])}점</span></div>{pbar}{rank}' if r["score"] is not None else '<div class="muted" style="margin-top:8px">점수를 매기지 않았어요.</div>')
+            + hl + '</div>')
+    return (head + f'<div class="card"><b>신호</b>{sg or "<div class=muted>-</div>"}</div>'
+            + _fold(f'<div class="card"><b>숫자 자세히</b><div class="scroll"><table><tr><th>항목</th><th>이번</th><th>전년 같은 기간 / 직전 연말</th><th>변화</th></tr>{body}{bs}</table></div>'
+                    '<div class="muted" style="font-size:11px">손익·현금흐름은 누적 기준, 재무상태는 보고서 시점이에요. 금액은 원 단위를 억·조로 줄여 보여요. 차입금은 계정 이름으로 합친 추정값이에요.</div></div>', True))
+
+
 def view_legstudy(conn, q):
     """아이디어 → 입법 주가 분석: 과거 법안의 단계 날짜 전후로, 연결된 기업의 주가가 지수보다 얼마나 더 움직였나 (이벤트 스터디)"""
     import bill_history
@@ -3698,12 +3887,12 @@ IDEA_TABS = {"overall": "종합", "mine": "내 종목 점수", "cheap": "기관 
              "rank": "종목 순위", "score": "점수표 (오일전문가)", "perf": "운용사 성적표",
              "lynch": "피터 린치", "buffett": "워렌 버핏",
              "graham": "벤저민 그레이엄", "magic": "마법공식", "fscore": "F-스코어", "momentum": "모멘텀",
-             "legis": "입법 영향 기업", "legstudy": "입법 주가 분석"}
-IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "legis", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf", "legstudy"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
+             "legis": "입법 영향 기업", "legstudy": "입법 주가 분석", "fin": "재무제표 분석"}
+IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "legis", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf", "legstudy", "fin"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
 
 
 IDEA_SECTIONS = [("점수", ["overall", "mine"]), ("투자 방법", ["lynch", "buffett", "graham", "magic", "fscore", "momentum"]),
-                 ("종목 찾기", ["cheap", "cluster", "super", "legis", "rank"]), ("평가·성적", ["score", "perf", "legstudy"])]
+                 ("종목 찾기", ["cheap", "cluster", "super", "legis", "fin", "rank"]), ("평가·성적", ["score", "perf", "legstudy"])]
 
 
 def idea_tab_html(active, link=None):
@@ -4134,6 +4323,12 @@ def view_ideas(conn, q):
         q = {**q, "t": "overall"}
     if q.get("t") == "mine":
         return view_mine(conn, q)
+    if q.get("t") == "fin":
+        _CTX.pre = idea_tabs_row("fin")
+        try:
+            return view_fin(conn, q)
+        finally:
+            _CTX.pre = ""
     if q.get("t") == "legstudy":
         _CTX.pre = idea_tabs_row("legstudy")
         try:
@@ -6132,6 +6327,12 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 S = settings()
                 ok, why = S["legis_prepare"]() if "legis_prepare" in S else (False, "이 서버 버전은 지원하지 않아요")
                 return self._redirect("/ideas?" + urlencode({"t": "legis", "msg": ("✔ " if ok else "✖ ") + why}))
+            if path == "/fin/run" and settings_api:
+                n = min(int(self.headers.get("Content-Length") or 0), 4096)
+                self.rfile.read(n)
+                S = settings()
+                ok, why = S["fin_run"]() if "fin_run" in S else (False, "이 서버 버전은 지원하지 않아요")
+                return self._redirect("/ideas?" + urlencode({"t": "fin", "msg": ("✔ " if ok else "✖ ") + why}))
             if path == "/legstudy/run" and settings_api:
                 n = min(int(self.headers.get("Content-Length") or 0), 4096)
                 self.rfile.read(n)
