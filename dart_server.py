@@ -748,6 +748,42 @@ def legis_watch_notify(log=print):
     return len(msgs)
 
 
+def event_action(action, form):
+    """이벤트 테마 탭의 버튼들: 기록 추가·삭제, 주가 받기. (성공 여부, 한 줄 안내)"""
+    import event_themes as et
+
+    def one(k):
+        return (form.get(k) or "").strip()
+    conn = sqlite3.connect(results_db())
+    try:
+        et.ensure(conn)
+        if action == "add":
+            return et.add(conn, one("d"), one("event_id"), one("title"), one("note"))
+        if action == "del":
+            conn.execute("DELETE FROM event_log WHERE id=?", (one("id") or 0,))
+            conn.commit()
+            return True, "기록을 지웠어요."
+        if action == "px":
+            import bill_watch
+            codes = [c.strip() for c in one("codes").split(",") if re.fullmatch(r"\d{6}", c.strip())][:12]
+            if not codes:
+                return False, "받을 종목이 없어요."
+            ok_n, bad = 0, []
+            for code in codes:
+                try:
+                    bill_watch.ensure_stock(conn, code, "")
+                    bill_watch.refresh_prices(conn, code, force=True)
+                    ok_n += 1
+                except Exception as e:
+                    bad.append(f"{code}({type(e).__name__})")
+            return ok_n > 0, f"{ok_n}종목 주가를 받았어요" + (f" · 실패 {', '.join(bad)}" if bad else "")
+        return False, "알 수 없는 동작이에요."
+    except Exception as e:
+        return False, f"{type(e).__name__}: {str(e)[:120]}"
+    finally:
+        conn.close()
+
+
 def legis_action(action, form):
     """입법 영향 탭·법안 상세의 버튼들: 관심 종목 추가·삭제·가져오기, 후보 제외·추가·되돌리기. (성공 여부, 한 줄 안내)"""
     import legis
@@ -1823,7 +1859,7 @@ def cmd_web(args):
                     update_info=update_info, check_update=check_update, start_update=start_update,
                     backup_list=backup_list, backup_busy=backup_busy, backup_start=backup_start,
                     backup_file=backup_file, krx_key=krx_key_now, save_krx_key=save_krx_key,
-                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, legstudy_run=legstudy_run, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
+                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, event_action=event_action, legstudy_run=legstudy_run, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
     serve(results_db(), host=args.host, port=args.port, child_env=child_env,
           get_key=lambda: read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", ""),
           save_key=save_key, settings_api=settings_api)

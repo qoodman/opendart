@@ -2770,6 +2770,89 @@ def study_amp_card(res, meta):
             + t4 + '</div>')
 
 
+def _ev_react_table(rs):
+    """종목별 반응 표 + 평균 줄"""
+    import event_themes as et
+    f = lambda v: '<td class="muted">-</td>' if v is None else f'<td class="{"up" if v > 0 else "down" if v < 0 else ""}">{v:+.1f}</td>'
+    trs = ""
+    for x in rs:
+        r = x["r"]
+        if not x["has_prices"]:
+            trs += f'<tr><td>{escape(x["name"])}</td><td colspan="5" class="muted">주가를 아직 못 받았어요</td></tr>'
+        elif not r:
+            trs += f'<tr><td>{escape(x["name"])}</td><td colspan="5" class="muted">이 날짜 전후 주가가 부족해요</td></tr>'
+        else:
+            trs += f'<tr><td><a href="{naver_link(x["code"])}" target="_blank" rel="noopener noreferrer">{escape(x["name"])}</a></td>{f(r.get("ab5pre"))}{f(r.get("ab1"))}{f(r.get("ab5"))}{f(r.get("ab20"))}{f(r.get("since"))}</tr>'
+    sm = et.summarize(rs)
+    if sm:
+        cells = "".join((f'<td><b>{sm[k]["mean"]:+.1f}</b><br><span class="muted" style="font-size:11px">중앙 {sm[k]["med"]:+.1f} · 플러스 {sm[k]["up"]:.0%}</span></td>' if k in sm else '<td class="muted">-</td>')
+                        for k in ("ab5pre", "ab1", "ab5", "ab20", "since"))
+        trs += f'<tr style="background:var(--chip)"><td><b>평균 ({max(v["n"] for v in sm.values())}종목)</b></td>{cells}</tr>'
+    return ('<div class="scroll"><table><tr><th>종목</th><th>사전 5일</th><th>이후 1일</th><th>5일</th><th>20일</th><th>현재까지</th></tr>' + trs + '</table></div>'
+            '<div class="muted" style="font-size:11px">지수 대비 초과수익(%p). 기준은 이벤트 직전 종가, 사전은 이벤트 5거래일 전부터.</div>')
+
+
+def view_events(conn, q):
+    """아이디어 → 이벤트 테마: 이벤트 종류별 테마·종목 사전, 날짜별 기록과 주가 반응"""
+    import event_themes as et
+    import theme_map
+    data = theme_map.load(conn)
+    msg = q.get("msg", "")
+    flash = f'<div class="card {"warn" if msg.startswith("✖") else ""}">{escape(msg)}</div>' if msg else ""
+    intro = ('<div class="card"><b>이벤트 테마</b><div class="muted" style="font-size:13px">\'한중 FTA 소식에 엔터주가 올랐다\' 같은 외부 이벤트를 종류별로 정리하고, '
+             '그 종류가 닿는 테마·업종의 종목과 <b>날짜별 주가 반응</b>을 모아 둬요. 테마 연결과 호재/악재 방향은 사람이 쓴 사전이라 가설이고, '
+             '진짜 반응은 아래 <b>기록</b>에 날짜를 넣어 직접 확인해요 (선반영·같은 날 다른 소식·시장 전체 움직임이 섞여요). 투자 권유가 아니에요.</div></div>')
+    if not data["테마"]:
+        return page("이벤트 테마", flash + intro + '<div class="card muted">테마 자료가 아직 없어요. 설정에서 테마 받기를 먼저 해 주세요.</div>')
+    opts = "".join(f'<option value="{e["id"]}">{escape(e["cat"])} · {escape(e["name"])}</option>' for e in et.EVENTS)
+    import datetime as _dt
+    addf = ('<div class="card"><b>이벤트 기록 추가</b><form method="post" action="/events/add" class="filters" style="margin-top:6px">'
+            f'<select name="event_id">{opts}</select> <input name="d" value="{_dt.date.today().isoformat()}" size="10" title="이벤트 날짜(장 마감 후 소식이면 다음 거래일)"> '
+            '<input name="title" placeholder="제목 (예: 한중 FTA 2단계 타결)" size="30"> <input name="note" placeholder="메모(선택)" size="24"><button>추가</button></form>'
+            '<div class="muted" style="font-size:12px">날짜는 소식이 시장에 반영된 날(장 마감 뒤라면 다음 거래일)로 넣어요. 기준가는 그 날짜 직전 종가예요.</div>'
+            + "".join(f'<form method="post" action="/events/add" style="display:inline"><input type="hidden" name="event_id" value="{a}"><input type="hidden" name="d" value="{d}">'
+                      f'<input type="hidden" name="title" value="{escape(t)}"><input type="hidden" name="note" value="{escape(n)}"><button class="chip" style="cursor:pointer">+ {d} {escape(t)}</button></form> '
+                      for a, d, t, n in et.SUGGEST) + '</div>')
+    logs = et.log_rows(conn)
+    body = ""
+    for lr in logs:
+        ev = et.EVENT_BY_ID.get(lr["event_id"])
+        if not ev:
+            continue
+        mem = et.members(ev, data, top=12)
+        rs = et.reactions(conn, lr["d"], [(c, n) for c, n, _, _ in mem])
+        need = [x["code"] for x in rs if not x["has_prices"]]
+        pxb = ('<form method="post" action="/events/px" class="filters" style="margin:6px 0 0">'
+               f'<input type="hidden" name="codes" value="{",".join(x["code"] for x in rs)}"><button>주가 받기 ({len(need)}종목 없음)</button></form>') if need else ""
+        body += (f'<div class="card"><div style="display:flex;justify-content:space-between;gap:8px"><div><b>{escape(lr["d"])} · {escape(lr["title"])}</b> '
+                 f'<span class="chip">{escape(ev["cat"])}</span> <span class="chip {"up" if ev["dir"] == "호재" else "down" if ev["dir"] == "악재" else ""}">{escape(ev["dir"])} 가설</span>'
+                 + (f'<div class="muted" style="font-size:12px">{escape(lr["note"])}</div>' if lr["note"] else "") +
+                 f'</div><form method="post" action="/events/del"><input type="hidden" name="id" value="{lr["id"]}"><button class="chip" style="cursor:pointer">삭제</button></form></div>'
+                 f'<div class="muted" style="font-size:12px;margin:4px 0">점수 상위 {len(rs)}종목 (테마: {escape(", ".join(dict.fromkeys(w for m in mem for w in m[3][:1])))})</div>'
+                 + _ev_react_table(rs) + pxb + '</div>')
+    if not logs:
+        body = '<div class="card muted">아직 기록이 없어요. 위에서 오늘의 이벤트(또는 아래 예시)를 추가하면 연결 종목의 주가 반응이 나와요.</div>'
+    cats = {}
+    for ev in et.EVENTS:
+        cats.setdefault(ev["cat"], []).append(ev)
+    cat_html = ""
+    for cat, evs in cats.items():
+        items = ""
+        for ev in evs:
+            gs = et.groups(ev, data)
+            nm = data.get("이름", {})
+            mem = []
+            gl = "".join(f'<tr><td>{escape(k)}</td><td>{escape(n)}</td><td>{"주요" if r == "main" else "보조"}</td><td>{len(c)}</td>'
+                         f'<td style="font-size:12px">' + " · ".join(f'<a href="{naver_link(x)}" target="_blank" rel="noopener noreferrer">{escape(nm.get(x, x))}</a>' for x in c[:60]) + (f' … 외 {len(c) - 60}' if len(c) > 60 else "") + '</td></tr>' for k, n, r, c in gs)
+            items += (f'<details style="margin:8px 0"><summary><b>{escape(ev["name"])}</b> <span class="chip {"up" if ev["dir"] == "호재" else "down" if ev["dir"] == "악재" else ""}">{escape(ev["dir"])}</span></summary>'
+                      f'<div style="font-size:13px;margin:4px 0">{escape(ev["why"])}</div><div class="muted" style="font-size:12px">⚠ {escape(ev["note"])}</div>'
+                      + (f'<div class="scroll"><table><tr><th>종류</th><th>테마·업종</th><th>역할</th><th>종목 수</th><th>종목</th></tr>{gl}</table></div>' if gs else '<div class="muted">지금 네이버 테마 목록에 맞는 테마가 없어요.</div>')
+                      + (f'<div style="font-size:13px;margin-top:4px"><b>점수 상위</b> ' + " · ".join(f'<a href="{naver_link(c)}" target="_blank" rel="noopener noreferrer">{escape(n)}</a>' for c, n, _, _ in mem) + '</div>' if mem else "")
+                      + '</details>')
+        cat_html += f'<div class="card"><b>{escape(cat)}</b>{items}</div>'
+    return page("이벤트 테마", flash + intro + addf + body + '<h3 style="margin:14px 0 4px">이벤트 사전</h3>' + cat_html)
+
+
 def view_legstudy(conn, q):
     """아이디어 → 입법 주가 분석: 과거 법안의 단계 날짜 전후로, 연결된 기업의 주가가 지수보다 얼마나 더 움직였나 (이벤트 스터디)"""
     import bill_history
@@ -3220,12 +3303,12 @@ IDEA_TABS = {"overall": "종합", "mine": "내 종목 점수", "cheap": "기관 
              "rank": "종목 순위", "score": "점수표 (오일전문가)", "perf": "운용사 성적표",
              "lynch": "피터 린치", "buffett": "워렌 버핏",
              "graham": "벤저민 그레이엄", "magic": "마법공식", "fscore": "F-스코어", "momentum": "모멘텀",
-             "legis": "입법 영향 기업", "legstudy": "입법 주가 분석"}
-IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "legis", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf", "legstudy"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
+             "legis": "입법 영향 기업", "legstudy": "입법 주가 분석", "events": "이벤트 테마"}
+IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "legis", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf", "legstudy", "events"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
 
 
 IDEA_SECTIONS = [("점수", ["overall", "mine"]), ("투자 방법", ["lynch", "buffett", "graham", "magic", "fscore", "momentum"]),
-                 ("종목 찾기", ["cheap", "cluster", "super", "legis", "rank"]), ("평가·성적", ["score", "perf", "legstudy"])]
+                 ("종목 찾기", ["cheap", "cluster", "super", "legis", "events", "rank"]), ("평가·성적", ["score", "perf", "legstudy"])]
 
 
 def idea_tab_html(active, link=None):
@@ -3656,6 +3739,12 @@ def view_ideas(conn, q):
         q = {**q, "t": "overall"}
     if q.get("t") == "mine":
         return view_mine(conn, q)
+    if q.get("t") == "events":
+        _CTX.pre = idea_tabs_row("events")
+        try:
+            return view_events(conn, q)
+        finally:
+            _CTX.pre = ""
     if q.get("t") == "legstudy":
         _CTX.pre = idea_tabs_row("legstudy")
         try:
@@ -5652,6 +5741,15 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 S = settings()
                 ok, why = S["legstudy_run"]() if "legstudy_run" in S else (False, "이 서버 버전은 지원하지 않아요")
                 return self._redirect("/ideas?" + urlencode({"t": "legstudy", "msg": ("✔ " if ok else "✖ ") + why}))
+            if path.startswith("/events/") and settings_api:
+                act = path[len("/events/"):]
+                if act not in ("add", "del", "px"):
+                    return self._redirect("/ideas?t=events")
+                n = min(int(self.headers.get("Content-Length") or 0), 8192)
+                form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore")).items()}
+                S = settings()
+                ok, why = S["event_action"](act, form) if "event_action" in S else (False, "이 서버 버전은 지원하지 않아요")
+                return self._redirect("/ideas?" + urlencode({"t": "events", "msg": ("✔ " if ok else "✖ ") + why}))
             if path.startswith("/legis/") and path != "/legis/prepare" and settings_api:
                 act = path[len("/legis/"):]
                 if act not in ("watch_add", "watch_del", "watch_import", "fb_no", "fb_yes", "fb_del", "px_bill"):
