@@ -31,7 +31,10 @@ except Exception:                      # pandas가 이미 필요해서 보통 �
 
 PRE, POST = 20, 20                    # 창: D-20 … D+20
 STAGES = (("발의", "propose_dt"), ("소관위 회부", "committee_dt"), ("소관위 상정", "cmt_present_dt"),
-          ("소관위 처리", "cmt_proc_dt"), ("법사위 처리", "law_proc_dt"), ("본회의 처리", "proc_dt"))
+          ("소관위 처리", "cmt_proc_dt"), ("법사위 처리", "law_proc_dt"), ("본회의 처리", "proc_dt"),
+          ("공포", "promul_dt"), ("시행", "effective_dt"))
+MIN_NOTICE_DAYS = 14               # '시행' 이벤트는 공포 뒤 이만큼 지나서 시행되는 것만 (즉시 시행은 사전에 알려진 시행일이 아니라서 뺌)
+STEPS = ("과거 법안 받기", "공포·시행일 확인 (법제처)", "법안 → 기업 연결", "종목 주가 받기", "분석 계산")
 MIN_SCORE = 3.0                       # 이 점수 이상인 후보만 이벤트로 (연결이 느슨한 것 제외)
 PX_START = "20150101"
 HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://m.stock.naver.com/"}
@@ -39,6 +42,8 @@ PRICE_URL = "https://api.stock.naver.com/chart/domestic/item/{code}/day"
 
 
 def ensure(conn):
+    import bill_history
+    bill_history.ensure(conn)
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS hist_map (bill_key TEXT, code TEXT, name TEXT, score REAL, tier TEXT, concept TEXT, PRIMARY KEY (bill_key, code));
     CREATE TABLE IF NOT EXISTS study_px (code TEXT, d TEXT, close REAL, PRIMARY KEY (code, d));
@@ -94,6 +99,54 @@ def map_bills(db_path, log=print, progress=None):
         conn.commit()
         log(f"법안→기업 연결: 법안 {n_bills}건 중 연결 {kept}쌍")
         return {"법안": n_bills, "연결": kept}
+    finally:
+        conn.close()
+
+
+# ---------------- 1.5) 공포일·시행일 (법제처 연혁) ----------------
+def find_promulgations(db_path, law_oc, log=print, progress=None, session=None):
+    """통과한 과거 법안의 법을 법제처 연혁에서 찾아, 의결 뒤 90일 안의 가장 이른 공포일·시행일을 hist_bills에 적음.
+    법 이름마다 한 번만 조회하고(연혁은 법제처 연혁 캐시에 저장, 30일), 이어받기 가능 → {법 수, 공포 확인, 시행 확인}"""
+    import legis as lg
+    import stock_policy as sp
+    if not law_oc:
+        raise RuntimeError("법제처 키(LAW_OC)가 없어요 — 공포·시행 단계는 이 키가 있어야 분석돼요 (다른 단계는 계속 분석해요)")
+    conn = sqlite3.connect(db_path)
+    try:
+        ensure(conn)
+        lg.ensure(conn)
+        api = sp.Client("", law_oc, "")
+        rows = conn.execute("SELECT key, name, proc_dt, proc_result FROM hist_bills WHERE proc_dt != '' AND (promul_dt IS NULL OR promul_dt = '')").fetchall()
+        rows = [r for r in rows if outcome(r[3]) == "통과"]
+        by_law = {}
+        for key, name, proc_dt, _ in rows:
+            law = lg.law_name(name)
+            if law:
+                by_law.setdefault(law, []).append((key, proc_dt))
+        n_law = n_p = n_e = fail = 0
+        for i, (law, items) in enumerate(by_law.items()):
+            try:
+                vs = lg.fetch_versions(conn, api, law, max_age_days=30)
+            except Exception as e:
+                fail += 1
+                if fail <= 3:
+                    log(f"연혁 {law[:14]} 실패: {type(e).__name__}")
+                continue
+            n_law += 1
+            for key, proc_dt in items:
+                v = lg.pick_version(vs, proc_dt)
+                if v:
+                    conn.execute("UPDATE hist_bills SET promul_dt=?, effective_dt=? WHERE key=?", (v["promulgated"], v.get("effective") or "", key))
+                    n_p += 1
+                    n_e += 1 if v.get("effective") else 0
+            if i % 20 == 0:
+                conn.commit()
+                if progress:
+                    progress(f"{i + 1}/{len(by_law)}법")
+            time.sleep(0.3)
+        conn.commit()
+        log(f"공포·시행일: 법 {n_law}개 조회 · 공포 {n_p}건 · 시행 {n_e}건 (실패 {fail})")
+        return {"법": len(by_law), "조회": n_law, "공포": n_p, "시행": n_e, "실패": fail}
     finally:
         conn.close()
 
@@ -243,7 +296,14 @@ def compute(db_path, log=print, B=500, seed=7, progress=None):
             code, tier, concept = row[2 + len(STAGES):]
             if code not in mk:
                 continue
+            dmap = {st_: dd for (st_, _), dd in zip(STAGES, dates)}
             for (stage, _), d in zip(STAGES, dates):
+                if stage == "시행" and d and dmap.get("공포"):          # 즉시 시행은 제외
+                    try:
+                        if (dt.date.fromisoformat(d) - dt.date.fromisoformat(dmap["공포"])).days < MIN_NOTICE_DAYS:
+                            continue
+                    except ValueError:
+                        continue
                 if d and d >= "2015-03-01":
                     ev_by_code.setdefault(code, []).append((stage, d, key, tier, outcome(res), concept))
                     n_raw += 1
@@ -377,13 +437,13 @@ def results(conn):
 
 
 # ---------------- 한 번에 돌리기 (화면 버튼 → 별도 프로세스) ----------------
-def run_all(db_path, assembly_key, status_path, log=print):
+def run_all(db_path, assembly_key, status_path, log=print, law_oc=""):
     """과거 법안 받기 → 법안·기업 연결 → 주가 받기 → 이벤트 스터디 계산을 차례로. 단계마다 진행·오류를 status_path(JSON)에 적음.
     각 단계는 따로 try 해서 한 단계가 실패해도 이유를 화면에 보여 주고, 앞 단계 결과가 있으면 다음 단계는 계속 시도해요."""
     import os
     import bill_history
     import stock_policy as sp
-    names = ["과거 법안 받기", "법안 → 기업 연결", "종목 주가 받기", "분석 계산"]
+    names = list(STEPS)
     steps = [dict(name=n, state="wait", msg="") for n in names]
     st = dict(running=True, pid=os.getpid(), started=time.strftime("%Y-%m-%d %H:%M:%S"), finished="", steps=steps)
     last = {"t": 0.0}
@@ -423,9 +483,10 @@ def run_all(db_path, assembly_key, status_path, log=print):
             raise RuntimeError("과거 법안을 한 건도 못 받았어요 — 설정 → 법안·종목 확인의 '과거 국회 법안' 줄을 확인해 주세요")
         return r
     run(0, hist)
-    run(1, lambda p: map_bills(db_path, log=log, progress=p))
-    run(2, lambda p: fetch_prices(db_path, log=log, progress=p))
-    run(3, lambda p: compute(db_path, log=log, progress=p))
+    run(1, lambda p: find_promulgations(db_path, law_oc, log=log, progress=p))
+    run(2, lambda p: map_bills(db_path, log=log, progress=p))
+    run(3, lambda p: fetch_prices(db_path, log=log, progress=p))
+    run(4, lambda p: compute(db_path, log=log, progress=p))
     st["running"] = False
     st["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
     save()

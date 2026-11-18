@@ -206,8 +206,8 @@ class Client:
             end = start - dt.timedelta(days=1)
         return out
 
-    def laws(self, name):
-        r = self._get(LAW_URL, {"OC": self.law_oc, "target": "law", "type": "JSON", "query": name, "display": 20})
+    def _law_rows(self, params):
+        r = self._get(LAW_URL, params)
         try:
             data = r.json()
         except ValueError as e:
@@ -230,8 +230,30 @@ class Client:
             g = lambda *ks: next((str(row[k]).strip() for k in ks if row.get(k) not in (None, "")), "")  # noqa: E731
             out.append({"name": g("법령명한글", "법령명"), "promulgated": _norm_date(g("공포일자")),
                         "effective": _norm_date(g("시행일자")), "kind": g("제개정구분명", "제개정구분"),
-                        "org": g("소관부처명")})
+                        "org": g("소관부처명"), "status": g("현행연혁코드")})
         return out
+
+    def laws(self, name):
+        """현행 법령 목록(법 하나에 현행 버전 하나). 공포·시행 연혁이 필요하면 law_versions"""
+        return self._law_rows({"OC": self.law_oc, "target": "law", "type": "JSON", "query": name, "display": 20})
+
+    def law_versions(self, name):
+        """법령 연혁: 공포일·시행일이 다른 모든 버전(연혁·현행·시행 예정). 시행일 법령 검색(eflaw)을 먼저 쓰고,
+        연혁이 안 받아지면(응답이 비거나 한 건뿐) 현행 목록으로 대신해요. → [{name, promulgated, effective, kind, status}]"""
+        rows = []
+        for extra in ({"nw": "1,2,3"}, {}):
+            try:
+                rows = self._law_rows({"OC": self.law_oc, "target": "eflaw", "type": "JSON", "query": name, "display": 100, **extra})
+            except (requests.exceptions.RequestException, ValueError):
+                rows = []
+            if rows:
+                break
+        key = re.sub(r"\s", "", name)
+        rows = [r for r in rows if re.sub(r"\s", "", r["name"]) == key and r["promulgated"]]
+        if len(rows) <= 1:                                   # 연혁 검색이 안 되면 현행 하나라도
+            rows += [r for r in self.laws(name) if re.sub(r"\s", "", r["name"]) == key and r["promulgated"]
+                     and not any(x["promulgated"] == r["promulgated"] and x["effective"] == r["effective"] for x in rows)]
+        return sorted(rows, key=lambda r: (r["promulgated"], r["effective"]))
 
     def bills_page(self, keyword="", page=1, size=100, age=None):
         """한 쪽 → (rows, 전체 건수). keyword가 비면 그 대(기본 22대) 국회 법안 전체"""

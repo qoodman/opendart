@@ -26,6 +26,11 @@ def ensure(conn):
     CREATE INDEX IF NOT EXISTS hist_bills_age ON hist_bills (age);
     CREATE TABLE IF NOT EXISTS hist_meta (key TEXT PRIMARY KEY, value TEXT);
     """)
+    for col in ("promul_dt", "effective_dt"):             # 법제처 연혁에서 찾은 공포일·시행일 (통과한 법안만)
+        try:
+            conn.execute(f"ALTER TABLE hist_bills ADD COLUMN {col} TEXT")
+        except sqlite3.OperationalError:
+            pass
 
 
 def _d(v):
@@ -78,7 +83,10 @@ def sync(db_path, api, ages=AGES, max_pages=400, log=print, progress=None, sleep
                     bid = r.get("BILL_ID") or r.get("BILL_NO")
                     if not bid:
                         continue
-                    conn.execute("INSERT OR REPLACE INTO hist_bills VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (
+                    conn.execute("INSERT INTO hist_bills (key, age, name, proposer, propose_dt, committee_dt, cmt_present_dt, cmt_proc_dt, law_proc_dt, proc_dt, proc_result, url) "
+                                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET age=excluded.age, name=excluded.name, proposer=excluded.proposer, "
+                                 "propose_dt=excluded.propose_dt, committee_dt=excluded.committee_dt, cmt_present_dt=excluded.cmt_present_dt, cmt_proc_dt=excluded.cmt_proc_dt, "
+                                 "law_proc_dt=excluded.law_proc_dt, proc_dt=excluded.proc_dt, proc_result=excluded.proc_result, url=excluded.url", (
                         f"h:{bid}", age, str(r.get("BILL_NAME") or "")[:200], str(r.get("PROPOSER") or "")[:60], _d(r.get("PROPOSE_DT")),
                         _d(r.get("COMMITTEE_DT")), _d(r.get("CMT_PRESENT_DT")), _d(r.get("CMT_PROC_DT")), _d(r.get("LAW_PROC_DT")),
                         _d(r.get("PROC_DT")), str(r.get("PROC_RESULT") or "")[:30], str(r.get("DETAIL_LINK") or "")[:300]))

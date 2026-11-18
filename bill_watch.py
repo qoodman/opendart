@@ -449,7 +449,7 @@ def candidates(conn, days=365):
     return out
 
 
-def check(assembly_key, conn=None, session=None):
+def check(assembly_key, conn=None, session=None, law_oc=""):
     """설정 → 연결 확인용: 국회 법안 검색, 법안 상세 페이지 본문 추출, 네이버 종목 정보·주가. [{op, ok, day, total, sample, note}]"""
     import stock_policy as sp
     items = []
@@ -483,6 +483,21 @@ def check(assembly_key, conn=None, session=None):
             it["note"] = f"{type(e).__name__}: {str(e)[:140]}"
     else:
         it["note"] = "열린국회정보 키가 없어요"
+    items.append(it)
+    it = dict(op="법제처 법령 연혁 (공포일·시행일 목록: 공포·시행 단계 분석용)", ok=False, day="", total=0, sample=None, note="")
+    if law_oc:
+        try:
+            vs = sp.Client("", law_oc, "").law_versions("조세특례제한법")
+            it.update(ok=len(vs) >= 2, total=len(vs), day=vs[-1]["promulgated"] if vs else "",
+                      sample={"연혁 개수": len(vs), "가장 오래된": f'공포 {vs[0]["promulgated"]} · 시행 {vs[0]["effective"] or "-"}' if vs else "-",
+                              "가장 최근": f'공포 {vs[-1]["promulgated"]} · 시행 {vs[-1]["effective"] or "-"} ({vs[-1]["kind"] or "-"})' if vs else "-"})
+            if len(vs) < 2:
+                it["note"] = ("연혁이 한 건뿐이에요 — 법제처 '시행일 법령(eflaw)' 검색이 안 되고 현행 버전만 받아졌어요. 이 경우 자주 개정되는 법은 공포일을 정확히 못 잡고, "
+                              "과거 공포·시행 분석이 비어요 (이 화면을 캡처해서 보내 주세요).")
+        except Exception as e:
+            it["note"] = f"{type(e).__name__}: {str(e)[:140]}"
+    else:
+        it["note"] = "법제처 키(LAW_OC)가 없어요 — 공포·시행 시기 확인과 공포·시행 단계 분석에 필요해요"
     items.append(it)
     it = dict(op="과거 국회 법안 (입법 주가 분석용: 20·21·22대 범위와 단계 날짜)", ok=False, day="", total=0, sample=None, note="")
     if assembly_key:

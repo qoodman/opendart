@@ -34,6 +34,8 @@ def ensure(conn):
         key TEXT PRIMARY KEY, sig TEXT, concepts TEXT, groups TEXT, stocks TEXT, n INTEGER, has_text INTEGER, computed TEXT);
     CREATE TABLE IF NOT EXISTS bill_promul (
         bill_key TEXT PRIMARY KEY, law TEXT, promulgated TEXT, effective TEXT, kind TEXT, checked TEXT);
+    CREATE TABLE IF NOT EXISTS law_versions (law TEXT, promulgated TEXT, effective TEXT, kind TEXT, fetched TEXT, PRIMARY KEY (law, promulgated, effective));
+    CREATE TABLE IF NOT EXISTS law_fetch (law TEXT PRIMARY KEY, fetched TEXT, n INTEGER);
     CREATE TABLE IF NOT EXISTS legis_watch (code TEXT PRIMARY KEY, name TEXT, added TEXT, baselined INTEGER DEFAULT 0);
     CREATE TABLE IF NOT EXISTS legis_feedback (
         scope TEXT, ref TEXT, code TEXT, name TEXT, verdict TEXT, created TEXT, PRIMARY KEY (scope, ref, code));
@@ -243,8 +245,37 @@ def fetch_texts(db_path, limit=100, log=print, days=400, sleep=0.3, fetcher=None
         conn.close()
 
 
+MAX_GAP_DAYS = 90                  # 본회의 의결 뒤 이 기간 안의 공포만 그 법안의 공포로 봄 (더 나중 개정을 잘못 잇지 않게)
+
+
+def pick_version(versions, passed):
+    """연혁 [{promulgated, effective, kind}]에서 의결일(passed) 이후 MAX_GAP_DAYS 안의 가장 이른 공포 버전. 없으면 None"""
+    try:
+        d0 = dt.date.fromisoformat(passed)
+    except (TypeError, ValueError):
+        return None
+    hi = (d0 + dt.timedelta(days=MAX_GAP_DAYS)).isoformat()
+    cands = [v for v in versions if v.get("promulgated") and passed <= v["promulgated"] <= hi]
+    return min(cands, key=lambda v: (v["promulgated"], v.get("effective") or "")) if cands else None
+
+
+def fetch_versions(conn, api, name, max_age_days=3):
+    """법 하나의 연혁을 법제처에서 받아 law_versions에 저장(며칠 동안은 다시 받지 않음) → [{promulgated, effective, kind}]"""
+    ensure(conn)
+    row = conn.execute("SELECT fetched FROM law_fetch WHERE law=?", (name,)).fetchone()
+    today = dt.date.today()
+    if not row or row[0] < (today - dt.timedelta(days=max_age_days)).isoformat():
+        vs = api.law_versions(name)
+        for v in vs:
+            conn.execute("INSERT OR REPLACE INTO law_versions VALUES (?,?,?,?,?)", (name, v["promulgated"], v.get("effective") or "", v.get("kind") or "", today.isoformat()))
+        conn.execute("INSERT OR REPLACE INTO law_fetch VALUES (?,?,?)", (name, today.isoformat(), len(vs)))
+        conn.commit()
+    return [dict(promulgated=p, effective=e, kind=k) for p, e, k in conn.execute(
+        "SELECT promulgated, effective, kind FROM law_versions WHERE law=? ORDER BY promulgated, effective", (name,))]
+
+
 def sync_promul(db_path, law_oc, log=print, days=150, session=None):
-    """통과한 법안의 법을 법제처에서 찾아 공포일·시행일 저장 (의결일 이후 공포가 있으면). → {확인, 공포}"""
+    """통과한 법안의 법을 법제처 연혁에서 찾아 공포일·시행일 저장. 의결일 뒤 90일 안의 가장 이른 공포만 그 법안의 공포로 봄. → {확인, 공포}"""
     import stock_policy as sp
     if not law_oc:
         return {"건너뜀": "법제처 키 없음"}
@@ -266,14 +297,12 @@ def sync_promul(db_path, law_oc, log=print, days=150, session=None):
             if not name or not passed:
                 continue
             try:
-                laws = api.laws(name)
+                vs = fetch_versions(conn, api, name)
             except Exception as e:
                 log(f"공포일 확인 실패 ({name[:14]}): {type(e).__name__}")
                 continue
             checked += 1
-            norm = lambda x: re.sub(r"\s", "", x or "")
-            cands = sorted((v for v in laws if norm(v.get("name")) == norm(name) and (v.get("promulgated") or "") >= passed), key=lambda v: v["promulgated"])
-            v = cands[0] if cands else None
+            v = pick_version(vs, passed)
             if v:
                 found += 1
             conn.execute("INSERT OR REPLACE INTO bill_promul VALUES (?,?,?,?,?,?)", (
@@ -639,7 +668,14 @@ def watch_alerts(db_path, log=print):
                       (f"stage:{r['key']}:{code}:{r['stage']}", f"[{r['stage_label'] or '발의'}] {wname} ← {r['name'][:42]}")]
                 if pm["kind"] == "done":
                     ks.append((f"prom:{r['key']}:{code}:done", f"[공포 확정 {pm['date']}] {wname} ← {r['name'][:42]}" + (f" (시행 {pm['effective']})" if pm["effective"] else "")))
-                elif pm["kind"] == "est" and pm["date"]:
+                if pm["kind"] == "done" and pm.get("effective"):              # 시행이 7일 안으로 다가오면 한 번 더
+                    try:
+                        left = (dt.date.fromisoformat(pm["effective"]) - dt.date.today()).days
+                    except ValueError:
+                        left = -1
+                    if 0 <= left <= 7:
+                        ks.append((f"eff:{r['key']}:{code}:{pm['effective']}", f"[시행 임박 {pm['effective']} (D-{left})] {wname} ← {r['name'][:42]}"))
+                if pm["kind"] == "est" and pm["date"]:
                     ks.append((f"prom:{r['key']}:{code}:est", f"[공포 예상 {pm['date'][5:]}경] {wname} ← {r['name'][:42]}"))
                 for k, m in ks:
                     if k not in done:
@@ -706,3 +742,81 @@ def for_stock(conn, code, limit=6):
                         score=hit[2], evidence=hit[3], summary=summary_line(txt), nature=nature_hint(title, txt), has_text=bool(txt)))
     out.sort(key=lambda r: (r["stage"], r["last"], r["score"]), reverse=True)
     return out[:limit]
+
+
+# ---------------- 입법 과정별 주가 변화 (법안 하나) ----------------
+_STAGE_PREFIX = (("발의", "발의"), ("소관위 회부", "소관위 회부"), ("소관위 상정", "소관위 상정"), ("소관위 처리", "소관위 처리"),
+                 ("법사위 처리", "법사위 처리"), ("본회의 처리", "본회의 처리"))
+
+
+def stage_events(conn, key, today=None):
+    """이 법안의 입법 단계 날짜 + 공포 + 시행 → [dict(date, label, kind('stage'|'promul'|'effective'), future(bool), est(bool))] 날짜순.
+    공포는 법제처에서 확인된 날짜가 있으면 확정, 통과했지만 아직이면 '예상'(의결+2주, 주가 계산 없음). 시행일은 공포가 확인됐을 때만 알 수 있어요."""
+    today = (today or dt.date.today()).isoformat()
+    out = []
+    seen = set()
+    for d, st in _q(conn, "SELECT date, stage FROM bill_track WHERE bill_key=? ORDER BY date", (key,)):
+        lab = next((name for pre, name in _STAGE_PREFIX if st.startswith(pre)), st)
+        if (lab, d) in seen:
+            continue
+        seen.add((lab, d))
+        out.append(dict(date=d, label=lab, kind="stage", future=d > today, est=False))
+    pm = _q(conn, "SELECT promulgated, effective FROM bill_promul WHERE bill_key=?", (key,))
+    if pm and pm[0][0]:
+        out.append(dict(date=pm[0][0], label="공포", kind="promul", future=pm[0][0] > today, est=False))
+        eff = pm[0][1]
+        if eff:
+            out.append(dict(date=eff, label="시행", kind="effective", future=eff > today, est=False))
+    out.sort(key=lambda e: (e["date"], {"stage": 0, "promul": 1, "effective": 2}[e["kind"]]))
+    return out
+
+
+def price_series(conn, code):
+    """종목 일별 종가 [(날짜, 종가)]: 입법 주가 분석용(study_px, 2015~) 우선, 없으면 법안 감시용(bill_px)"""
+    for tbl in ("study_px", "bill_px"):
+        rows = _q(conn, f"SELECT d, close FROM {tbl} WHERE code=? ORDER BY d", (code,))
+        if len(rows) >= 30:
+            return [(r[0], r[1]) for r in rows]
+    return []
+
+
+def market_of(conn, code):
+    for tbl in ("bill_stocks", "study_stock"):
+        r = _q(conn, f"SELECT market FROM {tbl} WHERE code=?", (code,))
+        if r and r[0][0]:
+            return r[0][0]
+    return ""
+
+
+def reaction_ext(stock_pts, index_pts, date):
+    """bill_watch.reaction(선반영 5일·이후 1/5/20일, 지수 대비 %p)에 '단계 직전 종가 이후 현재까지(since)'를 더함. 계산 못 하면 None"""
+    import bill_watch
+    r = bill_watch.reaction(stock_pts, index_pts, date)
+    if not r:
+        return None
+    t = next((i for i, (d, _) in enumerate(stock_pts) if d >= date), None)
+    if t is not None and t >= 1:
+        base, last = stock_pts[t - 1][1], stock_pts[-1][1]
+        ib, il = bill_watch._idx_on_or_before(index_pts, stock_pts[t - 1][0]), bill_watch._idx_on_or_before(index_pts, stock_pts[-1][0])
+        r["since"] = ((last / base - 1) - (il / ib - 1)) * 100 if base and ib and il else None
+        r["since_n"] = len(stock_pts) - 1 - t + 1
+    else:
+        r["since"], r["since_n"] = None, 0
+    return r
+
+
+def bill_stage_prices(conn, key, stocks, today=None):
+    """법안 하나 × 종목 여럿의 입법 과정별 주가 변화. stocks=[(코드, 이름)] → [dict(code, name, has_prices, rows=[dict(event, reaction|None)])]"""
+    import stock_market
+    events = stage_events(conn, key, today)
+    out = []
+    for code, name in stocks:
+        px = price_series(conn, code)
+        mk = market_of(conn, code)
+        idx = list(stock_market.series(conn, "idx:KOSDAQ" if mk == "KOSDAQ" else "idx:KOSPI"))
+        rows = []
+        for e in events:
+            react = None if e["future"] or not px else reaction_ext(px, idx, e["date"])
+            rows.append(dict(event=e, reaction=react))
+        out.append(dict(code=code, name=name, has_prices=bool(px), last_price_date=px[-1][0] if px else "", market=mk or "KOSPI", rows=rows))
+    return out

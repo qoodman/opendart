@@ -806,6 +806,20 @@ def legis_action(action, form):
                 n += cur.rowcount
             conn.commit()
             return True, f"'내 종목 점수'와 법안 감시 종목에서 {n}개를 관심 종목으로 가져왔어요." if n else "새로 가져올 종목이 없어요 (내 종목 점수에서 종목을 평가하면 여기로 가져올 수 있어요)."
+        if action == "px_bill":
+            import bill_watch
+            codes = [c.strip() for c in one("codes").split(",") if c.strip()][:8]
+            if not codes:
+                return False, "받을 종목이 없어요."
+            ok_n, bad = 0, []
+            for code in codes:
+                try:
+                    bill_watch.ensure_stock(conn, code, "")
+                    bill_watch.refresh_prices(conn, code, force=True)
+                    ok_n += 1
+                except Exception as e:
+                    bad.append(f"{code}({type(e).__name__})")
+            return (ok_n > 0), f"{ok_n}종목 주가를 받았어요" + (f" · 실패 {', '.join(bad)}" if bad else "")
         if action in ("fb_no", "fb_yes", "fb_del"):
             scope, ref = one("scope"), one("ref")
             if scope not in ("concept", "bill") or not ref:
@@ -860,7 +874,7 @@ def legstudy_run():
     threading.Thread(target=proc.wait, daemon=True).start()
     try:
         status.write_text(json.dumps({"running": True, "pid": proc.pid, "started": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "finished": "",
-                                      "steps": [{"name": n, "state": "wait", "msg": ""} for n in ("과거 법안 받기", "법안 → 기업 연결", "종목 주가 받기", "분석 계산")]},
+                                      "steps": [{"name": n, "state": "wait", "msg": ""} for n in __import__("legis_study").STEPS]},
                                      ensure_ascii=False), encoding="utf-8")
     except OSError:
         pass
@@ -870,7 +884,8 @@ def legstudy_run():
 def cmd_legis_study(args):
     """(서버 내부용) legstudy_run()이 띄우는 별도 프로세스"""
     import legis_study
-    legis_study.run_all(str(results_db()), env_shared("ASSEMBLY_API_KEY"), str(data_dir() / "legstudy_status.json"), log=lambda m: print(m, flush=True))
+    legis_study.run_all(str(results_db()), env_shared("ASSEMBLY_API_KEY"), str(data_dir() / "legstudy_status.json"), log=lambda m: print(m, flush=True),
+                        law_oc=env_shared("LAW_OC"))
     return 0
 
 
@@ -1756,7 +1771,7 @@ def ext_check(src):
         import bill_watch
         conn = sqlite3.connect(results_db())
         try:
-            return {"src": "bills", "items": bill_watch.check(env_shared("ASSEMBLY_API_KEY"), conn)}
+            return {"src": "bills", "items": bill_watch.check(env_shared("ASSEMBLY_API_KEY"), conn, law_oc=env_shared("LAW_OC"))}
         finally:
             conn.close()
     if src == "policy":

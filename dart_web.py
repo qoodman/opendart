@@ -2056,6 +2056,76 @@ def _bills_tabs(t):
         for k, v in (("list", "법안 조회"), ("find", "내용으로 기업 찾기"), ("watch", "내 종목 감시"))) + '</div>'
 
 
+def _ab_td(v, raw=False):
+    if v is None:
+        return '<td class="muted">-</td>'
+    return f'<td><b class="{"up" if v > 0 else "down" if v < 0 else ""}">{v:+.1f}%p</b></td>'
+
+
+def stage_prices_card(conn, key, cand, related=()):
+    """법안 상세: 입법 과정별 주가 변화. 이 법안이 지나온 단계(발의…본회의·공포·시행)마다 관심·연결·후보 종목의 지수 대비 초과수익을,
+    과거 평균('입법 주가 분석')과 나란히. cand=[(코드, 이름)] 후보 종목 (후보 수정 반영)"""
+    import legis as lg
+    import legis_study as ls
+    watch = lg.watch_list(conn)
+    linked = [(c, n) for c, n in lg._q(conn, "SELECT l.code, COALESCE(s.name, l.code) FROM bill_links l LEFT JOIN bill_stocks s ON s.code=l.code WHERE l.bill_key=?", (key,))]
+    wset = {c for c, _ in watch}
+    rel = {x[0] for x in cand} | set(related)                       # 후보 + 이 법안의 관련 테마·업종 구성 종목 전체
+    pool = [(c, n) for c, n in watch if c in rel] + linked + list(cand)
+    stocks, seen = [], set()
+    for c, n in pool:
+        if c not in seen:
+            seen.add(c)
+            stocks.append((c, n))
+        if len(stocks) >= 6:
+            break
+    if not stocks or not lg.stage_events(conn, key):
+        return ""
+    data = lg.bill_stage_prices(conn, key, stocks)
+    ref, _ = ls.results(conn)
+
+    def refcell(label):
+        p = ref.get(("단계", label))
+        if not p:
+            return '<td class="muted">-</td>'
+        v, cls = _study_verdict(p)
+        pre = "-" if p["pre"] is None else f'{p["pre"]:+.1f}'
+        p10 = "-" if p["post10"] is None else f'{p["post10"]:+.1f}'
+        return f'<td style="font-size:12px">사전 {pre} · 사후10 {p10}%<br><span class="chip {cls}" style="font-size:11px">{escape(v)}</span></td>'
+    body = ""
+    missing = []
+    for d in data:
+        head = (f'<div style="margin-top:10px"><a href="{naver_link(d["code"])}" target="_blank" rel="noopener noreferrer"><b>{"★ " if d["code"] in wset else ""}{escape(d["name"])}</b></a> '
+                f'<span class="muted" style="font-size:12px">{escape(d["code"])} · 지수: {"코스닥" if d["market"] == "KOSDAQ" else "코스피"}'
+                + (f' · 주가 기준 {escape(d["last_price_date"])}' if d["has_prices"] else "") + '</span></div>')
+        if not d["has_prices"]:
+            missing.append(d["code"])
+            body += head + '<div class="muted" style="font-size:13px">주가를 아직 못 받았어요 (아래 \'주가 받기\').</div>'
+            continue
+        trs = ""
+        for r in d["rows"]:
+            e, rc = r["event"], r["reaction"]
+            lab = f'{escape(e["label"])}<br><span class="muted" style="font-size:11px">{escape(e["date"])}' + (" · 예정" if e["future"] else "") + '</span>'
+            if e["future"]:
+                days = (dt.date.fromisoformat(e["date"]) - dt.date.today()).days
+                trs += f'<tr><td>{lab}</td><td colspan="5" class="muted">D-{days}일 뒤 (아직 주가 변화 없음)</td>{refcell(e["label"])}</tr>'
+            elif not rc:
+                trs += f'<tr><td>{lab}</td><td colspan="5" class="muted">그 날짜 앞뒤 주가가 부족해요</td>{refcell(e["label"])}</tr>'
+            else:
+                trs += (f'<tr><td>{lab}</td>{_ab_td(rc["ab5pre"])}{_ab_td(rc["ab1"])}{_ab_td(rc["ab5"])}{_ab_td(rc["ab20"])}{_ab_td(rc.get("since"))}{refcell(e["label"])}</tr>')
+        body += head + ('<div class="scroll"><table><tr><th>단계</th><th>선반영<br><span class="muted" style="font-size:11px">직전 5일</span></th><th>이후 1일</th><th>5일</th><th>20일</th>'
+                        f'<th>단계 이후<br><span class="muted" style="font-size:11px">현재까지</span></th><th>과거 평균<br><span class="muted" style="font-size:11px">참고</span></th></tr>{trs}</table></div>')
+    btn = ""
+    if missing:
+        btn = ('<form method="post" action="/legis/px_bill" class="filters" style="margin:8px 0 0">'
+               f'<input type="hidden" name="back" value="{escape(key)}"><input type="hidden" name="codes" value="{escape(",".join(missing))}">'
+               f'<button>주가 받기 ({len(missing)}종목)</button><span class="muted" style="font-size:12px">네이버에서 일별 종가를 받아요 (종목당 몇 초)</span></form>')
+    note = ('<div class="muted" style="font-size:12px;margin-top:8px">숫자는 <b>지수 대비 초과수익(%p)</b>이에요 (코스닥 종목은 코스닥, 그 외 코스피). 선반영 5일은 단계 직전 5거래일, 이후는 단계 직전 종가 대비예요. '
+            '한 법안의 몇 건은 우연·시장 전체·다른 재료의 영향이 커서 법안 때문이라고 읽으면 안 돼요. \'과거 평균\'은 입법 주가 분석(여러 법안 평균)의 같은 단계 결과예요'
+            + ('' if ref else ' — 아직 계산 전이라 비어 있어요 (아이디어 → 입법 주가 분석)') + '.</div>')
+    return f'<div class="card"><b>입법 과정별 주가 변화</b>{body}{btn}{note}</div>'
+
+
 def view_bills(conn, q):
     """시장 → 법안·종목: 법안 조회 → 영향 기업 후보 / 내용을 붙여 넣어 기업 찾기 / 내 종목 감시"""
     import bill_impact as bi
@@ -2115,6 +2185,7 @@ def view_bills(conn, q):
                 + f'<div class="muted" style="font-size:13px">{escape(date or "")} · {escape(status or "")}</div>'
                 f'<div style="margin-top:4px">{tl}</div>{lk}{text_html}{tools}</div>')
         res = ""
+        _stage_card = ""
         if not no_theme:
             import legis as _lg2
             _r = bi.analyze(conn, _lg2.bill_name(title), text, data=data)
@@ -2123,7 +2194,9 @@ def view_bills(conn, q):
             _ev = {x["code"]: x["evidence"] for x in _r["stocks"]}
             _r["stocks"] = [dict(code=c_, name=n_, score=sc_, evidence=([e_] if c_ not in _ev else _ev[c_]), groups=[]) for c_, n_, sc_, e_ in _new]
             res = _impact_html(_r, key, fb=(_rem, _add), concepts=_cn)
-        return page("법안·종목", _bills_tabs("list") + flash + warn + head + (f'<div class="card">{res}</div>' if res else "")
+            _rel = {x["code"] for x in _r["stocks"]} | {c_ for m_ in _r["members"] for c_, _n in m_["stocks"]}
+            _stage_card = stage_prices_card(conn, key, [(x[0], x[1]) for x in _new[:5]], related=_rel)
+        return page("법안·종목", _bills_tabs("list") + flash + warn + head + _stage_card + (f'<div class="card">{res}</div>' if res else "")
                     + '<div class="muted" style="font-size:12px">후보는 법안 문구와 테마·업종 이름·개념 사전을 이은 짐작이에요. 같은 법안이 기업마다 호재일 수도 악재일 수도 있어서 방향은 판단하지 않아요. '
                       '\'연결\'을 누르면 그 종목에 법안을 이어 단계별 주가 반응을 볼 수 있어요.</div>')
     # 목록
@@ -2194,9 +2267,9 @@ def view_bills(conn, q):
     return page("법안·종목", _bills_tabs("list") + flash + warn + head + body)
 
 
-LEGIS_SORTS = {"bill": (("recent", "최근 단계 변동순"), ("promul", "공포 임박순"), ("stocks", "영향 기업 많은 순"), ("stage", "진행 단계 높은 순"), ("new", "발의 최신순"), ("watch", "관심 종목 영향순")),
+LEGIS_SORTS = {"bill": (("recent", "최근 단계 변동순"), ("promul", "공포 임박순"), ("stocks", "영향 기업 많은 순"), ("stage", "진행 단계 높은 순"), ("new", "발의 최신순"), ("watch", "관심 종목 영향순"), ("eff", "시행 임박순")),
                "stock": (("cnt", "관련 법안 많은 순"), ("soon", "공포 임박순"), ("cap", "시가총액 큰 순"), ("stage", "진행 단계 높은 순"))}
-LEGIS_STAGE_FILTERS = (("", "입법 중 전체"), ("early", "소관위 심사 (1~4단계)"), ("law", "법사위 계류 (5단계)"), ("pass", "본회의 통과·공포 대기"), ("done", "공포 확인됨"))
+LEGIS_STAGE_FILTERS = (("", "입법 중 전체"), ("early", "소관위 심사 (1~4단계)"), ("law", "법사위 계류 (5단계)"), ("pass", "본회의 통과·공포 대기"), ("done", "공포 확인됨"), ("eff", "시행 예정 (공포 후 시행 전)"))
 
 
 def _legis_promul_text(pm):
@@ -2219,7 +2292,8 @@ def _legis_sort_key(sort):
         pm = r["promul"]
         return pm["date"] if pm["kind"] in ("done", "est") and pm["date"] else far
     return {"recent": lambda r: r["last"] or "", "new": lambda r: r["started"] or "", "stocks": lambda r: r["n"], "stage": lambda r: (r["stage"], r["last"] or ""),
-            "promul": promul_date, "watch": lambda r: r.get("watch", 0.0)}[sort], sort in ("recent", "new", "stocks", "stage", "watch")
+            "promul": promul_date, "watch": lambda r: r.get("watch", 0.0),
+            "eff": lambda r: (r["promul"]["effective"] if r["promul"]["kind"] == "done" and r["promul"]["effective"] >= dt.date.today().isoformat() else far)}[sort], sort in ("recent", "new", "stocks", "stage", "watch")
 
 
 def legis_prep_card(conn, diag, total_all, n_cand):
@@ -2412,6 +2486,8 @@ def view_legis(conn, q):
         if st == "pass" and not (r["kind"] == "통과" and pk != "done"):
             continue
         if st == "done" and pk != "done":
+            continue
+        if st == "eff" and not (pk == "done" and r["promul"]["effective"] and r["promul"]["effective"] >= dt.date.today().isoformat()):
             continue
         if only_cand and not r["n"]:
             continue
@@ -5468,7 +5544,7 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 return self._redirect("/ideas?" + urlencode({"t": "legstudy", "msg": ("✔ " if ok else "✖ ") + why}))
             if path.startswith("/legis/") and path != "/legis/prepare" and settings_api:
                 act = path[len("/legis/"):]
-                if act not in ("watch_add", "watch_del", "watch_import", "fb_no", "fb_yes", "fb_del"):
+                if act not in ("watch_add", "watch_del", "watch_import", "fb_no", "fb_yes", "fb_del", "px_bill"):
                     return self._redirect("/ideas?t=legis")
                 n = min(int(self.headers.get("Content-Length") or 0), 8192)
                 form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore")).items()}
