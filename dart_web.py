@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlencode, urlparse
 
-from dart_charts import CHART_CSS, CHART_JS, bar_list, net_line, price_chart, sparkline
+from dart_charts import CHART_CSS, CHART_JS, bar_list, line_chart, net_line, price_chart, sparkline
 import position_flow as pf
 from research import consensus, suspicious
 
@@ -2985,15 +2985,38 @@ def view_cycle(conn, q):
     intro = ('<div class="card"><b>투자 사이클</b><div class="muted" style="font-size:13px">시장은 오르고 내리는 순환을 반복한다는 생각을 정리한 유명한 이론들이에요. '
              '<b>지금이 몇 번째 국면인지 맞히는 도구가 아니라 생각의 틀</b>이에요. 사이클은 지나간 뒤에야 선명해지고, 같은 모양이 반복된다는 보장도 없어요. '
              '아래 설명은 이론의 요약이라 원전과 다를 수 있고, 투자 권유가 아니에요.</div></div>')
-    rows = "".join(f'<tr><td>{escape(r["label"])}</td><td><b>{escape(r["value"])}</b></td><td class="muted" style="font-size:12px">{escape(r["note"])}</td></tr>' for r in ind["rows"])
+    rows = "".join(f'<div style="border-top:1px solid var(--line);padding:6px 0"><div style="display:flex;justify-content:space-between;gap:8px"><span>{escape(r["label"])}</span><b style="text-align:right">{escape(r["value"])}</b></div>'
+                   f'<div class="muted" style="font-size:12px">{escape(r["note"])}</div></div>' for r in ind["rows"])
     cand = "".join(f'<li><b>{escape(n)}</b> — {escape(w)}</li>' for n, w in ind["candidates"])
     live = ('<div class="card"><b>지금 자료로 보는 점검표</b>'
             '<div class="muted" style="font-size:12px">앱이 받아 둔 코스피·기준금리·국고채·환율·M2로 계산했어요. 기업 실적, 거래량, 투자자 심리, 물가·성장률은 여기서 계산하지 않아요.</div>'
-            + (f'<div class="scroll"><table><tr><th>지표</th><th>값</th><th>읽는 법</th></tr>{rows}</table></div>' if rows else
+            + (f'<div style="margin-top:6px">{rows}</div>' if rows else
                '<div class="muted" style="margin-top:6px">코스피·금리 자료가 아직 부족해요 (시장·정책 데이터를 먼저 받아 주세요).</div>')
             + (f'<div style="margin-top:8px"><b style="font-size:13px">우라가미 틀로 본 후보 (금리 방향 × 주가 추세만 반영)</b><ul style="margin:4px 0;padding-left:18px;font-size:13px">{cand}</ul>'
                '<div class="muted" style="font-size:12px">실적 방향은 반영하지 않았어요. 후보일 뿐 판정이 아니에요.</div></div>' if cand else "")
             + '<div style="margin-top:6px"><a class="chip" href="/market">하락 점검 (과거 비슷하게 빠진 뒤 기록) ↗</a></div></div>')
+    yrs = {"1": 1, "3": 3, "5": 5, "0": 0}.get(q.get("cr", "3"), 3)
+    try:
+        cd = cy.chart_data(conn, yrs)
+    except Exception:
+        cd = {}
+    rchips = " ".join((f'<b class="chip" style="background:var(--accent);color:var(--bg)">{lab}</b>' if str(v) == str(q.get("cr", "3")) else f'<a class="chip" href="/ideas?t=cycle&cr={v}">{lab}</a>')
+                      for v, lab in (("1", "1년"), ("3", "3년"), ("5", "5년"), ("0", "전체")))
+
+    def gblock(title, note, html):
+        return f'<div style="margin-top:10px"><b style="font-size:13px">{title}</b><div class="muted" style="font-size:12px">{note}</div>{html}</div>'
+    graphs = ""
+    if cd.get("kospi"):
+        graphs += gblock("코스피와 200일 이동평균", "가격이 점선(200일선)을 아래로 뚫고, 점선도 꺾이면 와인스타인의 4단계에 가까워요.", line_chart(cd["kospi"]))
+        graphs += gblock("코스피 고점 대비 낙폭", "직전 250거래일 최고 종가 대비 %. 깊이와 회복 기간을 한눈에 봐요.", line_chart(cd["dd"], yfmt="{:.0f}%", zero=True, area=True, height=150))
+    if any(x["pts"] for x in cd.get("rate", [])):
+        graphs += gblock("기준금리와 국고채 금리", "금리가 오르는 중인지 내리는 중인지가 우라가미·투자 시계의 핵심 축이에요. 국고채 3년이 기준금리보다 앞서 움직이는 경우가 많아요.", line_chart(cd["rate"], yfmt="{:.2f}"))
+    if any(x["pts"] for x in cd.get("fx", [])):
+        graphs += gblock("원/달러 환율", "원화 약세(환율 상승)가 급해지면 외국인 수급과 함께 증시에 부담이 되는 경우가 많아요.", line_chart(cd["fx"]))
+    if any(x["pts"] for x in cd.get("m2", [])):
+        graphs += gblock("M2 광의통화 증가율 (전년 동월 대비)", "유동성이 늘어나는 속도예요. 둔화되면 금융장세 조건이 약해져요.", line_chart(cd["m2"], yfmt="{:.1f}%", zero=True, area=True, height=150))
+    gcard = ('<div class="card"><details open><summary style="cursor:pointer"><b>그래프</b></summary>'
+             f'<div style="margin:6px 0">{rchips}</div>{graphs or "<div class=muted>그래프로 그릴 자료가 아직 없어요.</div>"}</div></details></div>')
     tips = "".join(f'<li style="margin:6px 0"><b>{escape(t)}</b><div class="muted" style="font-size:13px">{escape(d)}</div></li>' for t, d in cy.TIPS_DOWN)
     tipc = ('<div class="card"><details open><summary style="cursor:pointer"><b>하락장에서 생각해 볼 것</b></summary>'
             '<div class="muted" style="font-size:12px;margin-top:4px">종목이나 시점을 추천하는 게 아니라, 어떤 이론을 쓰든 공통으로 나오는 점검 질문이에요.</div>'
@@ -3009,7 +3032,7 @@ def view_cycle(conn, q):
                f'<div style="margin-top:6px;font-size:13px"><b>하락장에서 읽는 법</b> {escape(t["down"])}</div>'
                f'<div class="muted" style="font-size:12px;margin-top:4px">⚠ 한계: {escape(t["limit"])}</div></details>')
     thc = ('<div class="card"><b>유명한 사이클 이론 정리</b><div class="muted" style="font-size:12px">이름을 눌러 펼쳐요.</div>' + th + '</div>')
-    return page("투자 사이클", intro + live + tipc + _fold(thc, True))
+    return page("투자 사이클", intro + live + gcard + tipc + _fold(thc, True))
 
 
 def view_legstudy(conn, q):

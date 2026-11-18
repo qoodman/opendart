@@ -177,7 +177,7 @@ def indicators(conn):
         ma_prev = sum(closes[-220:-20]) / 200
         slope = ma / ma_prev - 1
         r12 = last / closes[-252] - 1
-        price = "down" if (last < ma and slope < 0) else "up" if (last > ma and slope > 0) else "flat"
+        price = "down" if (last < ma and slope < 0) else "turn_down" if last < ma else "up" if (last > ma and slope > 0) else "flat"
         rows.append(dict(label="코스피 고점 대비 (250거래일)", value=f"{dd:+.1%}", note=f"지금 {last:,.0f} · 고점 {hi:,.0f}"))
         if last < ma and slope < 0:
             ma_note = "가격이 이평선 아래이고 이평선도 내려가는 중 — 와인스타인의 4단계(하락)에 가까워요"
@@ -215,7 +215,14 @@ def indicators(conn):
             rows.append(dict(label="M2 광의통화 증가율 (1년)", value=f"{m2[-1][1] / y0[1] - 1:+.1%}", note="유동성 증가가 둔화되면 금융장세 조건이 약해져요"))
     cands = []
     if price and rate:
-        if price == "down":
+        if price == "turn_down":
+            if rate == "up":
+                cands.append(("역금융장세 (초입)", "금리 상승 + 가격이 200일선 아래로 내려옴(200일선은 아직 상승). 긴축 속에서 주가가 먼저 꺾이는 모습이에요 — 실적이 아직 좋다면 이쪽"))
+            if rate in ("down", "flat"):
+                cands.append(("역실적장세 (초입)", "금리가 내리거나 동결인데 가격이 200일선 아래로 내려옴. 실적이 꺾이는 중이라면 이쪽"))
+            if rate == "flat":
+                cands.append(("국면 전환 구간", "금리 동결이면 3단계(천장) 뒤 하락 초입일 수도, 단순 조정일 수도 있어요"))
+        elif price == "down":
             if rate == "up":
                 cands.append(("역금융장세", "금리 상승 + 주가 하락. 실적이 아직 좋은 상태라면 이쪽"))
             if rate in ("down", "flat"):
@@ -231,3 +238,49 @@ def indicators(conn):
         else:
             cands.append(("국면 전환 구간", "주가 추세가 뚜렷하지 않아요. 바닥(1단계) 또는 천장(3단계) 근처일 수 있어요"))
     return dict(rows=rows, price=price, rate=rate, candidates=cands)
+
+
+def _down(pts, maxn=240):
+    """그래프용으로 점 수를 줄임 (마지막 점은 항상 포함)"""
+    if len(pts) <= maxn:
+        return pts
+    k = -(-len(pts) // maxn)
+    out = pts[::k]
+    if out[-1] != pts[-1]:
+        out.append(pts[-1])
+    return out
+
+
+def chart_data(conn, years=3):
+    """그래프용 자료 → dict(kospi=[...], dd=[...], rate=[...], fx=[...], m2=[...]); 각 목록은 선 정의 dict(name, pts, color, ...).
+    years=0이면 받아 둔 전체 기간"""
+    import stock_market as sm
+    iso = lambda d: d.isoformat()
+    out = {}
+    k = _pts(sm.series(conn, "idx:KOSPI"))
+    cut = (k[-1][0] - dt.timedelta(days=int(365.25 * years))) if (k and years) else None
+    if len(k) >= 30:
+        closes = [v for _, v in k]
+        ma, dd = [], []
+        for i in range(len(k)):
+            ma.append(sum(closes[i - 199:i + 1]) / 200 if i >= 199 else None)
+            hi = max(closes[max(0, i - 249):i + 1])
+            dd.append((closes[i] / hi - 1) * 100)
+        sel = [i for i, (d, _) in enumerate(k) if cut is None or d >= cut]
+        out["kospi"] = [dict(name="코스피", pts=_down([(iso(k[i][0]), closes[i]) for i in sel]), color="price"),
+                        dict(name="200일선", pts=_down([(iso(k[i][0]), ma[i]) for i in sel if ma[i] is not None]), color="s2", dash=True)]
+        out["dd"] = [dict(name="고점 대비 낙폭(%)", pts=_down([(iso(k[i][0]), dd[i]) for i in sel]), color="s2")]
+
+    def rng(pts):
+        return [(iso(d), v) for d, v in pts if cut is None or d >= cut]
+    base = _pts(sm.series(conn, "ecos:base_rate"))
+    k3, k10 = _pts(sm.series(conn, "ecos:ktb3")), _pts(sm.series(conn, "ecos:ktb10"))
+    out["rate"] = [dict(name="기준금리(%)", pts=rng(base), color="s1", step=True),
+                   dict(name="국고채 3년", pts=_down(rng(k3)), color="s3"),
+                   dict(name="국고채 10년", pts=_down(rng(k10)), color="s2", dash=True)]
+    fx = _pts(sm.series(conn, "ecos:usdkrw"))
+    out["fx"] = [dict(name="원/달러(원)", pts=_down(rng(fx)), color="s1")]
+    m2 = _pts(sm.series(conn, "ecos:m2"))
+    yoy = [(d, (v / m2[i - 12][1] - 1) * 100) for i, (d, v) in enumerate(m2) if i >= 12]
+    out["m2"] = [dict(name="M2 증가율 1년(%)", pts=rng(yoy), color="s3")]
+    return out

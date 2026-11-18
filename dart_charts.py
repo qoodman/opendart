@@ -164,3 +164,66 @@ def net_line(series):
             f'stroke-dasharray="3 3" vector-effect="non-scaling-stroke"/>'
             f'<polyline points="{" ".join(path)}" fill="none" stroke="{color}" stroke-width="1.8" '
             f'vector-effect="non-scaling-stroke" stroke-linejoin="round"/></svg>')
+
+
+def line_chart(series, yfmt="{:,.0f}", step=False, zero=False, area=False, height=190):
+    """여러 선 그래프 (서버에서 SVG로 그림, 스크립트 없음). series=[dict(name, pts=[(YYYY-MM-DD, 값)], color='s1'|'s2'|'s3'|'price', dash=False, step=False)]
+    zero=True면 0선을 그려 주고, area=True면 첫 선 아래를 칠함. 끝점 값을 선 끝에 적음. (HTML 조각 반환)"""
+    series = [s for s in series if s.get("pts")]
+    if not series:
+        return '<div class="muted">그래프로 그릴 자료가 아직 없어요.</div>'
+    W, H, ml, mr, mt, mb = 360, height, 46, 8, 10, 22
+    allx = sorted({d for s in series for d, _ in s["pts"]})
+    pos = {d: i for i, d in enumerate(allx)}
+    n = len(allx)
+    vals = [v for s in series for _, v in s["pts"]] + ([0.0] if zero else [])
+    lo, hi = min(vals), max(vals)
+    span = (hi - lo) or abs(hi) or 1.0
+    import math
+    raw = span / 4
+    mag = 10 ** math.floor(math.log10(raw))
+    stp = next(m * mag for m in (1, 2, 2.5, 5, 10) if m * mag >= raw)
+    a, b = math.floor(lo / stp) * stp, math.ceil(hi / stp) * stp
+    ticks = []
+    v = a
+    while v <= b + stp / 2:
+        ticks.append(v)
+        v += stp
+    y0, y1 = ticks[0], ticks[-1]
+
+    def X(d):
+        return ml + (pos[d] * (W - ml - mr) / (n - 1 if n > 1 else 1))
+
+    def Y(v):
+        return mt + (1 - (v - y0) / ((y1 - y0) or 1)) * (H - mt - mb)
+    out = [f'<svg viewBox="0 0 {W} {H}" style="width:100%;max-width:720px;display:block" role="img">']
+    for t in ticks:
+        out.append(f'<line x1="{ml}" x2="{W - mr}" y1="{Y(t):.1f}" y2="{Y(t):.1f}" stroke="var(--grid)" stroke-width="1"/>'
+                   f'<text x="{ml - 4}" y="{Y(t) + 4:.1f}" text-anchor="end" font-size="10" fill="var(--muted)">{escape(yfmt.format(t))}</text>')
+    if zero and y0 < 0 < y1:
+        out.append(f'<line x1="{ml}" x2="{W - mr}" y1="{Y(0):.1f}" y2="{Y(0):.1f}" stroke="var(--muted)" stroke-width="1.2"/>')
+    for i in sorted({0, (n - 1) // 2, n - 1}):
+        d = allx[i]
+        out.append(f'<text x="{X(d):.1f}" y="{H - 6}" font-size="10" fill="var(--muted)" text-anchor="{"start" if i == 0 else "end" if i == n - 1 else "middle"}">{d[2:7].replace("-", ".")}</text>')
+    for k, s in enumerate(series):
+        col = f'var(--{s.get("color", "s1")})'
+        pts = s["pts"]
+        if s.get("step", step):
+            d_ = ""
+            prev = None
+            for dd, vv in pts:
+                if prev is not None:
+                    d_ += f'L{X(dd):.1f},{Y(prev):.1f}'
+                d_ += f'{"M" if not d_ else "L"}{X(dd):.1f},{Y(vv):.1f}'
+                prev = vv
+        else:
+            d_ = "".join(f'{"M" if i == 0 else "L"}{X(dd):.1f},{Y(vv):.1f}' for i, (dd, vv) in enumerate(pts))
+        if area and k == 0:
+            base = Y(0) if (zero and y0 <= 0 <= y1) else H - mb
+            out.append(f'<path d="{d_}L{X(pts[-1][0]):.1f},{base:.1f}L{X(pts[0][0]):.1f},{base:.1f}Z" fill="{col}" opacity="0.18"/>')
+        out.append(f'<path d="{d_}" fill="none" stroke="{col}" stroke-width="{2 if k == 0 else 1.5}" stroke-linejoin="round"{" stroke-dasharray=\"4 3\"" if s.get("dash") else ""}/>')
+        ld, lv = pts[-1]
+        out.append(f'<circle cx="{X(ld):.1f}" cy="{Y(lv):.1f}" r="3" fill="{col}" stroke="var(--ring)" stroke-width="1.5"/>')
+    out.append("</svg>")
+    leg = "".join(f'<span><i class="ln" style="background:var(--{s.get("color", "s1")})"></i>{escape(s["name"])} <b>{escape(yfmt.format(s["pts"][-1][1]))}</b></span>' for s in series)
+    return f'<div class="legend">{leg}</div>' + "".join(out)
