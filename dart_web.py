@@ -1490,7 +1490,25 @@ def view_market(conn):
             + f'<div class="muted">{escape(i.reason)}</div>'
             + sparkline(i.points)
             + (f'<div class="muted" style="font-size:12px">{escape(i.note)}</div>' if i.note else "") + "</div>")
-    return page("시장", hero + "".join(cards) + presidents_card(conn))
+    return page("시장", hero + cycle_brief_card(conn) + "".join(cards) + presidents_card(conn))
+
+
+def cycle_brief_card(conn):
+    """시장 온도 화면: 투자 사이클 요약 한 줄과 바로가기 (자료가 부족하면 빈 문자열)"""
+    try:
+        import cycle_theory as cy
+        ind = cy.indicators(conn)
+        asm = cy.assess(ind)
+        syn = cy.synthesize(ind, asm)
+    except Exception:
+        return ""
+    sit = syn.get("situation")
+    if not sit:
+        return ""
+    chips = " ".join(f'<span class="chip {"up" if k == "up" else "down" if k == "down" else ""}">{cy.TONE_LABEL[k]} {len(v)}</span>' for k, v in syn["groups"].items() if v)
+    return ('<div class="card"><div class="row"><b>투자 사이클 — 여러 이론에 비춰 본 지금</b><a class="chip" href="/cycle">자세히 →</a></div>'
+            f'<div style="margin:6px 0"><span class="chip" style="font-weight:700">{escape(sit["label"])}</span> {chips}</div>'
+            f'<div class="muted" style="font-size:12px">{escape(sit["desc"])} 이론 8개가 같은 가격·금리를 보는 후보 판단이라 판정이 아니에요.</div></div>')
 
 
 def presidents_card(conn):
@@ -2994,13 +3012,13 @@ def view_cycle(conn, q):
                '<div class="muted" style="margin-top:6px">코스피·금리 자료가 아직 부족해요 (시장·정책 데이터를 먼저 받아 주세요).</div>')
             + (f'<div style="margin-top:8px"><b style="font-size:13px">우라가미 틀로 본 후보 (금리 방향 × 주가 추세만 반영)</b><ul style="margin:4px 0;padding-left:18px;font-size:13px">{cand}</ul>'
                '<div class="muted" style="font-size:12px">실적 방향은 반영하지 않았어요. 후보일 뿐 판정이 아니에요.</div></div>' if cand else "")
-            + '<div style="margin-top:6px"><a class="chip" href="/market">하락 점검 (과거 비슷하게 빠진 뒤 기록) ↗</a></div></div>')
+            + '<div style="margin-top:6px"><a class="chip" href="/diag">하락 점검 (과거 비슷하게 빠진 뒤 기록) ↗</a></div></div>')
     yrs = {"1": 1, "3": 3, "5": 5, "0": 0}.get(q.get("cr", "3"), 3)
     try:
         cd = cy.chart_data(conn, yrs)
     except Exception:
         cd = {}
-    rchips = " ".join((f'<b class="chip" style="background:var(--accent);color:var(--bg)">{lab}</b>' if str(v) == str(q.get("cr", "3")) else f'<a class="chip" href="/ideas?t=cycle&cr={v}">{lab}</a>')
+    rchips = " ".join((f'<b class="chip" style="background:var(--accent);color:var(--bg)">{lab}</b>' if str(v) == str(q.get("cr", "3")) else f'<a class="chip" href="/cycle?cr={v}">{lab}</a>')
                       for v, lab in (("1", "1년"), ("3", "3년"), ("5", "5년"), ("0", "전체")))
 
     def gblock(title, note, html):
@@ -3530,11 +3548,11 @@ IDEA_TABS = {"overall": "종합", "mine": "내 종목 점수", "cheap": "기관 
              "rank": "종목 순위", "score": "점수표 (오일전문가)", "perf": "운용사 성적표",
              "lynch": "피터 린치", "buffett": "워렌 버핏",
              "graham": "벤저민 그레이엄", "magic": "마법공식", "fscore": "F-스코어", "momentum": "모멘텀",
-             "legis": "입법 영향 기업", "legstudy": "입법 주가 분석", "events": "이벤트 테마", "cycle": "투자 사이클"}
-IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "legis", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf", "legstudy", "events", "cycle"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
+             "legis": "입법 영향 기업", "legstudy": "입법 주가 분석", "events": "이벤트 테마"}
+IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "legis", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf", "legstudy", "events"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
 
 
-IDEA_SECTIONS = [("점수", ["overall", "mine"]), ("투자 방법", ["lynch", "buffett", "graham", "magic", "fscore", "momentum", "cycle"]),
+IDEA_SECTIONS = [("점수", ["overall", "mine"]), ("투자 방법", ["lynch", "buffett", "graham", "magic", "fscore", "momentum"]),
                  ("종목 찾기", ["cheap", "cluster", "super", "legis", "events", "rank"]), ("평가·성적", ["score", "perf", "legstudy"])]
 
 
@@ -3945,7 +3963,7 @@ def perf_url(**kw):
     return "/ideas?" + urlencode({"t": "perf", **kw})
 
 
-MARKET_HUB = {"/market": "시장 온도", "/policy": "정책", "/radar": "대비 레이더", "/diag": "하락 점검", "/bills": "법안·종목", "/news": "속보", "/shorts": "공매도 리포트", "/derivs": "선물·채권", "/calendar": "달력"}
+MARKET_HUB = {"/market": "시장 온도", "/cycle": "투자 사이클", "/policy": "정책", "/radar": "대비 레이더", "/diag": "하락 점검", "/bills": "법안·종목", "/news": "속보", "/shorts": "공매도 리포트", "/derivs": "선물·채권", "/calendar": "달력"}
 
 
 REPORT_HUB = {"/": "보고서", "/new": "새 공시", "/reports": "증권사 리포트"}
@@ -3966,12 +3984,6 @@ def view_ideas(conn, q):
         q = {**q, "t": "overall"}
     if q.get("t") == "mine":
         return view_mine(conn, q)
-    if q.get("t") == "cycle":
-        _CTX.pre = idea_tabs_row("cycle")
-        try:
-            return view_cycle(conn, q)
-        finally:
-            _CTX.pre = ""
     if q.get("t") == "events":
         _CTX.pre = idea_tabs_row("events")
         try:
@@ -5759,6 +5771,10 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     body = view_investor(conn, q.get("name", ""), int(w))
                 elif url.path == "/performance":
                     return self._redirect(perf_url(**{k: v for k, v in q.items() if not k.startswith("_")}))
+                elif url.path == "/ideas" and q.get("t") == "cycle":      # 투자 사이클은 시장 묶음으로 옮겼어요 (예전 주소 호환)
+                    return self._redirect("/cycle" + (("?" + urlencode({"cr": q["cr"]})) if q.get("cr") else ""))
+                elif url.path == "/cycle":
+                    body = view_cycle(conn, q)
                 elif url.path == "/ideas":
                     body = view_ideas(conn, q)
                 elif url.path == "/ranking":
