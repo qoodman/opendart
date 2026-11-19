@@ -40,6 +40,8 @@ def ensure(conn):
     CREATE TABLE IF NOT EXISTS fin_report_try (code TEXT PRIMARY KEY, tried TEXT, note TEXT);
     CREATE INDEX IF NOT EXISTS fin_report_code ON fin_report(code);
     CREATE TABLE IF NOT EXISTS fin_pick (code TEXT PRIMARY KEY, added TEXT);
+    CREATE TABLE IF NOT EXISTS fin_account (code TEXT, year INTEGER, rcode TEXT, sj TEXT, ord INTEGER, account_id TEXT, name TEXT, cur REAL, prev REAL, cur_add REAL, prev_add REAL);
+    CREATE INDEX IF NOT EXISTS fin_account_code ON fin_account(code, year, rcode);
     """)
 
 
@@ -101,7 +103,13 @@ SPEC = [
     ("op", ("IS", "CIS"), ("dart_operatingincomeloss",), ("영업이익", "영업이익손실", "영업손익", "영업손실")),
     ("ni", ("IS", "CIS"), ("ifrs-full_profitloss",), ("당기순이익", "당기순이익손실", "분기순이익", "분기순이익손실", "반기순이익", "반기순이익손실", "연결당기순이익", "당기순손익", "분기순손익", "반기순손익")),
     ("fincost", ("IS", "CIS"), ("ifrs-full_financecosts",), ("금융원가", "금융비용", "이자비용")),
+    ("cogs", ("IS", "CIS"), ("ifrs-full_costofsales",), ("매출원가",)),
+    ("sga", ("IS", "CIS"), ("dart_totalsellinggeneralandadministrativeexpenses",), ("판매비와관리비",)),
     ("assets", ("BS",), ("ifrs-full_assets",), ("자산총계",)),
+    ("payable", ("BS",), ("dart_shorttermtradepayables", "ifrs-full_tradeandothercurrentpayables", "ifrs-full_currenttradepayables"), ("매입채무", "매입채무및기타채무", "매입채무및기타유동채무")),
+    ("intang", ("BS",), ("ifrs-full_intangibleassetsotherthangoodwill",), ("무형자산",)),
+    ("goodwill", ("BS",), ("ifrs-full_goodwill",), ("영업권",)),
+    ("ppe", ("BS",), ("ifrs-full_propertyplantandequipment",), ("유형자산",)),
     ("liab", ("BS",), ("ifrs-full_liabilities",), ("부채총계",)),
     ("equity", ("BS",), ("ifrs-full_equity",), ("자본총계",)),
     ("cur_assets", ("BS",), ("ifrs-full_currentassets",), ("유동자산",)),
@@ -209,6 +217,37 @@ def metrics(p, rcode):
         m["net_debt"] = m["borrow"] - m["cash"]
     m["rec_chg"] = _g(m["rec"], m["rec_ye"])
     m["inv_chg"] = _g(m["inv"], m["inv_ye"])
+    # 운전자본 일수: 누적 기간 일수로 환산. 연말 값은 '전년 같은 기간' 매출·매출원가로 나눠 비교하므로 근사예요
+    days = months * 30.4
+    for k in ("cogs", "sga"):
+        m[k] = g(k)
+        m[k + "_py"] = g(k, "prev_ytd")
+    for k in ("payable", "intang", "goodwill", "ppe"):
+        m[k] = g(k, "cur")
+        m[k + "_ye"] = g(k, "prev")
+    m["cogs_yoy"] = _g(m["cogs"], m["cogs_py"])
+    if m.get("inv") is not None and m.get("cogs"):
+        m["dio"] = m["inv"] / m["cogs"] * days
+    if m.get("inv_ye") is not None and m.get("cogs_py"):
+        m["dio_ye"] = m["inv_ye"] / m["cogs_py"] * days
+    if m.get("rec") is not None and m.get("rev"):
+        m["dso"] = m["rec"] / m["rev"] * days
+    if m.get("rec_ye") is not None and m.get("rev_py"):
+        m["dso_ye"] = m["rec_ye"] / m["rev_py"] * days
+    if m.get("payable") is not None and m.get("cogs"):
+        m["dpo"] = m["payable"] / m["cogs"] * days
+    if m.get("payable_ye") is not None and m.get("cogs_py"):
+        m["dpo_ye"] = m["payable_ye"] / m["cogs_py"] * days
+    if m.get("dio") is not None and m.get("dso") is not None and m.get("dpo") is not None:
+        m["ccc"] = m["dio"] + m["dso"] - m["dpo"]
+    if m.get("assets"):
+        for k in ("inv", "intang", "goodwill"):
+            if m.get(k) is not None:
+                m[k + "_of_assets"] = m[k] / m["assets"]
+    if m.get("gross") is not None and m.get("rev"):
+        m["gpm"] = m["gross"] / m["rev"]
+        if m.get("gross_py") is not None and m.get("rev_py"):
+            m["gpm_py"] = m["gross_py"] / m["rev_py"]
     return m
 
 
@@ -296,6 +335,22 @@ def score(m, financial=False):
         sig.append(("warn", f"이자보상배율 {ic:.1f}배 — 영업이익으로 이자를 겨우 감당해요"))
     if m.get("net_debt") is not None:
         sig.append(("good" if m["net_debt"] < 0 else "info", "순현금(현금성자산이 차입금보다 많음)" if m["net_debt"] < 0 else "순차입(차입금이 현금성자산보다 많음)"))
+    # 운전자본·재고 (점수 영향 없음, 신호만)
+    if m.get("dio") is not None:
+        ye = m.get("dio_ye")
+        bad = ye is not None and m["dio"] - ye >= 15 and m["dio"] >= ye * 1.2
+        good = ye is not None and ye - m["dio"] >= 15 and m["dio"] <= ye * 0.85
+        sig.append(("warn" if bad else "good" if good else "info", f"재고일수 {m['dio']:.0f}일" + ("" if ye is None else f" (직전 연말 기준 {ye:.0f}일)") + (" — 재고가 쌓이는 속도가 빨라요" if bad else " — 재고가 빨리 팔려요" if good else "")))
+    if m.get("dso") is not None and m.get("dso_ye") is not None and m["dso"] - m["dso_ye"] >= 15 and m["dso"] >= m["dso_ye"] * 1.2:
+        sig.append(("warn", f"매출채권 회수 기간이 {m['dso_ye']:.0f}일 → {m['dso']:.0f}일로 길어졌어요"))
+    if m.get("inv_chg") is not None and m.get("cogs_yoy") is not None and m["inv_chg"] - m["cogs_yoy"] >= 0.3 and m["inv_chg"] > 0.2:
+        sig.append(("warn", f"재고자산 증가({pct(m['inv_chg'])})가 매출원가 증가({pct(m['cogs_yoy'])})보다 훨씬 커요"))
+    if m.get("goodwill_of_assets") is not None and m["goodwill_of_assets"] >= 0.15:
+        sig.append(("warn", f"영업권이 자산의 {m['goodwill_of_assets']:.0%} — 인수한 사업이 부진하면 손상차손이 날 수 있어요"))
+    if m.get("intang_of_assets") is not None and m["intang_of_assets"] >= 0.25:
+        sig.append(("info", f"무형자산이 자산의 {m['intang_of_assets']:.0%}"))
+    if m.get("gpm") is not None and m.get("gpm_py") is not None and abs(m["gpm"] - m["gpm_py"]) >= 0.03:
+        sig.append(("good" if m["gpm"] > m["gpm_py"] else "warn", f"매출총이익률 {m['gpm']:.1%} (전년 같은 기간 {m['gpm_py']:.1%})"))
     # 이익의 질 (5, 감점)
     q = 5
     if m.get("rec_chg") is not None and m.get("rev_yoy") is not None and m["rec_chg"] > 0.3 and m["rec_chg"] - m["rev_yoy"] > 0.2:
@@ -326,7 +381,7 @@ def analyze_code(code, key, corp, today=None, session=None, financial=False, sle
             time.sleep(sleep)
             if rows:
                 m = metrics(parse(rows, rcode), rcode)
-                return dict(year=year, rcode=rcode, fs=fs, rcept_no=(rows[0].get("rcept_no") or ""), m=m, score=score(m, financial))
+                return dict(year=year, rcode=rcode, fs=fs, rcept_no=(rows[0].get("rcept_no") or ""), m=m, score=score(m, financial), rows=rows)
     return None
 
 
@@ -415,6 +470,11 @@ def run(db_path, key, cache_dir, limit=400, log=print, progress=None, today=None
             conn.execute("INSERT OR REPLACE INTO fin_report VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                          (code, got["year"], got["rcode"], got["fs"], got["rcept_no"], nm, json.dumps(got["m"], ensure_ascii=False), sc["total"], sc["grade"],
                           json.dumps(sc["parts"], ensure_ascii=False), json.dumps(sc["signals"], ensure_ascii=False), today.isoformat()))
+            conn.execute("DELETE FROM fin_account WHERE code=? AND year=? AND rcode=?", (code, got["year"], got["rcode"]))
+            conn.executemany("INSERT INTO fin_account VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                             [(code, got["year"], got["rcode"], r.get("sj_div") or "", int(r.get("ord") or i_), r.get("account_id") or "", (r.get("account_nm") or "")[:80],
+                               _n(r.get("thstrm_amount")), _n(r.get("frmtrm_amount")), _n(r.get("thstrm_add_amount")), _n(r.get("frmtrm_add_amount")))
+                              for i_, r in enumerate(got["rows"]) if r.get("sj_div") in ("BS", "IS", "CIS", "CF")])
             conn.execute("INSERT OR REPLACE INTO fin_report_try VALUES (?,?,?)", (code, today.isoformat(), "ok"))
             conn.commit()
             res["분석"] += 1

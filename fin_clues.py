@@ -40,6 +40,7 @@ class ClueError(Exception):
 def ensure(conn):
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS fin_clue (code TEXT PRIMARY KEY, year INTEGER, rcept_no TEXT, payload TEXT, fetched TEXT);
+    CREATE TABLE IF NOT EXISTS fin_doc (code TEXT, kind TEXT, rcept_no TEXT, name TEXT, text BLOB, fetched TEXT, PRIMARY KEY (code, kind));
     """)
 
 
@@ -335,6 +336,28 @@ def read_inventory(lines):
             n = _nums("\t".join(ln.split("\t")[1:]))
             if n:
                 comp[head] = n[0]
+    reserve = total_line = None
+    for ln in lines:
+        flat = ln.replace("\t", " ")
+        if reserve is None and re.search(r"재고자산\s*(평가\s*)?(손실\s*)?충당금|재고자산\s*평가손실|평가충당금", flat) and not re.search(r"해당\s*사항\s*없", flat):
+            n = [abs(v) for v in _nums(re.sub(r"재고자산\s*(평가\s*)?(손실\s*)?충당금|재고자산\s*평가손실|평가충당금", "", flat)) if abs(v) >= 1]
+            if n:
+                reserve = n[0]
+                info["inv_reserve_src"] = _snip(ln)
+        if total_line is None and re.match(r"^(재고자산\s*)?(합\s*계|총\s*계)\b", ln.split("\t")[0].strip()) and "inv_comp_seen" in info:
+            n = _nums("\t".join(ln.split("\t")[1:]))
+            if n:
+                total_line = n[0]
+        if ln.split("\t")[0].strip() in ("원재료", "재공품", "제품", "상품"):
+            info["inv_comp_seen"] = True
+    info.pop("inv_comp_seen", None)
+    if reserve:
+        info["inv_reserve"] = reserve
+        if total_line and total_line > 0:
+            info["inv_reserve_ratio"] = reserve / total_line
+            out.append(("warn" if reserve / total_line >= 0.05 else "info", f"재고자산 평가충당금 {reserve:,.0f} (재고 합계의 {reserve / total_line:.1%}) — 팔리지 않는 재고를 미리 손실로 잡아 둔 금액", info["inv_reserve_src"]))
+        else:
+            out.append(("info", f"재고자산 평가충당금 언급 {reserve:,.0f}", info["inv_reserve_src"]))
     tot = sum(v for v in comp.values() if v > 0)
     if tot > 0 and len(comp) >= 2:
         info["inv_comp"] = comp
@@ -544,11 +567,13 @@ def collect(code, corp, key, rcept_no, year, today=None, session=None, sleep=0.1
     step("내부자", lambda: insider_clue(_json("elestock.json", key, session, corp_code=corp), today))
     step("최대주주", lambda: holder_clue(_json("hyslrSttus.json", key, session, corp_code=corp, bsns_year=str(base_year), reprt_code="11011")))
     qlines = []
+    docs = {}
     if with_doc and rcept_no:
         def doc():
             txt = fetch_document_text(rcept_no, key, session)
             if not txt:
                 raise ClueError("공시 원문을 못 받았어요")
+            docs["quarter"] = (rcept_no, "최근 정기보고서", txt)
             qlines.extend(txt.split("\n"))
             return read_document(qlines)
         step("본문", doc)
@@ -559,6 +584,7 @@ def collect(code, corp, key, rcept_no, year, today=None, session=None, sleep=0.1
             if arn:
                 txt = fetch_document_text(arn, key, session)
                 if txt:
+                    docs["annual"] = (arn, aname, txt)
                     p = read_business(txt.split("\n"))
                     p["source"] = dict(rcept_no=arn, name=aname)
             if qlines and not p.get("mix"):                 # 사업보고서에서 매출 구성을 못 읽었으면 최근 분기 보고서에서
@@ -572,12 +598,56 @@ def collect(code, corp, key, rcept_no, year, today=None, session=None, sleep=0.1
         step("사업 내용", prof)
     info["warn_n"] = sum(1 for k, _, _ in items if k == "warn")
     info["good_n"] = sum(1 for k, _, _ in items if k == "good")
-    return dict(items=items, info=info, errors=errs, base_year=base_year, profile=profile)
+    return dict(items=items, info=info, errors=errs, base_year=base_year, profile=profile, _docs=docs)
 
 
 def store(conn, code, year, rcept_no, res, today=None):
+    import zlib
     ensure(conn)
-    conn.execute("INSERT OR REPLACE INTO fin_clue VALUES (?,?,?,?,?)", (code, year, rcept_no, json.dumps(res, ensure_ascii=False), (today or dt.date.today()).isoformat()))
+    today_s = (today or dt.date.today()).isoformat()
+    res = dict(res)
+    docs = res.pop("_docs", {}) or {}
+    conn.execute("INSERT OR REPLACE INTO fin_clue VALUES (?,?,?,?,?)", (code, year, rcept_no, json.dumps(res, ensure_ascii=False), today_s))
+    for kind, (rn, name, txt) in docs.items():            # 공시 원문 전체를 압축해 둠 (종목 상세에서 목차·검색용)
+        conn.execute("INSERT OR REPLACE INTO fin_doc VALUES (?,?,?,?,?,?)", (code, kind, rn, name, zlib.compress(txt.encode("utf-8"), 6), today_s))
+
+
+def load_doc(conn, code, kind):
+    """저장해 둔 공시 원문 → (텍스트, 접수번호, 이름) 또는 None"""
+    import zlib
+    try:
+        r = conn.execute("SELECT text, rcept_no, name FROM fin_doc WHERE code=? AND kind=?", (code, kind)).fetchone()
+    except sqlite3.Error:
+        return None
+    return (zlib.decompress(r[0]).decode("utf-8"), r[1], r[2]) if r else None
+
+
+def outline(text, max_items=80):
+    """원문 목차 → [(제목, 줄 번호, 첫 문장)] — 번호로 시작하는 짧은 줄을 제목으로 봐요"""
+    lines = text.split("\n")
+    out = []
+    for i, ln in enumerate(lines):
+        if _is_head(ln):
+            nxt = next((x for x in lines[i + 1: i + 6] if "\t" not in x and len(x) >= 30 and not _is_head(x)), "")
+            out.append((ln, i, _snip(nxt, 110)))
+            if len(out) >= max_items:
+                break
+    return out
+
+
+def search_doc(text, kw, ctx=0, limit=40):
+    """원문에서 단어가 들어간 줄 → [(속한 제목, 줄)] (표의 칸은 ' | '로 이어 보여 줘요)"""
+    lines = text.split("\n")
+    head = ""
+    out = []
+    for i, ln in enumerate(lines):
+        if _is_head(ln):
+            head = ln
+        if kw in ln.replace("\t", " "):
+            out.append((head, _snip(ln, 260)))
+            if len(out) >= limit:
+                break
+    return out
 
 
 def load(conn, code):

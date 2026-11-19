@@ -3322,7 +3322,7 @@ def view_fin(conn, q):
            '<li>재무제표는 지나간 숫자예요. 주가는 이미 이 숫자를 일부 반영했을 수 있고, 점수가 높다고 오른다는 보장은 없어요. 투자 추천이 아니라 보고서를 빠르게 훑어보는 도구예요.</li></ul></details></div>')
     code = (q.get("code") or "").strip()
     if code:
-        return page("재무제표 분석", flash + _fin_detail(conn, by_code.get(code), code, rows, mc, val, fa))
+        return page("재무제표 분석", flash + _fin_detail(conn, by_code.get(code), code, rows, mc, val, fa, q))
     if not rows:
         return page("재무제표 분석", flash + prep + how + '<div class="card muted">아직 분석한 종목이 없어요. 위 버튼으로 받아 주세요 (DART 키가 설정에 있어야 해요).</div>', refresh=running)
     kw = (q.get("kw") or "").strip()
@@ -3522,6 +3522,132 @@ def _fin_compare(rows, picks, val, mc):
             f'<div class="scroll"><table><tr><th></th>{head}</tr>{body}<tr><td>시총</td>{mcr}</tr></table></div></div>')
 
 
+def _fin_amt(v):
+    return "-" if v is None else (_mcap_text(abs(v)) if v >= 0 else "−" + _mcap_text(abs(v)))
+
+
+def _fin_inventory_card(m, cl):
+    """재고·운전자본 자세히: 재고가 매출·매출원가보다 빨리 늘었나, 재고일수·매출채권일수·매입채무일수, 본문의 구성·회전율·평가충당금, 감사인 지적"""
+    ci = (cl or {}).get("info") or {}
+    has = any(m.get(k) is not None for k in ("inv", "dio", "dso", "dpo"))
+    if not has and not ci.get("inv_comp"):
+        return ""
+    pc = lambda v: "-" if v is None else f"{v:+.0%}"
+    days = lambda v: "-" if v is None else f"{v:.0f}일"
+    rows = ""
+
+    def row(lab, a, b="", note=""):
+        return f'<tr><td>{lab}</td><td>{a}</td><td class="muted">{b}</td><td class="muted" style="font-size:12px">{note}</td></tr>'
+    if m.get("inv") is not None:
+        rows += row("재고자산", _fin_amt(m["inv"]), _fin_amt(m.get("inv_ye")), f'연초 대비 {pc(m.get("inv_chg"))}' + ("" if m.get("inv_of_assets") is None else f' · 자산의 {m["inv_of_assets"]:.0%}'))
+    rows += row("매출 증가율(누적)", pc(m.get("rev_yoy")), "", "재고 증가와 비교해요")
+    rows += row("매출원가 증가율(누적)", pc(m.get("cogs_yoy")), "", "재고는 원가로 쌓이니 원가 증가와 비교하는 게 더 정확해요")
+    rows += row("재고일수 (재고 ÷ 매출원가 × 일수)", days(m.get("dio")), days(m.get("dio_ye")), "재고가 다 팔리기까지 걸리는 일수 · 오른쪽은 직전 연말 기준")
+    rows += row("매출채권일수", days(m.get("dso")), days(m.get("dso_ye")), "외상값을 받기까지 걸리는 일수")
+    rows += row("매입채무일수", days(m.get("dpo")), days(m.get("dpo_ye")), "납품 대금을 주기까지 걸리는 일수 (길면 현금이 덜 묶여요)")
+    rows += row("현금전환주기", days(m.get("ccc")), "", "재고일수 + 매출채권일수 − 매입채무일수 · 짧을수록 현금이 빨리 돌아요")
+    if m.get("gpm") is not None:
+        rows += row("매출총이익률", f'{m["gpm"]:.1%}', "" if m.get("gpm_py") is None else f'{m["gpm_py"]:.1%}', "재고 평가손실이 나면 떨어지는 경우가 있어요")
+    txt = ""
+    if ci.get("inv_comp"):
+        tot = sum(v for v in ci["inv_comp"].values() if v > 0)
+        txt += '<div style="margin:6px 0;font-size:13px"><b>본문 재고 구성</b> ' + " · ".join(f'{k} {v / tot:.0%}' for k, v in ci["inv_comp"].items() if v > 0) + "</div>"
+    if ci.get("inv_turn"):
+        txt += f'<div style="font-size:13px">본문 재고자산회전율 {ci["inv_turn"]:.1f}회</div>'
+    if ci.get("inv_reserve"):
+        txt += (f'<div style="font-size:13px">평가충당금 {ci["inv_reserve"]:,.0f}' + (f' (재고 합계의 {ci["inv_reserve_ratio"]:.1%})' if ci.get("inv_reserve_ratio") else "") + '</div>')
+    if "재고" in (ci.get("kam_tags") or []):
+        txt += '<div style="font-size:13px;color:var(--down)">⚠ 감사인이 \'재고자산\'을 핵심감사사항(위험 영역)으로 짚었어요</div>'
+    how = ('<details style="margin-top:6px"><summary class="muted">재고는 어떻게 읽나요?</summary><ul class="muted" style="font-size:12px;padding-left:18px">'
+           '<li><b>재고가 매출·원가보다 훨씬 빨리 늘면</b> 안 팔려서 쌓였거나(나쁨), 앞으로의 수요를 보고 미리 비축했을 수도 있어요(호황 직전엔 정상). 업황과 사업 계획 문단으로 이유를 확인하세요.</li>'
+           '<li><b>재고일수가 길어지면</b> 현금이 재고에 묶여요. 업종마다 정상 수준이 달라서(식품 짧고 조선·장비 길어요) 이 회사의 과거 값과 비교해요.</li>'
+           '<li><b>평가충당금이 크면</b> 이미 손실로 잡아 둔 재고가 많다는 뜻이고, 갑자기 늘면 팔리지 않는 재고가 생긴 신호예요. 반대로 충당금이 줄면(환입) 이익이 좋아 보일 수 있어요.</li>'
+           '<li><b>제품·상품 비중이 높으면</b> 바로 팔 물건이 쌓인 것이고, 원재료·재공품이 늘면 생산을 늘리는 중일 수 있어요.</li>'
+           '<li>재고 숫자는 연초(직전 연말)와 비교하고, 매출·매출원가는 전년 같은 기간 누적과 비교해서 계절성이 섞여요.</li></ul></details>')
+    return ('<div class="card"><b>재고·운전자본</b><div class="scroll"><table><tr><th>항목</th><th>이번</th><th>직전 연말</th><th>읽는 법</th></tr>' + rows + '</table></div>' + txt + how + '</div>')
+
+
+def _fin_statements_card(conn, code, r, big_only):
+    """재무제표 전체 계정: 보고서에 있는 모든 계정을 이번·전기와 비교하고 큰 변화를 표시"""
+    try:
+        rows = conn.execute("SELECT sj, ord, account_id, name, cur, prev, cur_add, prev_add FROM fin_account WHERE code=? AND year=? AND rcode=? ORDER BY sj, ord",
+                            (code, r["year"], r["rcode"])).fetchall()
+    except sqlite3.Error:
+        rows = []
+    if not rows:
+        return ('<div class="card"><b>재무제표 전체 계정</b><div class="muted" style="font-size:13px">아직 저장되지 않았어요. 목록 위 “다시 받고 분석하기”를 한 번 누르면 보고서의 모든 계정이 저장돼요.</div></div>')
+    by = {"BS": [], "IS": [], "CF": []}
+    for sj, od, aid, nm, cur, prev, ca, pa in rows:
+        by["IS" if sj in ("IS", "CIS") else sj].append((od, aid, nm, cur, prev, ca, pa, sj))
+    base = {}
+    for od, aid, nm, cur, prev, ca, pa, sj in by["BS"]:
+        if nm.replace(" ", "") == "자산총계":
+            base["BS"] = (cur, prev)
+    for od, aid, nm, cur, prev, ca, pa, sj in by["IS"]:
+        if sj == "IS" and nm.replace(" ", "") in ("매출액", "수익(매출액)", "영업수익", "매출") and "IS" not in base:
+            base["IS"] = ((ca if ca is not None else cur), (pa if pa is not None else prev))
+    n_big = 0
+    out = ""
+    titles = {"BS": ("재무상태표", "이번", "직전 연말", "자산 대비"), "IS": ("손익계산서 (누적)", "이번", "전년 같은 기간", "매출 대비"), "CF": ("현금흐름표 (누적)", "이번", "전년 같은 기간", "")}
+    for sj in ("BS", "IS", "CF"):
+        items = by[sj]
+        if not items:
+            continue
+        trs = ""
+        for od, aid, nm, cur, prev, ca, pa, sjd in items:
+            if sj == "IS":
+                a, b = (ca if ca is not None else cur), (pa if pa is not None else prev)
+            else:
+                a, b = cur, prev
+            chg = None if (a is None or b is None or b == 0) else (a - b) / abs(b)
+            bs = (base.get(sj) or (None, None))[0]
+            share = None if (not bs or a is None) else a / bs
+            size = max(abs(a or 0), abs(b or 0)) / abs(bs) if bs else (1 if sj == "CF" else 0)
+            big = chg is not None and abs(chg) >= 0.3 and size >= (0.01 if sj != "CF" else 0)
+            if big:
+                n_big += 1
+            if big_only and not big:
+                continue
+            ch = "" if chg is None else f'<span class="{"up" if chg > 0 else "down"}">{chg:+.0%}</span>'
+            trs += (f'<tr{" style=background:var(--chip)" if big else ""}><td style="font-size:13px">{escape(nm)}</td><td>{_fin_amt(a)}</td><td class="muted">{_fin_amt(b)}</td><td>{ch}{" ⚑" if big else ""}</td>'
+                    f'<td class="muted" style="font-size:12px">{"" if share is None else f"{share:.1%}"}</td></tr>')
+        out += (f'<div style="margin-top:8px"><b style="font-size:13px">{titles[sj][0]}</b><div class="scroll"><table><tr><th>계정</th><th>{titles[sj][1]}</th><th>{titles[sj][2]}</th><th>변화</th><th>{titles[sj][3]}</th></tr>{trs}</table></div></div>')
+    link = f'/ideas?{urlencode({"t": "fin", "code": code, **({} if big_only else {"fbig": "1"})})}'
+    return (f'<div class="card"><details><summary><b>재무제표 전체 계정</b> <span class="muted" style="font-size:12px">보고서의 모든 계정 · 큰 변화 {n_big}개 표시(⚑)</span></summary>'
+            f'<div style="margin-top:6px"><a class="chip" href="{link}">{"전체 계정 보기" if big_only else "큰 변화만 보기"}</a> '
+            '<span class="muted" style="font-size:12px">⚑ = 이전 대비 30% 넘게 바뀌고 자산(또는 매출)의 1% 이상인 계정. 왜 바뀌었는지가 단서예요.</span></div>' + out + '</details></div>')
+
+
+def _fin_doc_card(conn, code, q):
+    """공시 원문 훑기: 목차와 단어 찾기 (받아 둔 사업보고서·최근 보고서 본문)"""
+    import fin_clues as fc
+    q = q or {}
+    kind = "quarter" if q.get("fk") == "quarter" else "annual"
+    d = fc.load_doc(conn, code, kind) or fc.load_doc(conn, code, "quarter" if kind == "annual" else "annual")
+    if not d:
+        return ('<div class="card"><b>보고서 원문 훑기</b><div class="muted" style="font-size:13px">아직 받지 않았어요. “② 공시 단서 받기”를 하면 사업보고서·최근 보고서 본문이 저장되고 여기서 목차와 단어 찾기를 쓸 수 있어요.</div></div>')
+    text, rn, name = d
+    kind = "annual" if (fc.load_doc(conn, code, "annual") and fc.load_doc(conn, code, "annual")[1] == rn) else "quarter"
+    fq = (q.get("fq") or "").strip()[:30]
+    chips = " ".join(f'<a class="chip" href="/ideas?{urlencode({"t": "fin", "code": code, "fq": w, "fk": kind})}#doc">{w}</a>'
+                     for w in ("재고", "수주", "계약", "고객", "원재료", "환율", "소송", "우발", "차입금", "투자", "증설", "특허", "임상", "배당", "특수관계", "대손"))
+    res = ""
+    if fq:
+        hits = fc.search_doc(text, fq, limit=40)
+        res = (f'<div style="margin-top:8px"><b style="font-size:13px">“{escape(fq)}” {len(hits)}{"+" if len(hits) >= 40 else ""}곳</b>'
+               + "".join(f'<div style="margin:5px 0;font-size:13px"><span class="muted" style="font-size:11px">{escape(h or "")}</span><br>{escape(t)}</div>' for h, t in hits) + '</div>' if hits else
+               f'<div class="muted" style="margin-top:8px">“{escape(fq)}”가 들어간 줄이 없어요.</div>')
+    ol = fc.outline(text)
+    outl = "".join(f'<div style="font-size:13px;margin:3px 0"><b>{escape(h)}</b>' + (f'<div class="muted" style="font-size:12px">{escape(sn)}</div>' if sn else "") + '</div>' for h, _, sn in ol)
+    form = ('<form method="get" action="/ideas" class="filters" style="margin:6px 0"><input type="hidden" name="t" value="fin"><input type="hidden" name="code" value="%s"><input type="hidden" name="fk" value="%s">'
+            '<input type="search" name="fq" value="%s" placeholder="보고서에서 찾을 단어 (예: 재고, 수주, 소송)"><button>찾기</button></form>' % (escape(code), kind, escape(fq)))
+    return (f'<div class="card" id="doc"><details{" open" if fq else ""}><summary><b>보고서 원문 훑기</b> <span class="muted" style="font-size:12px">{escape(name or "")} · 원문 {max(1, len(text) // 1000):,}KB 저장</span></summary>'
+            + form + f'<div style="margin:4px 0">{chips}</div>' + res
+            + (f'<details style="margin-top:8px"><summary class="muted">목차 ({len(ol)}개 제목)</summary>{outl}</details>' if ol else "")
+            + (f'<div style="margin-top:6px"><a class="chip" href="{dart_link(rn)}" target="_blank" rel="noopener noreferrer">DART에서 원문 보기 ↗</a></div>' if rn else "")
+            + '<div class="muted" style="font-size:11px;margin-top:4px">원문을 글자로만 바꿔 저장해서 표는 칸마다 | 로 이어 보여요. 그림·도표는 안 나와요.</div></details></div>')
+
+
 def _fin_profile_card(conn, code, cl):
     """종목 상세: 무슨 사업을 하는 회사인가 — 업종·테마, 사업 개요, 매출 구성, 내수·수출, 사업 계획·전망 (사업보고서 본문에서 읽은 것)"""
     tags = ""
@@ -3576,7 +3702,7 @@ def fc_load(conn, code):
     return fin_clues.load(conn, code)
 
 
-def _fin_detail(conn, r, code, rows, mc, val, fa):
+def _fin_detail(conn, r, code, rows, mc, val, fa, q=None):
     if not r:
         return ('<div class="card"><a href="/ideas?t=fin" class="muted">← 목록</a><div style="margin-top:6px">이 종목은 아직 분석하지 않았어요 '
                 f'({escape(code)}). 시가총액 상위·공시에 나온·관심 종목이 대상이에요.</div></div>')
@@ -3683,7 +3809,9 @@ def _fin_detail(conn, r, code, rows, mc, val, fa):
                          f'<a href="/stock?code={quote(code)}">종목 화면</a></div></div>')
     except Exception:
         other = ""
-    return (head + _fin_profile_card(conn, code, cl) + f'<div class="card"><b>신호</b>{sg or "<div class=muted>-</div>"}</div>' + other + rep_card + clue_card
+    q_ = q or {}
+    return (head + _fin_profile_card(conn, code, cl) + f'<div class="card"><b>신호</b>{sg or "<div class=muted>-</div>"}</div>' + _fin_inventory_card(m, cl) + other + rep_card + clue_card
+            + _fin_statements_card(conn, code, r, q_.get("fbig") == "1") + _fin_doc_card(conn, code, q_)
             + _fold(f'<div class="card"><b>숫자 자세히</b><div class="scroll"><table><tr><th>항목</th><th>이번</th><th>전년 같은 기간 / 직전 연말</th><th>변화</th></tr>{body}{bs}</table></div>'
                     '<div class="muted" style="font-size:11px">손익·현금흐름은 누적 기준, 재무상태는 보고서 시점이에요. 금액은 원 단위를 억·조로 줄여 보여요. 차입금은 계정 이름으로 합친 추정값이에요.</div></div>', True))
 
