@@ -387,12 +387,142 @@ def read_document(lines):
     return clues, info
 
 
+# ---------------- 사업 내용 (사업보고서 본문) ----------------
+_HEAD = re.compile(r"^(\d{1,2}\.|[가-힣]\.|\(\d{1,2}\)|[IVX]{1,4}\.|[①-⑩]|\d{1,2}\)|[가-힣]\))\s*\S")
+
+
+def _is_head(ln):
+    return len(ln) <= 48 and "\t" not in ln and bool(_HEAD.match(ln))
+
+
+def _section(lines, key, max_lines=40):
+    """제목 줄(번호로 시작하고 짧음)이 key(정규식)에 맞는 첫 곳부터 다음 제목 전까지의 줄들 (제목 줄 제외)"""
+    for i, ln in enumerate(lines):
+        if _is_head(ln) and re.search(key, ln.replace(" ", "")):
+            out = []
+            for x in lines[i + 1: i + 1 + max_lines]:
+                if _is_head(x) and out:
+                    break
+                out.append(x)
+            return out
+    return []
+
+
+def _paras(sec, n=3, lo=40, hi=420):
+    out = []
+    for x in sec:
+        if "\t" in x or len(x) < lo or x.startswith("※"):
+            continue
+        out.append(x[:hi] + ("…" if len(x) > hi else ""))
+        if len(out) >= n:
+            break
+    return out
+
+
+def _unit_factor(unit):
+    u = (unit or "").replace(" ", "")
+    return 1e8 if "억" in u else 1e6 if "백만" in u else 1e3 if "천원" in u or u.startswith("천") else 1.0 if "원" in u else None
+
+
+def read_business(lines):
+    """사업보고서 본문 → dict(overview[문단], mix[(품목, 금액, 비중%)], export, domestic, export_share, plans[문단], share[문장], notes[])
+    못 읽은 항목은 빠져요."""
+    prof = {}
+    ov = _paras(_section(lines, r"사업의개요", 30), 3)
+    if not ov:
+        ov = _paras(_section(lines, r"사업의내용", 30), 3)
+    if ov:
+        prof["overview"] = ov
+    # 주요 제품·서비스 매출 비중
+    sec = _section(lines, r"주요제품|제품및서비스|주요제품등의현황|매출구성", 60)
+    mix = []
+    for x in sec:
+        cells = [c.strip() for c in x.split("\t") if c.strip()]
+        if len(cells) < 2:
+            continue
+        name = cells[0]
+        if re.search(r"^(합\s*계|계|소\s*계|구\s*분|제품명|품\s*목|사업부문|부문)$", name.replace(" ", "")) and name.replace(" ", "") != "합계":
+            continue
+        if name.replace(" ", "") in ("합계", "계", "총계"):
+            continue
+        pct = None
+        for c in reversed(cells[1:]):
+            m = re.fullmatch(r"(\d{1,3}(?:\.\d+)?)\s*%?", c.replace(",", ""))
+            if m and 0 <= float(m.group(1)) <= 100 and ("%" in c or "." in c or True):
+                pct = float(m.group(1))
+                break
+        amt = None
+        for c in cells[1:]:
+            m = re.fullmatch(r"-?\d[\d,]*", c)
+            if m and float(c.replace(",", "")) > 100:
+                amt = float(c.replace(",", ""))
+                break
+        if pct is not None and len(name) <= 40 and not name.isdigit():
+            mix.append((name, amt, pct))
+        if len(mix) >= 15:
+            break
+    if mix:
+        tot = sum(p for _, _, p in mix)
+        if 55 <= tot <= 105:
+            prof["mix"] = mix
+        elif len(mix) >= 2:
+            prof["mix"] = mix
+            prof["mix_note"] = f"비중 합이 {tot:.0f}%라 표를 완전히 읽지 못했을 수 있어요"
+    # 내수·수출 (매출 실적 표의 '수출'/'내수' 줄을 당기 금액으로 합산)
+    ex = dom = 0.0
+    for i, ln in enumerate(lines):
+        cells = [c.strip() for c in ln.split("\t") if c.strip()]
+        for j, c in enumerate(cells):
+            label = c.replace(" ", "")
+            if label in ("수출", "내수") and j + 1 < len(cells):
+                nums = [float(v.replace(",", "")) for v in cells[j + 1:] if re.fullmatch(r"-?\d[\d,]*(?:\.\d+)?", v)]
+                if nums and nums[0] > 0:
+                    if label == "수출":
+                        ex += nums[0]
+                    else:
+                        dom += nums[0]
+                break
+    if ex + dom > 0 and ex > 0 and dom > 0:
+        prof["export"], prof["domestic"] = ex, dom
+        prof["export_share"] = ex / (ex + dom) * 100
+    else:
+        txt = "\n".join(lines)
+        m = re.search(r"수출\s*(?:비중|비율)[^\d\n]{0,20}(\d+(?:\.\d+)?)\s*%", txt)
+        if m and 0 < float(m.group(1)) <= 100:
+            prof["export_share"] = float(m.group(1))
+            prof["export_src"] = _snip(txt[max(0, m.start() - 30): m.end() + 30])
+    # 사업 계획·전망
+    plans = []
+    for key in (r"신규사업", r"향후|사업계획|성장전략|중장기", r"투자계획|시설투자", r"시장의특성|전망|성장성"):
+        plans += _paras(_section(lines, key, 25), 2)
+        if len(plans) >= 4:
+            break
+    plans = list(dict.fromkeys(plans))
+    if plans:
+        prof["plans"] = plans[:4]
+    shares = [_snip(ln, 200) for ln in lines if re.search(r"시장\s*점유율|점유율", ln) and "\t" not in ln and not re.search(r"해당\s*사항\s*없", ln)]
+    shares = [x for x in dict.fromkeys(shares) if not any(x[:40] in pl for pl in plans)]
+    if shares:
+        prof["share"] = shares[:2]
+    return prof
+
+
+def find_annual(corp, key, today=None, session=None):
+    """가장 최근 사업보고서 접수번호 → (rcept_no, 보고서 이름) 또는 ('', '')"""
+    today = today or dt.date.today()
+    rows = _json("list.json", key, session, corp_code=corp, bgn_de=f"{today.year - 2}0101", end_de=today.strftime("%Y%m%d"), pblntf_ty="A", pblntf_detail_ty="A001", page_count="10")
+    rows = [r for r in rows if "사업보고서" in (r.get("report_nm") or "")]
+    rows.sort(key=lambda r: (r.get("rcept_dt") or "", "정정" not in (r.get("report_nm") or "")), reverse=True)
+    return (rows[0].get("rcept_no", ""), rows[0].get("report_nm", "")) if rows else ("", "")
+
+
 # ---------------- 한 종목 ----------------
-def collect(code, corp, key, rcept_no, year, today=None, session=None, sleep=0.15, with_doc=True):
+def collect(code, corp, key, rcept_no, year, today=None, session=None, sleep=0.15, with_doc=True, with_profile=True):
     """종목 하나의 단서 모으기 → dict(items=[(kind, text, 발췌)], info). 항목마다 따로 실패해도 나머지는 계속"""
     today = today or dt.date.today()
     base_year = today.year - 1 if today.month >= 4 else today.year - 2          # 사업보고서가 나온 가장 최근 연도
     items, info, errs = [], {}, []
+    profile = {}
 
     def step(name, fn):
         try:
@@ -413,16 +543,36 @@ def collect(code, corp, key, rcept_no, year, today=None, session=None, sleep=0.1
                                        _json("tesstkAcqsDspsSttus.json", key, session, corp_code=corp, bsns_year=str(base_year), reprt_code="11011")))
     step("내부자", lambda: insider_clue(_json("elestock.json", key, session, corp_code=corp), today))
     step("최대주주", lambda: holder_clue(_json("hyslrSttus.json", key, session, corp_code=corp, bsns_year=str(base_year), reprt_code="11011")))
+    qlines = []
     if with_doc and rcept_no:
         def doc():
             txt = fetch_document_text(rcept_no, key, session)
             if not txt:
                 raise ClueError("공시 원문을 못 받았어요")
-            return read_document(txt.split("\n"))
+            qlines.extend(txt.split("\n"))
+            return read_document(qlines)
         step("본문", doc)
+    if with_profile:
+        def prof():
+            arn, aname = find_annual(corp, key, today, session)
+            p = {}
+            if arn:
+                txt = fetch_document_text(arn, key, session)
+                if txt:
+                    p = read_business(txt.split("\n"))
+                    p["source"] = dict(rcept_no=arn, name=aname)
+            if qlines and not p.get("mix"):                 # 사업보고서에서 매출 구성을 못 읽었으면 최근 분기 보고서에서
+                q = read_business(qlines)
+                for k in ("mix", "mix_note", "export", "domestic", "export_share", "export_src"):
+                    if q.get(k) and not p.get(k):
+                        p[k] = q[k]
+                        p["from_quarter"] = True
+            profile.update(p)
+            return [], ({"export_share": p["export_share"]} if p.get("export_share") is not None else {})
+        step("사업 내용", prof)
     info["warn_n"] = sum(1 for k, _, _ in items if k == "warn")
     info["good_n"] = sum(1 for k, _, _ in items if k == "good")
-    return dict(items=items, info=info, errors=errs, base_year=base_year)
+    return dict(items=items, info=info, errors=errs, base_year=base_year, profile=profile)
 
 
 def store(conn, code, year, rcept_no, res, today=None):

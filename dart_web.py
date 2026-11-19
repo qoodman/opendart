@@ -3429,8 +3429,8 @@ FIN_PRESETS = {
     "shr": ("주주환원형", "점수 60 이상이고 배당을 하거나 자기주식을 취득·소각 — 이익을 주주에게 돌려주는 종목", dict(min_score=60, shr=True)),
     "profit": ("고수익·저부채", "ROE(연환산) 15% 이상 · 영업이익률 10% 이상 · 부채비율 100% 이하 — 버핏식 '좋은 사업'의 숫자 흔적", dict(roe=0.15, opm=0.10, debt=1.0)),
 }
-FIN_NUMS = {"rd": ("rnd", 1), "ms": ("min_score", 1), "rv": ("rev", 100), "ov": ("op", 100), "om": ("opm", 100), "ro": ("roe", 100), "cs": ("cash", 1), "db": ("debt", 100), "pe": ("per", 1), "pb": ("pbr", 1), "cp": ("cap", 1)}
-FIN_NUM_FIELDS = [("rd", FIN_NUMS["rd"], "연구개발비/매출 ≥ (%)", "5"), ("ms", FIN_NUMS["ms"], "점수 ≥", "70"), ("rv", FIN_NUMS["rv"], "매출 증가율 ≥ (%)", "10"), ("ov", FIN_NUMS["ov"], "영업이익 증가율 ≥ (%)", "10"),
+FIN_NUMS = {"ex": ("exp", 1), "rd": ("rnd", 1), "ms": ("min_score", 1), "rv": ("rev", 100), "ov": ("op", 100), "om": ("opm", 100), "ro": ("roe", 100), "cs": ("cash", 1), "db": ("debt", 100), "pe": ("per", 1), "pb": ("pbr", 1), "cp": ("cap", 1)}
+FIN_NUM_FIELDS = [("ex", FIN_NUMS["ex"], "수출 비중 ≥ (%)", "50"), ("rd", FIN_NUMS["rd"], "연구개발비/매출 ≥ (%)", "5"), ("ms", FIN_NUMS["ms"], "점수 ≥", "70"), ("rv", FIN_NUMS["rv"], "매출 증가율 ≥ (%)", "10"), ("ov", FIN_NUMS["ov"], "영업이익 증가율 ≥ (%)", "10"),
                   ("om", FIN_NUMS["om"], "영업이익률 ≥ (%)", "10"), ("ro", FIN_NUMS["ro"], "ROE ≥ (%)", "10"), ("cs", FIN_NUMS["cs"], "영업CF/순이익 ≥ (배)", "1"),
                   ("db", FIN_NUMS["db"], "부채비율 ≤ (%)", "100"), ("pe", FIN_NUMS["pe"], "PER ≤", "15"), ("pb", FIN_NUMS["pb"], "PBR ≤", "1.5"), ("cp", FIN_NUMS["cp"], "시총 ≥ (억원)", "1000")]
 
@@ -3466,6 +3466,8 @@ def _fin_match(r, c, vp, cap, ci=None):
     if c.get("turn") and not (m.get("op_py") is not None and m["op_py"] <= 0 < (m.get("op") or 0)):
         return False
     ci = ci or {}
+    if "exp" in c and (ci.get("export_share") is None or ci["export_share"] < c["exp"]):
+        return False
     if "rnd" in c and (ci.get("rnd_ratio") is None or ci["rnd_ratio"] < c["rnd"]):
         return False
     if c.get("insider") and (ci.get("insider_net") or 0) <= 0:
@@ -3518,6 +3520,55 @@ def _fin_compare(rows, picks, val, mc):
     mcr = "".join(f'<td class="muted" style="font-size:12px">{_mcap_text(mc.get(r["code"]))}</td>' for r in sel)
     return ('<div class="card"><b>내 후보 비교</b><div class="muted" style="font-size:12px">굵은 숫자가 그 줄에서 가장 좋은 값이에요 (부채비율·PER·PBR은 낮을수록). 업종이 다르면 숫자의 의미가 달라서 같은 업종끼리 비교하는 게 좋아요.</div>'
             f'<div class="scroll"><table><tr><th></th>{head}</tr>{body}<tr><td>시총</td>{mcr}</tr></table></div></div>')
+
+
+def _fin_profile_card(conn, code, cl):
+    """종목 상세: 무슨 사업을 하는 회사인가 — 업종·테마, 사업 개요, 매출 구성, 내수·수출, 사업 계획·전망 (사업보고서 본문에서 읽은 것)"""
+    tags = ""
+    try:
+        import industry
+        import theme_map
+        ind = industry.mapping(conn).get(code)
+        ths = [n for n, cs in theme_map.load(conn)["테마"].items() if code in cs]
+        if ind:
+            tags += f'<span class="chip" title="네이버 증권 업종">{escape(ind)}</span> '
+        tags += " ".join(f'<span class="chip" title="네이버 증권 테마" style="background:none;border:1px solid var(--line)">{escape(t)}</span>' for t in ths[:8])
+    except Exception:
+        pass
+    pr = (cl or {}).get("profile") or {}
+    body = ""
+    if pr.get("overview"):
+        body += '<div style="margin:6px 0"><b style="font-size:13px">사업 개요</b>' + "".join(f'<p style="margin:4px 0;font-size:14px">{escape(x)}</p>' for x in pr["overview"]) + '</div>'
+    if pr.get("mix"):
+        bars = ""
+        for nm, amt, pct in pr["mix"]:
+            bars += (f'<div style="display:flex;align-items:center;gap:8px;margin:3px 0;font-size:13px"><span style="width:38%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{escape(nm)}">{escape(nm)}</span>'
+                     f'<div style="flex:1;height:10px;background:var(--chip);border-radius:5px"><div style="width:{min(pct, 100):.0f}%;height:10px;background:var(--s1);border-radius:5px"></div></div>'
+                     f'<span style="width:46px;text-align:right">{pct:.1f}%</span></div>')
+        body += ('<div style="margin:8px 0"><b style="font-size:13px">매출 구성 (제품·서비스별 비중)</b>' + bars
+                 + (f'<div class="muted" style="font-size:11px">{escape(pr["mix_note"])}</div>' if pr.get("mix_note") else "")
+                 + ('<div class="muted" style="font-size:11px">사업보고서에서 못 읽어 최근 분기 보고서에서 가져왔어요</div>' if pr.get("from_quarter") else "") + '</div>')
+    if pr.get("export_share") is not None:
+        ex = max(0.0, min(100.0, pr["export_share"]))
+        body += ('<div style="margin:8px 0"><b style="font-size:13px">내수 · 수출 비중</b>'
+                 f'<div style="display:flex;height:16px;border-radius:8px;overflow:hidden;margin:4px 0"><div style="width:{ex:.0f}%;background:var(--s2)"></div><div style="width:{100 - ex:.0f}%;background:var(--s1)"></div></div>'
+                 f'<div style="font-size:13px"><span style="color:var(--s2)">●</span> 수출 {ex:.0f}% · <span style="color:var(--s1)">●</span> 내수 {100 - ex:.0f}%</div>'
+                 + (f'<div class="muted" style="font-size:11px">원문: {escape(pr["export_src"])}</div>' if pr.get("export_src") else "") + '</div>')
+    if pr.get("share"):
+        body += '<div style="margin:8px 0"><b style="font-size:13px">시장 위치</b>' + "".join(f'<div style="font-size:13px;margin:3px 0">· {escape(x)}</div>' for x in pr["share"]) + '</div>'
+    if pr.get("plans"):
+        body += ('<details style="margin:8px 0" open><summary style="cursor:pointer"><b style="font-size:13px">사업 계획·전망 (신규 사업, 향후 계획, 투자 계획, 시장 전망 문단)</b></summary>'
+                 + "".join(f'<p style="margin:4px 0;font-size:13px">{escape(x)}</p>' for x in pr["plans"]) + '</details>')
+    src = ""
+    sr = pr.get("source")
+    if sr and sr.get("rcept_no"):
+        src = f' · 출처 <a href="{dart_link(sr["rcept_no"])}" target="_blank" rel="noopener noreferrer">{escape(sr.get("name") or "사업보고서")} ↗</a>'
+    if not body:
+        body = ('<div class="muted" style="font-size:13px">' + ("사업보고서 본문에서 읽지 못했어요 (표 모양이 달라서일 수 있어요). DART 보고서 링크에서 직접 확인해 주세요." if cl else
+                "아직 받지 않았어요. 목록 위의 “② 공시 단서 받기”가 사업 내용도 같이 받아요.") + '</div>')
+    return ('<div class="card"><b>무슨 사업을 하는 회사인가</b>'
+            + (f'<div style="margin:4px 0">{tags}</div>' if tags else "") + body
+            + f'<div class="muted" style="font-size:11px">사업보고서 본문을 자동으로 읽은 요약이라 빠지거나 틀릴 수 있어요{src}.</div></div>')
 
 
 def fc_load(conn, code):
@@ -3632,7 +3683,7 @@ def _fin_detail(conn, r, code, rows, mc, val, fa):
                          f'<a href="/stock?code={quote(code)}">종목 화면</a></div></div>')
     except Exception:
         other = ""
-    return (head + f'<div class="card"><b>신호</b>{sg or "<div class=muted>-</div>"}</div>' + other + rep_card + clue_card
+    return (head + _fin_profile_card(conn, code, cl) + f'<div class="card"><b>신호</b>{sg or "<div class=muted>-</div>"}</div>' + other + rep_card + clue_card
             + _fold(f'<div class="card"><b>숫자 자세히</b><div class="scroll"><table><tr><th>항목</th><th>이번</th><th>전년 같은 기간 / 직전 연말</th><th>변화</th></tr>{body}{bs}</table></div>'
                     '<div class="muted" style="font-size:11px">손익·현금흐름은 누적 기준, 재무상태는 보고서 시점이에요. 금액은 원 단위를 억·조로 줄여 보여요. 차입금은 계정 이름으로 합친 추정값이에요.</div></div>', True))
 
