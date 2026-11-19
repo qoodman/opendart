@@ -944,6 +944,14 @@ def fin_action(action, form):
             conn.execute("INSERT OR IGNORE INTO fin_pick VALUES (?,?)", (code, dt.date.today().isoformat()))
             conn.commit()
             return True, f"{code}를 내 후보에 담았어요."
+        if action == "px":
+            import bill_watch
+            try:
+                bill_watch.ensure_stock(conn, code, "")
+                n = bill_watch.refresh_prices(conn, code, force=True)
+            except Exception as e:
+                return False, f"주가를 못 받았어요: {type(e).__name__}"
+            return True, f"{code} 주가 {n:,}일치를 받았어요."
         if action == "unpick":
             conn.execute("DELETE FROM fin_pick WHERE code=?", (code,))
             conn.commit()

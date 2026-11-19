@@ -475,6 +475,12 @@ def run(db_path, key, cache_dir, limit=400, log=print, progress=None, today=None
                              [(code, got["year"], got["rcode"], r.get("sj_div") or "", int(r.get("ord") or i_), r.get("account_id") or "", (r.get("account_nm") or "")[:80],
                                _n(r.get("thstrm_amount")), _n(r.get("frmtrm_amount")), _n(r.get("thstrm_add_amount")), _n(r.get("frmtrm_add_amount")))
                               for i_, r in enumerate(got["rows"]) if r.get("sj_div") in ("BS", "IS", "CIS", "CF")])
+            try:                                                      # 리포트일 종가·최근 종가를 보여 주려고 일별 주가도 받아 둠 (실패해도 분석은 계속)
+                import bill_watch
+                bill_watch.ensure_stock(conn, code, nm)
+                bill_watch.refresh_prices(conn, code)
+            except Exception:
+                pass
             conn.execute("INSERT OR REPLACE INTO fin_report_try VALUES (?,?,?)", (code, today.isoformat(), "ok"))
             conn.commit()
             res["분석"] += 1

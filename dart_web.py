@@ -3401,13 +3401,15 @@ def view_fin(conn, q):
             cl_ = close_any(conn, r["code"])
             up_ = f' <span class="{"up" if tg_ > cl_ else "down"}">{(tg_ / cl_ - 1):+.0%}</span>' if (tg_ and cl_) else ""
             rep_t = (f'<a href="/reports?{urlencode({"q": r["code"], "d": str(REPORT_DAYS)})}">{len(rs_)}건</a>' + (f'<br><span class="muted" style="font-size:11px">목표 {won(tg_)}{up_}</span>' if tg_ else ""))
+        cl_px = close_any(conn, r["code"])
+        px_t = f'<br>종가 {won(cl_px)}' if cl_px else ""
         ci_ = clue_info.get(r["code"])
         clue_t = "" if not ci_ else (f'<span class="up">▲{ci_.get("good_n", 0)}</span> ' if ci_.get("good_n") else "") + (f'<span class="down">⚠{ci_.get("warn_n", 0)}</span>' if ci_.get("warn_n") else "")
         pp_t = f'{"-" if per is None else f"{per:.1f}"}/{"-" if pbr is None else f"{pbr:.1f}"}'
         trs += (f'<tr><td>{star(r["code"])}</td><td><a href="/ideas?{urlencode({"t": "fin", "code": r["code"]})}"><b>{escape(r["name"] or r["code"])}</b></a><br><span class="muted" style="font-size:11px">{escape(r["code"])} · {escape(_fin_label(r))}</span></td>'
                 f'<td><span class="chip {cls}" style="font-weight:700">{r["grade"]} {int(r["score"])}</span><br><span class="muted" style="font-size:10px">{parts}</span></td>'
                 f'<td>{_fin_pct(m.get("rev_yoy"))}</td><td>{turn_t}</td><td>{opm_t}</td><td>{roe_t}</td><td>{cash_t}</td><td>{debt_t}</td><td>{warn_t}</td><td style="font-size:12px">{clue_t}</td><td style="font-size:12px">{rep_t}</td>'
-                f'<td class="muted" style="font-size:12px">{pp_t}<br>{_mcap_text(mc.get(r["code"]))}</td></tr>')
+                f'<td class="muted" style="font-size:12px">{pp_t}<br>{_mcap_text(mc.get(r["code"]))}{px_t}</td></tr>')
     more = (f'<div class="muted" style="margin-top:6px">{len(show)}개 중 {min(limit, len(show))}개를 보여 줘요. <a href="{link(all="1")}">더 보기</a></div>'
             if len(show) > limit else f'<div class="muted" style="margin-top:6px">{len(show)}개 종목 · 조건에 맞는 종목이 너무 적으면 조건을 줄이고, 너무 많으면 프리셋을 겹쳐 직접 숫자를 조여 보세요.</div>')
     table = ('<div class="card"><b>좋은 기업 고르기</b><div class="muted" style="font-size:12px">한 번에 눌러 보는 기준(프리셋)이나 직접 숫자로 후보를 좁히고, ☆로 내 후보에 담아 비교해요. 숫자는 최근 정기보고서(누적) 기준이에요.</div>'
@@ -3648,6 +3650,39 @@ def _fin_doc_card(conn, code, q):
             + '<div class="muted" style="font-size:11px;margin-top:4px">원문을 글자로만 바꿔 저장해서 표는 칸마다 | 로 이어 보여요. 그림·도표는 안 나와요.</div></details></div>')
 
 
+def _fin_peers_card(conn, code, r, rows):
+    """같은 업종(네이버 업종) 안에서 이 종목의 위치: 분석한 종목끼리 점수·성장·영업이익률·부채비율 비교"""
+    try:
+        import industry
+        mp = industry.mapping(conn)
+    except Exception:
+        return ""
+    ind = mp.get(code)
+    if not ind or r["score"] is None:
+        return ""
+    peers = [x for x in rows if mp.get(x["code"]) == ind and x["score"] is not None]
+    if len(peers) < 3:
+        return ('<div class="card"><b>같은 업종 비교</b><div class="muted" style="font-size:13px">' + escape(ind) + ' 업종에서 분석한 종목이 %d개뿐이라 비교하지 않았어요 (분석 대상을 늘리면 나와요).</div></div>' % len(peers))
+    peers.sort(key=lambda x: -x["score"])
+    rank = next(i for i, x in enumerate(peers) if x["code"] == code) + 1
+
+    def med(k):
+        v = sorted(x["m"][k] for x in peers if x["m"].get(k) is not None)
+        return v[len(v) // 2] if v else None
+    pf = lambda v: "-" if v is None else f"{v:.1%}"
+    pz = lambda v: "-" if v is None else f"{v:.0%}"
+    trs = ""
+    for x in peers[:10] + ([r] if r["code"] not in {y["code"] for y in peers[:10]} else []):
+        m = x["m"]
+        me = x["code"] == code
+        trs += (f'<tr{" style=background:var(--chip)" if me else ""}><td><a href="/ideas?{urlencode({"t": "fin", "code": x["code"]})}">{escape(x["name"] or x["code"])}</a>{" ◀" if me else ""}</td>'
+                f'<td>{x["grade"]} {int(x["score"])}</td><td>{_fin_pct(m.get("rev_yoy"))}</td><td>{pf(m.get("opm"))}</td><td>{pz(m.get("debt_ratio"))}</td></tr>')
+    trs += (f'<tr class="muted"><td>업종 중앙값 ({len(peers)}개)</td><td>{int(sorted(x["score"] for x in peers)[len(peers) // 2])}</td><td>{_fin_pct(med("rev_yoy"))}</td><td>{pf(med("opm"))}</td><td>{pz(med("debt_ratio"))}</td></tr>')
+    return (f'<div class="card"><b>같은 업종 비교</b> <span class="muted" style="font-size:12px">{escape(ind)} · 분석한 {len(peers)}개 중 점수 {rank}위</span>'
+            f'<div class="scroll"><table><tr><th>종목</th><th>점수</th><th>매출 증가</th><th>영업이익률</th><th>부채비율</th></tr>{trs}</table></div>'
+            '<div class="muted" style="font-size:11px">업종 안에서 비교해야 부채비율·영업이익률의 의미가 맞아요. 분석 대상(시총 상위·관심 종목)만 들어 있어서 업종 전체가 아닐 수 있어요.</div></div>')
+
+
 def _fin_profile_card(conn, code, cl):
     """종목 상세: 무슨 사업을 하는 회사인가 — 업종·테마, 사업 개요, 매출 구성, 내수·수출, 사업 계획·전망 (사업보고서 본문에서 읽은 것)"""
     tags = ""
@@ -3781,20 +3816,48 @@ def _fin_detail(conn, r, code, rows, mc, val, fa, q=None):
         clue_card = '<div class="card"><b>공시 단서</b><div class="muted" style="font-size:13px">아직 받지 않았어요. 목록 위의 “② 공시 단서 받기”를 누르면 감사의견·직원·배당·내부자 거래·본문(연구개발·특허·재고·수주잔고·소송 문구)을 읽어 와요.</div></div>'
     reps = report_map(conn, [code])
     rs = reps.get(code) or []
-    close = close_any(conn, code)
+    ser = price_map(conn, code)
+    close = ser[-1][1] if ser else close_any(conn, code)
+    close_d = ser[-1][0] if ser else ""
+    px_btn = ('<form method="post" action="/fin/px" class="filters" style="margin:6px 0 0"><input type="hidden" name="code" value="%s"><input type="hidden" name="back" value="%s">'
+              '<button>주가 받기 (네이버)</button><span class="muted" style="font-size:12px">리포트 날짜의 종가와 차트를 보려면 일별 주가가 필요해요</span></form>' % (escape(code), escape(urlencode({"code": code}))))
     if rs:
         tg, nb = consensus(conn, code)
-        top = f'<div style="margin:4px 0">증권사 리포트 {len(rs)}건 <span class="muted">(최근 {REPORT_DAYS}일 · {len({x["broker"] for x in rs})}곳)</span>' + (f' · 목표가 평균 <b>{won(tg)}원</b> ({nb}곳)' + (f' {upside(tg, close)}' if close else "") if tg else "") + '</div>'
-        ls = ""
-        for x in rs[:8]:
-            t_ = escape((x["title"] or "")[:60])
+        up_n, dn_n, same_n, chg = target_moves(conn, code)
+        top = (f'<div style="margin:4px 0">최근 종가 <b>{won(close) + "원" if close else "-"}</b>' + (f' <span class="muted">({escape(close_d)})</span>' if close_d else "")
+               + f' · 리포트 {len(rs)}건 <span class="muted">(최근 {REPORT_DAYS}일 · {len({x["broker"] for x in rs})}곳)</span>'
+               + (f' · 목표가 평균 <b>{won(tg)}원</b> ({nb}곳)' + (f' {upside(tg, close)}' if close else "") if tg else "") + '</div>')
+        if up_n or dn_n or same_n:
+            top += (f'<div style="font-size:13px">목표가 변화(증권사별 직전 리포트 대비): <span class="up">상향 {up_n}</span> · <span class="down">하향 {dn_n}</span> · 유지 {same_n}'
+                    + (" — " + ", ".join(f'{escape(b)} {won(t0)}→{won(t1)}' for b, t0, t1 in chg[:4]) if chg else "") + '</div>')
+        trs = ""
+        for x in rs[:12]:
+            t_ = escape((x["title"] or "")[:50])
             t_ = f'<a href="{escape(x["link"])}" target="_blank" rel="noopener noreferrer">{t_}</a>' if x["link"].startswith(("http://", "https://")) else t_
-            ls += (f'<div style="font-size:13px;margin:3px 0">{escape(x["date"])} · {escape(x["broker"] or "")} · {t_}' + (f' · <b>{escape(x["opinion"])}</b>' if x["opinion"] else "")
-                   + (f' · 목표 {won(x["target"])}원' if x["target"] else "") + '</div>')
-        more = f'<div style="font-size:12px"><a href="/reports?{urlencode({"q": code, "d": str(REPORT_DAYS)})}">리포트 모두 보기 →</a></div>' if len(rs) > 8 else ""
-        rep_card = f'<div class="card"><b>증권사 리포트</b>{top}{ls}{more}<div class="muted" style="font-size:11px">리포트의 목표가는 증권사 의견이에요. 이 재무 점수와 같은 방향인지 비교해 보세요 (엇갈리면 이유를 읽어 볼 만해요).</div></div>'
+            c_on = close_on_date(ser, x["date"]) if ser else None
+            now_ch = "" if not (c_on and close) else f'<span class="{"up" if close > c_on[1] else "down"}">{close / c_on[1] - 1:+.1%}</span>'
+            gap_ = "" if not (x["target"] and c_on) else f'<span class="{"up" if x["target"] > c_on[1] else "down"}">{x["target"] / c_on[1] - 1:+.0%}</span>'
+            hit = ""
+            if x["target"] and close and close >= x["target"]:
+                hit = ' <span class="chip up" style="font-size:10px">목표 도달</span>'
+            trs += (f'<tr><td style="white-space:nowrap">{escape(x["date"])}</td><td>{escape(x["broker"] or "")}</td><td style="font-size:12px">{t_}</td><td>{escape(x["opinion"] or "")}</td>'
+                    f'<td>{won(x["target"]) if x["target"] else "-"}</td><td>{won(c_on[1]) if c_on else "<span class=muted>-</span>"}</td><td>{gap_}</td><td>{now_ch}{hit}</td></tr>')
+        more = f'<div style="font-size:12px"><a href="/reports?{urlencode({"q": code, "d": str(REPORT_DAYS)})}">리포트 모두 보기 →</a></div>' if len(rs) > 12 else ""
+        chart = ""
+        if len(ser) >= 20:
+            from dart_charts import line_chart
+            pts = ser[-400:]
+            lines_ = [dict(name="종가", pts=pts, color="price")]
+            if tg:
+                lines_.append(dict(name="목표가 평균", pts=[(pts[0][0], tg), (pts[-1][0], tg)], color="s2", dash=True))
+            chart = '<div style="margin-top:6px">' + line_chart(lines_, yfmt="{:,.0f}") + '</div>'
+        note = '' if ser else ('<div class="muted" style="font-size:12px;margin-top:4px">일별 주가가 없어 리포트 날짜의 종가를 못 보여 드려요.</div>' + px_btn)
+        rep_card = (f'<div class="card"><b>증권사 리포트와 주가</b>{top}{chart}'
+                    f'<div class="scroll"><table><tr><th>날짜</th><th>증권사</th><th>제목</th><th>의견</th><th>목표가</th><th>그날 종가</th><th>목표 괴리<br><span class="muted" style="font-size:10px">목표/그날 종가</span></th><th>이후 주가<br><span class="muted" style="font-size:10px">지금/그날 종가</span></th></tr>{trs}</table></div>{more}{note}'
+                    '<div class="muted" style="font-size:11px">그날 종가 = 리포트 날짜(또는 직전 거래일)의 종가예요. 목표가는 증권사 의견이고, 재무 점수와 같은 방향인지 비교해 보세요 (엇갈리면 이유를 읽어 볼 만해요).</div></div>')
     else:
-        rep_card = '<div class="card"><b>증권사 리포트</b><div class="muted" style="font-size:13px">최근 1년 리포트가 없어요 (다루는 증권사가 없거나 아직 수집 전).</div></div>'
+        rep_card = ('<div class="card"><b>증권사 리포트와 주가</b><div style="margin:4px 0">최근 종가 <b>' + (won(close) + "원" if close else "-") + '</b>' + (f' <span class="muted">({escape(close_d)})</span>' if close_d else "")
+                    + '</div><div class="muted" style="font-size:13px">최근 1년 리포트가 없어요 (다루는 증권사가 없거나 아직 수집 전).</div>' + ("" if ser else px_btn) + '</div>')
     other = ""
     try:
         oc = overall_cards(conn, [dict(code=code, name=r["name"] or code, mk="", n=0)])
@@ -3810,7 +3873,7 @@ def _fin_detail(conn, r, code, rows, mc, val, fa, q=None):
     except Exception:
         other = ""
     q_ = q or {}
-    return (head + _fin_profile_card(conn, code, cl) + f'<div class="card"><b>신호</b>{sg or "<div class=muted>-</div>"}</div>' + _fin_inventory_card(m, cl) + other + rep_card + clue_card
+    return (head + _fin_profile_card(conn, code, cl) + f'<div class="card"><b>신호</b>{sg or "<div class=muted>-</div>"}</div>' + _fin_inventory_card(m, cl) + _fin_peers_card(conn, code, r, rows) + other + rep_card + clue_card
             + _fin_statements_card(conn, code, r, q_.get("fbig") == "1") + _fin_doc_card(conn, code, q_)
             + _fold(f'<div class="card"><b>숫자 자세히</b><div class="scroll"><table><tr><th>항목</th><th>이번</th><th>전년 같은 기간 / 직전 연말</th><th>변화</th></tr>{body}{bs}</table></div>'
                     '<div class="muted" style="font-size:11px">손익·현금흐름은 누적 기준, 재무상태는 보고서 시점이에요. 금액은 원 단위를 억·조로 줄여 보여요. 차입금은 계정 이름으로 합친 추정값이에요.</div></div>', True))
@@ -5916,6 +5979,58 @@ def fin_chip(conn, code, long=True):
             + (f' <span class="muted" style="font-size:11px">{parts}</span>' if long else ""))
 
 
+def price_map(conn, code):
+    """종목의 일별 종가 [(날짜, 종가)] (오래된 순): 기관 매수 시세·법안 감시 시세·입법 분석 시세를 합침. 없으면 []"""
+    out = {}
+    for q_ in ("SELECT d, close FROM study_px WHERE code=?", "SELECT d, close FROM bill_px WHERE code=?", "SELECT date, close FROM prices WHERE code=?"):
+        try:
+            for d_, c_ in conn.execute(q_, (code,)):
+                if d_ and c_:
+                    out[d_] = c_
+        except sqlite3.Error:
+            continue
+    return sorted(out.items())
+
+
+def close_on_date(series, d, tol=10):
+    """price_map 결과에서 d(YYYY-MM-DD) 이전 마지막 종가 → (날짜, 종가) 또는 None (tol일보다 오래되면 None)"""
+    best = None
+    for dd, c_ in series:
+        if dd <= d:
+            best = (dd, c_)
+        else:
+            break
+    if best and (dt.date.fromisoformat(d) - dt.date.fromisoformat(best[0])).days <= tol:
+        return best
+    return None
+
+
+def target_moves(conn, code, days=365):
+    """증권사별 최근 두 리포트의 목표가 변화 → (상향, 하향, 유지, [(증권사, 이전, 이번)]) """
+    import research
+    since = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+    try:
+        rows = conn.execute("SELECT broker, target, date FROM reports WHERE code=? AND date>=? AND target IS NOT NULL ORDER BY date DESC, rowid DESC", (code, since)).fetchall()
+    except sqlite3.Error:
+        return 0, 0, 0, []
+    seq = {}
+    for b, t, d in rows:
+        seq.setdefault(research.norm_broker(b), []).append((d, t))
+    up = dn = same = 0
+    ch = []
+    for b, lst in seq.items():
+        if len(lst) >= 2:
+            (d1, t1), (d0, t0) = lst[0], lst[1]
+            if t1 > t0:
+                up += 1
+            elif t1 < t0:
+                dn += 1
+            else:
+                same += 1
+            ch.append((b, t0, t1))
+    return up, dn, same, ch
+
+
 def close_any(conn, code):
     """종목 최근 종가: 기관 매수 종목 시세 → KRX 시세 → 법안·입법 분석용 시세 순"""
     try:
@@ -5947,11 +6062,16 @@ def report_box(conn, code, name, reps, close=None, with_fin=True):
         if tgt:
             head += f' · 목표가 평균 <b>{won(tgt)}원</b>' + (f' {upside(tgt, close)}' if close else "")
         lines = ""
+        ser_ = price_map(conn, code)
+        if ser_:
+            head += f' · 최근 종가 {won(ser_[-1][1])}원'
         for r in rs[:2]:
             t = escape((r["title"] or "")[:40])
             t = f'<a href="{escape(r["link"])}">{t}</a>' if r["link"].startswith(("http://", "https://")) else t
+            c_on = close_on_date(ser_, r["date"]) if ser_ else None
             lines += (f'<div class="muted" style="font-size:12px">{escape(r["date"])} · {escape(r["broker"] or "")} · {t}'
-                      + (f' · {escape(r["opinion"])}' if r["opinion"] else "") + (f' · 목표 {won(r["target"])}원' if r["target"] else "") + '</div>')
+                      + (f' · {escape(r["opinion"])}' if r["opinion"] else "") + (f' · 목표 {won(r["target"])}원' if r["target"] else "")
+                      + (f' · 그날 종가 {won(c_on[1])}원' + (f' → 지금 {ser_[-1][1] / c_on[1] - 1:+.1%}' if ser_[-1][1] else "") if c_on else "") + '</div>')
         more = f'<a href="/reports?{urlencode({"q": code, "d": str(REPORT_DAYS)})}">리포트 모두 보기 →</a>' if len(rs) > 2 else ""
         body = head + lines + (f'<div style="font-size:12px">{more}</div>' if more else "")
     else:
@@ -6774,7 +6894,7 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 S = settings()
                 ok, why = S["fin_clue_run"]() if "fin_clue_run" in S else (False, "이 서버 버전은 지원하지 않아요")
                 return self._redirect("/ideas?" + urlencode({"t": "fin", "msg": ("✔ " if ok else "✖ ") + why}))
-            if path in ("/fin/pick", "/fin/unpick") and settings_api:
+            if path in ("/fin/pick", "/fin/unpick", "/fin/px") and settings_api:
                 n = min(int(self.headers.get("Content-Length") or 0), 4096)
                 form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore")).items()}
                 S = settings()
