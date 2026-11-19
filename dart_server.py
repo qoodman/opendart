@@ -1033,6 +1033,31 @@ def cmd_fin_clues(args):
     return 0
 
 
+def send_fin_alerts():
+    """재무제표 점수가 크게 바뀐 종목(fin_alert, 아직 안 보낸 것)을 푸시로 알림"""
+    conn = sqlite3.connect(results_db())
+    try:
+        rows = conn.execute("SELECT rowid, code, name, text FROM fin_alert WHERE sent=0 ORDER BY created, rowid").fetchall()
+    except sqlite3.Error:
+        conn.close()
+        return 0
+    try:
+        if not rows:
+            return 0
+        url = env("DASHBOARD_URL")
+        lines = [f"{n or c}: {t}" for _, c, n, t in rows[:8]]
+        notify(f"재무제표 점수 변화 {len(rows)}건", "\n".join(lines) + (f"\n…외 {len(rows) - 8}건" if len(rows) > 8 else ""),
+               click=(url.rstrip("/") + "/ideas?t=fin") if url else "", tags=("bar_chart",))
+        conn.executemany("UPDATE fin_alert SET sent=1 WHERE rowid=?", [(r[0],) for r in rows])
+        conn.commit()
+        return len(rows)
+    except Exception as e:
+        print(f"점수 변화 알림 실패: {e}", flush=True)
+        return 0
+    finally:
+        conn.close()
+
+
 def cmd_fin_analyze(args):
     """(서버 내부용) fin_run()이 띄우는 별도 프로세스"""
     import fin_analyzer
@@ -1042,6 +1067,8 @@ def cmd_fin_analyze(args):
     except ValueError:
         limit = 400
     fin_analyzer.run_job(str(results_db()), key, str(data_dir() / "dart_cache"), str(data_dir() / "fin_status.json"), limit=limit, log=lambda m: print(m, flush=True))
+    if env("DART_FIN_ALERT", "1") != "0":
+        send_fin_alerts()
     return 0
 
 

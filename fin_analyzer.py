@@ -40,6 +40,8 @@ def ensure(conn):
     CREATE TABLE IF NOT EXISTS fin_report_try (code TEXT PRIMARY KEY, tried TEXT, note TEXT);
     CREATE INDEX IF NOT EXISTS fin_report_code ON fin_report(code);
     CREATE TABLE IF NOT EXISTS fin_pick (code TEXT PRIMARY KEY, added TEXT);
+    CREATE TABLE IF NOT EXISTS fin_alert (code TEXT, name TEXT, period TEXT, prev_period TEXT, prev_score REAL, score REAL, prev_grade TEXT, grade TEXT, text TEXT, created TEXT, sent INTEGER DEFAULT 0,
+        PRIMARY KEY (code, period));
     CREATE TABLE IF NOT EXISTS fin_account (code TEXT, year INTEGER, rcode TEXT, sj TEXT, ord INTEGER, account_id TEXT, name TEXT, cur REAL, prev REAL, cur_add REAL, prev_add REAL);
     CREATE INDEX IF NOT EXISTS fin_account_code ON fin_account(code, year, rcode);
     """)
@@ -424,6 +426,53 @@ def is_financial(conn, code):
     return bool(r and r[0] and any(w in r[0] for w in FIN_WORDS))
 
 
+# ---------------- 점수 변화 알림 ----------------
+_PORDER = {"11013": 1, "11012": 2, "11014": 3, "11011": 4}
+
+
+def _norm_sig(t):
+    return re.sub(r"[\d\.\,\+\-%\s\(\)]+", "", t or "")[:24]
+
+
+def make_alert(conn, code, name, year, rcode, score_new, today=None):
+    """방금 저장한 보고서를 같은 종목의 직전 기간 보고서와 비교해 눈에 띄는 변화가 있으면 fin_alert에 기록 → 문장 또는 None.
+    조건: 점수 ±15 이상, 등급 변화, 새 경고, 영업이익 흑자 전환. 같은 기간을 다시 분석한 경우는 알리지 않아요."""
+    cur_key = (year, _PORDER.get(rcode, 0))
+    prev = None
+    for y, rc, sc, gr, sg in conn.execute("SELECT year, rcode, score, grade, signals FROM fin_report WHERE code=?", (code,)):
+        k = (y, _PORDER.get(rc, 0))
+        if k < cur_key and (prev is None or k > prev[0]):
+            prev = (k, y, rc, sc, gr, sg)
+    if not prev or prev[3] is None or score_new["total"] is None:
+        return None
+    _, py, prc, psc, pgr, psg = prev
+    delta = score_new["total"] - psc
+    pw = {_norm_sig(t) for k, t in json.loads(psg or "[]") if k == "warn"}
+    new_warn = [t for k, t in score_new["signals"] if k == "warn" and _norm_sig(t) not in pw]
+    turn = any("흑자 전환" in t for k, t in score_new["signals"]) and not any("흑자 전환" in t for k, t in json.loads(psg or "[]"))
+    if not (abs(delta) >= 15 or pgr != score_new["grade"] or new_warn or turn):
+        return None
+    parts = [f"{pgr} {int(psc)} → {score_new['grade']} {int(score_new['total'])} ({delta:+.0f})"]
+    if new_warn:
+        parts.append("새 경고: " + " / ".join(new_warn[:2]))
+    if turn:
+        parts.append("영업이익 흑자 전환")
+    text = " · ".join(parts)
+    nm = {"11013": "1분기", "11012": "반기", "11014": "3분기", "11011": "사업"}
+    period = f"{year} {nm.get(rcode, rcode)}"
+    conn.execute("INSERT OR REPLACE INTO fin_alert (code, name, period, prev_period, prev_score, score, prev_grade, grade, text, created, sent) VALUES (?,?,?,?,?,?,?,?,?,?,0)",
+                 (code, name, period, f"{py} {nm.get(prc, prc)}", psc, score_new["total"], pgr, score_new["grade"], text, (today or dt.date.today()).isoformat()))
+    return text
+
+
+def recent_alerts(conn, limit=40):
+    try:
+        return [dict(code=r[0], name=r[1], period=r[2], prev_period=r[3], prev_score=r[4], score=r[5], prev_grade=r[6], grade=r[7], text=r[8], created=r[9])
+                for r in conn.execute("SELECT code, name, period, prev_period, prev_score, score, prev_grade, grade, text, created FROM fin_alert ORDER BY created DESC, rowid DESC LIMIT ?", (limit,))]
+    except sqlite3.Error:
+        return []
+
+
 # ---------------- 한 번에 돌리기 ----------------
 def run(db_path, key, cache_dir, limit=400, log=print, progress=None, today=None, session=None, max_age_days=5, sleep=0.2):
     """대상 종목을 차례로 분석해 fin_report에 저장. 최근 max_age_days일 안에 받은 종목은 건너뜀(이어서 하기). → dict(대상, 분석, 보고서 없음, 실패)"""
@@ -467,6 +516,10 @@ def run(db_path, key, cache_dir, limit=400, log=print, progress=None, today=None
                 conn.commit()
                 continue
             sc = got["score"]
+            try:
+                make_alert(conn, code, nm, got["year"], got["rcode"], sc, today)
+            except Exception as e:
+                log(f"  (점수 변화 비교 실패 {code}: {type(e).__name__})")
             conn.execute("INSERT OR REPLACE INTO fin_report VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                          (code, got["year"], got["rcode"], got["fs"], got["rcept_no"], nm, json.dumps(got["m"], ensure_ascii=False), sc["total"], sc["grade"],
                           json.dumps(sc["parts"], ensure_ascii=False), json.dumps(sc["signals"], ensure_ascii=False), today.isoformat()))

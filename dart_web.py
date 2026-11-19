@@ -3417,7 +3417,24 @@ def view_fin(conn, q):
              + (f'<div class="scroll"><table><tr><th></th><th>종목</th><th>점수<br><span class="muted" style="font-size:10px">성장·수익·현금·안정</span></th><th>매출<br>전년비</th><th>영업이익<br>전년비</th><th>영업<br>이익률</th><th>ROE<br>연환산</th><th>영업CF<br>/순이익</th><th>부채<br>비율</th><th>경고</th><th>단서</th><th>리포트</th><th>PER/PBR<br>시총</th></tr>{trs}</table></div>' if trs else '<div class="muted">조건에 맞는 종목이 없어요.</div>')
              + more + '</div>')
     cmp_card = _fin_compare(rows, picks, val, mc) if picks and (only_pick or len(picks) >= 2) else ""
-    return page("재무제표 분석", flash + prep + table + cmp_card + how, refresh=running)
+    alerts = fa.recent_alerts(conn, 30)
+    al_card = ""
+    if alerts:
+        ls = "".join(f'<div style="margin:4px 0;font-size:13px"><span class="muted" style="font-size:11px">{escape(a["created"])} · {escape(a["period"])}</span> '
+                     f'<a href="/ideas?{urlencode({"t": "fin", "code": a["code"]})}"><b>{escape(a["name"] or a["code"])}</b></a> '
+                     f'<span class="{"up" if a["score"] > a["prev_score"] else "down"}">{"▲" if a["score"] > a["prev_score"] else "▼"}</span> {escape(a["text"])}</div>' for a in alerts)
+        al_card = ('<div class="card"><details open><summary><b>재무 점수가 바뀐 종목</b> <span class="muted" style="font-size:12px">새 보고서를 분석했더니 직전 보고서보다 점수가 크게 바뀌거나 새 경고가 생긴 종목 · 푸시 알림도 보내요</span></summary>'
+                   + ls + '</details></div>')
+    bs_card = ""
+    try:
+        import broker_perf
+        bt = _broker_table(broker_perf.compute(conn), None, limit=15)
+        if bt:
+            bs_card = ('<div class="card"><details><summary><b>증권사 리포트 성적표</b> <span class="muted" style="font-size:12px">리포트 이후 1·3개월 주가, 목표가 도달률</span></summary>'
+                       + bt + f'<div class="muted" style="font-size:11px">{BROKER_NOTE}</div></details></div>')
+    except Exception:
+        pass
+    return page("재무제표 분석", flash + prep + al_card + table + cmp_card + bs_card + how, refresh=running)
 
 
 FIN_PRESETS = {
@@ -3650,6 +3667,31 @@ def _fin_doc_card(conn, code, q):
             + '<div class="muted" style="font-size:11px;margin-top:4px">원문을 글자로만 바꿔 저장해서 표는 칸마다 | 로 이어 보여요. 그림·도표는 안 나와요.</div></details></div>')
 
 
+def _broker_table(stats, brokers=None, limit=15, min_n=3):
+    """증권사 성적 표. brokers를 주면 그 증권사들만. 표본(n)이 min_n 미만은 흐리게"""
+    import research
+    items = [(b, v) for b, v in stats.items() if (brokers is None or b in brokers) and v["n"] >= (1 if brokers else min_n)]
+    items.sort(key=lambda kv: -kv[1]["n"])
+    pc = lambda v: "-" if v is None else f'<span class="{"up" if v > 0 else "down" if v < 0 else ""}">{v:+.1%}</span>'
+    trs = ""
+    for b, v in items[:limit]:
+        dim = ' style="opacity:.55"' if v["n"] < min_n else ""
+        win_t = "-" if v["win3"] is None else f'{v["win3"]:.0%}'
+        hit_t = "-" if v["hit"] is None else f'{v["hit"]:.0%}'
+        gap_t = "-" if v["gap"] is None else f'{v["gap"]:+.0%}'
+        trs += (f'<tr{dim}><td>{escape(b)}</td><td>{v["n"]}</td><td>{pc(v["r1"])}<br><span class="muted" style="font-size:10px">지수대비 {pc(v["x1"])}</span></td>'
+                f'<td>{pc(v["r3"])}<br><span class="muted" style="font-size:10px">지수대비 {pc(v["x3"])}</span></td>'
+                f'<td>{win_t}</td><td>{hit_t}<br><span class="muted" style="font-size:10px">{v["hit_n"]}건</span></td><td>{gap_t}</td></tr>')
+    if not trs:
+        return ""
+    return ('<div class="scroll"><table><tr><th>증권사</th><th>리포트</th><th>1개월 후<br>평균</th><th>3개월 후<br>평균</th><th>3개월<br>상승 비율</th><th>목표가<br>6개월 내 도달</th><th>평균 목표<br>괴리</th></tr>'
+            + trs + '</table></div>')
+
+
+BROKER_NOTE = ('주가가 있는 종목(분석 종목·기관 매수 종목·법안 감시 종목)의 리포트만 셌어요. 리포트가 나온 날 종가 기준 1개월(30일)·3개월(91일) 뒤 수익률이고 지수 대비는 코스피 기준이에요. '
+               '대상이 지금 시총 상위·관심 종목이라 살아남은 종목 위주(생존 편향)이고 시장이 오른 시기엔 대부분 좋아 보여서, 지수 대비와 표본 수를 같이 보세요. 과거 성적이 앞으로를 보장하지 않아요.')
+
+
 def _fin_peers_card(conn, code, r, rows):
     """같은 업종(네이버 업종) 안에서 이 종목의 위치: 분석한 종목끼리 점수·성장·영업이익률·부채비율 비교"""
     try:
@@ -3681,6 +3723,24 @@ def _fin_peers_card(conn, code, r, rows):
     return (f'<div class="card"><b>같은 업종 비교</b> <span class="muted" style="font-size:12px">{escape(ind)} · 분석한 {len(peers)}개 중 점수 {rank}위</span>'
             f'<div class="scroll"><table><tr><th>종목</th><th>점수</th><th>매출 증가</th><th>영업이익률</th><th>부채비율</th></tr>{trs}</table></div>'
             '<div class="muted" style="font-size:11px">업종 안에서 비교해야 부채비율·영업이익률의 의미가 맞아요. 분석 대상(시총 상위·관심 종목)만 들어 있어서 업종 전체가 아닐 수 있어요.</div></div>')
+
+
+def _fin_broker_card(conn, code, rs):
+    """이 종목 리포트를 쓴 증권사들의 과거 성적 (분석 종목 전체의 리포트 기준)"""
+    if not rs:
+        return ""
+    try:
+        import broker_perf
+        import research
+        stats = broker_perf.compute(conn)
+    except Exception:
+        return ""
+    names = {research.norm_broker(x["broker"]) for x in rs}
+    tb = _broker_table(stats, names, limit=10)
+    if not tb:
+        return ""
+    return ('<div class="card"><details><summary><b>이 종목을 다룬 증권사의 과거 성적</b> <span class="muted" style="font-size:12px">리포트 이후 주가 · 목표가 도달 (주가를 받아 둔 종목 전체 기준)</span></summary>'
+            + tb + f'<div class="muted" style="font-size:11px">{BROKER_NOTE}</div></details></div>')
 
 
 def _fin_profile_card(conn, code, cl):
@@ -3873,7 +3933,7 @@ def _fin_detail(conn, r, code, rows, mc, val, fa, q=None):
     except Exception:
         other = ""
     q_ = q or {}
-    return (head + _fin_profile_card(conn, code, cl) + f'<div class="card"><b>신호</b>{sg or "<div class=muted>-</div>"}</div>' + _fin_inventory_card(m, cl) + _fin_peers_card(conn, code, r, rows) + other + rep_card + clue_card
+    return (head + _fin_profile_card(conn, code, cl) + f'<div class="card"><b>신호</b>{sg or "<div class=muted>-</div>"}</div>' + _fin_inventory_card(m, cl) + _fin_peers_card(conn, code, r, rows) + other + rep_card + _fin_broker_card(conn, code, rs) + clue_card
             + _fin_statements_card(conn, code, r, q_.get("fbig") == "1") + _fin_doc_card(conn, code, q_)
             + _fold(f'<div class="card"><b>숫자 자세히</b><div class="scroll"><table><tr><th>항목</th><th>이번</th><th>전년 같은 기간 / 직전 연말</th><th>변화</th></tr>{body}{bs}</table></div>'
                     '<div class="muted" style="font-size:11px">손익·현금흐름은 누적 기준, 재무상태는 보고서 시점이에요. 금액은 원 단위를 억·조로 줄여 보여요. 차입금은 계정 이름으로 합친 추정값이에요.</div></div>', True))
