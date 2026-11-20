@@ -3248,7 +3248,7 @@ def view_cycle(conn, q):
     return page("투자 사이클", intro + acard + live + gcard + tipc + _fold(thc, False))
 
 
-FIN_SORTS = {"score": ("점수 높은 순", lambda r: -(r["score"] or -1)), "rev": ("매출 증가율 순", lambda r: -(r["m"].get("rev_yoy") if r["m"].get("rev_yoy") is not None else -9)),
+FIN_SORTS = {"upside": ("목표가 상승여력 높은 순", lambda r: 0), "score": ("점수 높은 순", lambda r: -(r["score"] or -1)), "rev": ("매출 증가율 순", lambda r: -(r["m"].get("rev_yoy") if r["m"].get("rev_yoy") is not None else -9)),
              "op": ("영업이익 증가율 순", lambda r: -(r["m"].get("op_yoy") if r["m"].get("op_yoy") is not None else -9)),
              "opm": ("영업이익률 순", lambda r: -(r["m"].get("opm") if r["m"].get("opm") is not None else -9)),
              "cash": ("현금 전환(영업CF/순이익) 순", lambda r: -(r["m"].get("ocf_to_ni") if r["m"].get("ocf_to_ni") is not None else -9)),
@@ -3335,13 +3335,21 @@ def view_fin(conn, q):
         v = num(k)
         if v is not None:
             crit[key] = v / scale
-    for k, key in (("cl", "clean"), ("fc", "fcf"), ("nc", "netcash"), ("tn", "turn"), ("in", "insider"), ("sh", "shr"), ("su", "staff_up"), ("au", "audit_ok"), ("nw", "no_warn_clue")):
+    for k, key in (("cl", "clean"), ("fc", "fcf"), ("nc", "netcash"), ("tn", "turn"), ("td", "tdown"), ("tu", "tup"), ("in", "insider"), ("sh", "shr"), ("su", "staff_up"), ("au", "audit_ok"), ("nw", "no_warn_clue")):
         if q.get(k) == "1":
             crit[key] = True
     picks = fin_picks(conn)
     only_pick = q.get("pick") == "1"
     only_rep = q.get("rp") == "1"
     reps_all = report_map(conn, [r["code"] for r in rows])
+    need_ri = any(k in crit for k in ("upmin", "tdown", "tup")) or sort == "upside"
+    rinfo = {}
+    if need_ri:
+        for code_ in reps_all:
+            tg_, nb_ = consensus(conn, code_)
+            cl_ = close_any(conn, code_)
+            up_n, dn_n, _same, _ch = target_moves(conn, code_)
+            rinfo[code_] = dict(up=(tg_ / cl_ - 1) if (tg_ and cl_) else None, nb=nb_, upn=up_n, dn=dn_n)
     sel = []
     for r in rows:
         if only_rep and r["code"] not in reps_all:
@@ -3350,13 +3358,16 @@ def view_fin(conn, q):
             continue
         if only_pick and r["code"] not in picks:
             continue
-        if crit and not _fin_match(r, crit, val.get(r["code"], (None, None)), mc.get(r["code"]), clue_info.get(r["code"])):
+        if crit and not _fin_match(r, crit, val.get(r["code"], (None, None)), mc.get(r["code"]), clue_info.get(r["code"]), rinfo.get(r["code"])):
             continue
         sel.append(r)
-    sel.sort(key=FIN_SORTS[sort][1])
+    if sort == "upside":
+        sel.sort(key=lambda r: -((rinfo.get(r["code"]) or {}).get("up") if (rinfo.get(r["code"]) or {}).get("up") is not None else -9))
+    else:
+        sel.sort(key=FIN_SORTS[sort][1])
     show = [r for r in sel if r["score"] is not None]
     limit = 500 if q.get("all") == "1" else 80
-    keep = {k: v for k, v in q.items() if k in ("kw", "s", "p", "pick", "all", *FIN_NUMS, "cl", "fc", "nc", "tn", "in", "sh", "su", "au", "nw", "rp") and v}
+    keep = {k: v for k, v in q.items() if k in ("kw", "s", "p", "pick", "all", *FIN_NUMS, "cl", "fc", "nc", "tn", "td", "tu", "in", "sh", "su", "au", "nw", "rp") and v}
     link = lambda **kw_: "/ideas?" + urlencode({"t": "fin", **{k: v for k, v in {**keep, **kw_}.items() if v not in (None, "")}})
     # 프리셋 칩
     chips = " ".join((f'<b class="chip" style="background:var(--accent);color:var(--bg)" title="{escape(v[1])}">{escape(v[0])}</b>' if k == pkey else
@@ -3368,7 +3379,7 @@ def view_fin(conn, q):
     nums = "".join(f'<label style="font-size:13px;white-space:nowrap">{lab} <input name="{k}" value="{pv(key, scale)}" size="5" inputmode="decimal" placeholder="{ph}"></label> '
                    for k, (key, scale), lab, ph in FIN_NUM_FIELDS)
     checks = "".join(f'<label style="font-size:13px;white-space:nowrap"><input type="checkbox" name="{k}" value="1"{" checked" if crit.get(key) else ""}> {lab}</label> '
-                     for k, key, lab in (("cl", "clean", "경고 없음"), ("fc", "fcf", "잉여현금흐름 흑자"), ("nc", "netcash", "순현금"), ("tn", "turn", "영업이익 흑자 전환"), ("in", "insider", "내부자 순매수(단서)"), ("sh", "shr", "배당·자사주(단서)"), ("su", "staff_up", "직원 5%↑(단서)"), ("au", "audit_ok", "감사의견 적정(단서)"), ("nw", "no_warn_clue", "경고 단서 없음(단서)")))
+                     for k, key, lab in (("cl", "clean", "경고 없음"), ("fc", "fcf", "잉여현금흐름 흑자"), ("nc", "netcash", "순현금"), ("tn", "turn", "영업이익 흑자 전환"), ("td", "tdown", "목표가 하향 우세"), ("tu", "tup", "목표가 상향 우세"), ("in", "insider", "내부자 순매수(단서)"), ("sh", "shr", "배당·자사주(단서)"), ("su", "staff_up", "직원 5%↑(단서)"), ("au", "audit_ok", "감사의견 적정(단서)"), ("nw", "no_warn_clue", "경고 단서 없음(단서)")))
     checks += f'<label style="font-size:13px;white-space:nowrap"><input type="checkbox" name="rp" value="1"{" checked" if only_rep else ""}> 증권사 리포트 있는 종목만</label> '
     opts = lambda cur, items: "".join(f'<option value="{k}"{" selected" if k == cur else ""}>{escape(v)}</option>' for k, v in items)
     form = ('<form method="get" action="/ideas" class="filters" style="align-items:center"><input type="hidden" name="t" value="fin">'
@@ -3443,18 +3454,21 @@ FIN_PRESETS = {
     "turn": ("흑자 전환", "전년 같은 기간 영업적자였다가 이번에 영업흑자 — 바뀐 이유(일회성인지)를 꼭 확인하세요", dict(turn=True)),
     "value": ("저평가 우량", "점수 65 이상 · 경고 없음 · PER 15 이하(흑자) · PBR 1.5 이하 — 좋은 기업을 싼 값에 (PER·PBR은 네이버 증권 값)", dict(min_score=65, clean=True, per=15.0, pbr=1.5)),
     "cash": ("현금 부자", "순현금(현금성자산 > 차입금)이고 영업현금흐름 ÷ 순이익 1배 이상 · 잉여현금흐름 흑자", dict(netcash=True, cash=1.0, fcf=True)),
+    "gap_up": ("우량 + 증권사 낙관", "점수 70 이상이고 증권사 목표가 평균이 현재가보다 20% 이상 높음 — 재무도 좋고 증권사도 상승여력을 보는 종목 (리포트가 있는 종목만)", dict(min_score=70, upmin=0.20)),
+    "gap_down": ("우량인데 목표가 하향", "점수 70 이상인데 최근 목표가를 내린 증권사가 올린 곳보다 많음 — 숫자는 좋은데 증권사 시각이 식는 중 (왜 그런지 리포트 확인)", dict(min_score=70, tdown=True)),
+    "gap_warn": ("약한데 증권사 낙관", "점수 50 이하인데 목표가 평균이 현재가보다 20% 이상 높음 — 재무가 약한데 낙관일 때 근거를 따져 볼 종목", dict(max_score=50, upmin=0.20)),
     "insider": ("내부자 매수 + 우량", "점수 60 이상이고 최근 120일 임원·주요주주가 순매수 — 자기 회사 주식을 사는 사람이 있는 종목 (공시 단서를 받아야 해요)", dict(min_score=60, insider=True)),
     "rnd": ("연구개발 투자형", "연구개발비가 매출의 5% 이상이고 점수 55 이상 · 감사의견 적정 (공시 본문에서 읽은 값이라 틀릴 수 있어요)", dict(min_score=55, rnd=5.0, audit_ok=True)),
     "shr": ("주주환원형", "점수 60 이상이고 배당을 하거나 자기주식을 취득·소각 — 이익을 주주에게 돌려주는 종목", dict(min_score=60, shr=True)),
     "profit": ("고수익·저부채", "ROE(연환산) 15% 이상 · 영업이익률 10% 이상 · 부채비율 100% 이하 — 버핏식 '좋은 사업'의 숫자 흔적", dict(roe=0.15, opm=0.10, debt=1.0)),
 }
-FIN_NUMS = {"ex": ("exp", 1), "rd": ("rnd", 1), "ms": ("min_score", 1), "rv": ("rev", 100), "ov": ("op", 100), "om": ("opm", 100), "ro": ("roe", 100), "cs": ("cash", 1), "db": ("debt", 100), "pe": ("per", 1), "pb": ("pbr", 1), "cp": ("cap", 1)}
-FIN_NUM_FIELDS = [("ex", FIN_NUMS["ex"], "수출 비중 ≥ (%)", "50"), ("rd", FIN_NUMS["rd"], "연구개발비/매출 ≥ (%)", "5"), ("ms", FIN_NUMS["ms"], "점수 ≥", "70"), ("rv", FIN_NUMS["rv"], "매출 증가율 ≥ (%)", "10"), ("ov", FIN_NUMS["ov"], "영업이익 증가율 ≥ (%)", "10"),
+FIN_NUMS = {"up": ("upmin", 100), "mx": ("max_score", 1), "ex": ("exp", 1), "rd": ("rnd", 1), "ms": ("min_score", 1), "rv": ("rev", 100), "ov": ("op", 100), "om": ("opm", 100), "ro": ("roe", 100), "cs": ("cash", 1), "db": ("debt", 100), "pe": ("per", 1), "pb": ("pbr", 1), "cp": ("cap", 1)}
+FIN_NUM_FIELDS = [("up", FIN_NUMS["up"], "목표가 상승여력 ≥ (%)", "20"), ("mx", FIN_NUMS["mx"], "점수 ≤", "50"), ("ex", FIN_NUMS["ex"], "수출 비중 ≥ (%)", "50"), ("rd", FIN_NUMS["rd"], "연구개발비/매출 ≥ (%)", "5"), ("ms", FIN_NUMS["ms"], "점수 ≥", "70"), ("rv", FIN_NUMS["rv"], "매출 증가율 ≥ (%)", "10"), ("ov", FIN_NUMS["ov"], "영업이익 증가율 ≥ (%)", "10"),
                   ("om", FIN_NUMS["om"], "영업이익률 ≥ (%)", "10"), ("ro", FIN_NUMS["ro"], "ROE ≥ (%)", "10"), ("cs", FIN_NUMS["cs"], "영업CF/순이익 ≥ (배)", "1"),
                   ("db", FIN_NUMS["db"], "부채비율 ≤ (%)", "100"), ("pe", FIN_NUMS["pe"], "PER ≤", "15"), ("pb", FIN_NUMS["pb"], "PBR ≤", "1.5"), ("cp", FIN_NUMS["cp"], "시총 ≥ (억원)", "1000")]
 
 
-def _fin_match(r, c, vp, cap, ci=None):
+def _fin_match(r, c, vp, cap, ci=None, ri=None):
     """종목 r이 조건 c(dict)를 모두 만족하나. 값이 없으면 그 조건은 불합격 (모르는 값으로 통과시키지 않음)"""
     m = r["m"]
     per, pbr = vp
@@ -3462,6 +3476,17 @@ def _fin_match(r, c, vp, cap, ci=None):
         return False
     if "min_score" in c and r["score"] < c["min_score"]:
         return False
+    if "max_score" in c and r["score"] > c["max_score"]:
+        return False
+    if any(k in c for k in ("upmin", "tdown", "tup")):
+        if not ri:
+            return False
+        if "upmin" in c and (ri.get("up") is None or ri["up"] < c["upmin"]):
+            return False
+        if c.get("tdown") and not (ri.get("dn", 0) > ri.get("upn", 0)):
+            return False
+        if c.get("tup") and not (ri.get("upn", 0) > ri.get("dn", 0)):
+            return False
     for key, mk in (("rev", "rev_yoy"), ("op", "op_yoy"), ("opm", "opm"), ("roe", "roe"), ("cash", "ocf_to_ni")):
         if key in c and (m.get(mk) is None or m[mk] < c[key]):
             if not (key == "op" and m.get("op_py") is not None and m["op_py"] <= 0 < (m.get("op") or 0)):      # 영업이익 증가율은 흑자 전환도 인정
