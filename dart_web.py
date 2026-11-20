@@ -3013,6 +3013,15 @@ def view_events(conn, q):
         law_rows = []
     udays = {"60": 60, "150": 150, "365": 365}.get(q.get("ud", ""), 150)
     show_mkt = q.get("um") == "1"
+    try:
+        import dispute as _dp
+        for s_ in _dp.load_states(conn):
+            mt_ = (s_["payload"] or {}).get("meeting")
+            if mt_ and today.isoformat() <= mt_["date"] <= (today + _dt1.timedelta(days=udays)).isoformat():
+                law_rows.append(dict(d=mt_["date"], end="", title=f'{"임시" if mt_.get("kind") == "egm" else ""}주주총회: {s_["name"]} (지분분쟁 {s_["level"]})', kind="지분분쟁", events=[], src=dart_link(mt_["rcept_no"]) if mt_.get("rcept_no") else "",
+                                     note="소집공고에서 읽은 개최일", themes=[]))
+    except Exception:
+        pass
     ups = et.upcoming(conn, today, udays, law_rows)
 
     def theme_rows(ev_, top_n=6):
@@ -4274,9 +4283,16 @@ def view_dispute(conn, q):
                 top = max(sc["ext"], key=lambda h: h["pct"])
                 gap = f'<div style="font-size:12px;margin:2px 0">최대주주 측 {sc["holder_pct"]:.1f}% vs {escape(top["name"])} {top["pct"]:.1f}% — <b class="{"down" if (sc.get("gap") or 99) <= 5 else ""}">격차 {sc["holder_pct"] - top["pct"]:.1f}%p</b></div>'
             rs_ = "".join(f'<div class="muted" style="font-size:12px">· {escape(r)}</div>' for r in (sc.get("reasons") or [])[:3]) if not ev else ""
+            sw = sc.get("swing") or []
+            sw_t = ('<div style="font-size:12px;margin:2px 0">🎚 캐스팅보트: ' + ", ".join(f'<b>{escape(x["name"])}</b> {x["pct"]:.1f}%' + (" (기관)" if x.get("inst") else "") for x in sw[:3]) + '</div>') if sw else ""
+            mt = pl.get("meeting")
+            mt_t = ""
+            if mt:
+                dd_ = (dt.date.fromisoformat(mt["date"]) - dt.date.today()).days
+                mt_t = f'<span class="chip down" style="font-weight:700">📅 주총 {"오늘" if dd_ == 0 else f"D-{dd_}" if dd_ > 0 else f"{-dd_}일 전"} ({escape(mt["date"])})</span> '
             body += (f'<div style="border-top:1px solid var(--line);padding:8px 0"><div><a href="/ideas?{urlencode({"t": "dispute", "code": s_["code"]})}"><b>{escape(s_["name"] or s_["code"])}</b></a> <span class="muted" style="font-size:12px">{escape(s_["code"])}</span> '
                      f'<span class="chip {DSP_CLS.get(lv, "")}" style="font-weight:700">{lv}</span> <span class="muted" style="font-size:12px">점수 {s_["score"]:.1f}' + (f' · 최근 신호 {escape(ev["last"])}' if ev.get("last") else "") + f'</span> {fin_chip(conn, s_["code"], False)}</div>'
-                     f'<div style="margin:3px 0">{kinds}</div>{gap}{rs_}{_dsp_events_html(pl.get("events") or [], 3)}</div>')
+                     f'<div style="margin:3px 0">{mt_t}{kinds}</div>{gap}{sw_t}{rs_}{_dsp_events_html(pl.get("events") or [], 3)}</div>')
         more = f'<div class="muted" style="font-size:12px">{len(items)}개 중 60개만 보여 줘요 (찾기로 좁혀 보세요).</div>' if len(items) > 60 else ""
         desc = {"치열": "서로 맞붙는 신호가 겹친, 지금 가장 뜨거운 분쟁", "시작": "분쟁 신호가 막 나온 종목", "징후": "경영참여 목적 5% 보유자가 나타난 종목",
                 "가능성 높음": "분쟁 공시는 없지만 지분 구조가 아슬아슬한 종목", "가능성": "구조상 분쟁 가능성이 있는 종목"}[lv]
@@ -4297,6 +4313,13 @@ def _dsp_detail(conn, s_, code):
             + (f' · 이전 단계 {escape(s_["prev_level"])}' if s_.get("prev_level") and s_["prev_level"] != s_["level"] else "") + '</span></div>'
             + (f'<div style="font-size:13px">최근 90일 신호: ' + ", ".join(escape(dp.KIND_LABEL.get(k, k)) for k in (ev.get("hot") or [])) + f' · 최근 30일 {ev.get("recent30", 0)}건' + (" · 행동주의 성향 보유자 관련" if ev.get("activist") else "") + '</div>' if ev else "")
             + '</div>')
+    mt = pl.get("meeting")
+    meet_card = ""
+    if mt:
+        dd_ = (dt.date.fromisoformat(mt["date"]) - dt.date.today()).days
+        meet_card = ('<div class="card"><b>📅 주주총회 일정</b><div style="margin:4px 0;font-size:15px"><b>' + escape(mt["date"]) + f'</b> <span class="chip down" style="font-weight:700">{"오늘" if dd_ == 0 else f"D-{dd_}" if dd_ > 0 else f"{-dd_}일 전"}</span> '
+                     + (f'<a class="chip" href="{dart_link(mt["rcept_no"])}" target="_blank" rel="noopener noreferrer">소집공고 ↗</a>' if mt.get("rcept_no") else "") + '</div>'
+                     '<div class="muted" style="font-size:12px">소집공고 본문의 개최일시를 읽은 값이에요 (이사 선임·정관 변경 등 안건은 공고에서 확인). 이 일정은 아이디어 → 이벤트 일정에도 올라가요. 표 대결이면 위임장 권유 참고서류와 의결권 행사 마감도 함께 보세요.</div></div>')
     tl = ""
     for e in (pl.get("events") or []):
         tl += _dsp_events_html([e], 1)
@@ -4313,6 +4336,8 @@ def _dsp_detail(conn, s_, code):
         why = "".join(f'<li>{escape(r)}</li>' for r in sc.get("reasons") or [])
         hold_card = ('<div class="card"><b>지분 구조</b>' + (f'<div class="scroll"><table><tr><th>보유자</th><th>지분율</th><th>보고 종류</th><th>마지막 보고</th><th>직전 대비</th></tr>{rows}</table></div>' if rows else "")
                      + (f'<div style="margin-top:6px;font-size:13px"><b>분쟁 가능성 근거</b> (구조 점수 {sc.get("score", 0)})<ul style="padding-left:18px;margin:4px 0">{why}</ul></div>' if why else "")
+                     + ('<div style="margin-top:6px;font-size:13px"><b>🎚 캐스팅보트</b> — 두 쪽의 격차(' + f'{sc["swing"][0]["gap"]:.1f}%p' + ')보다 지분이 커서 표가 갈리면 승패를 가를 수 있는 보유자<ul style="padding-left:18px;margin:4px 0">'
+                        + "".join(f'<li><b>{escape(x["name"])}</b> {x["pct"]:.1f}%' + (" (기관 — 의결권 행사 입장은 공개되거나 보도되는 경우가 많아요)" if x.get("inst") else "") + '</li>' for x in sc["swing"][:5]) + '</ul></div>' if sc.get("swing") else "")
                      + '<div class="muted" style="font-size:11px">일반 = 경영참여 목적 보고, 약식 = 단순·일반투자 보고. 🎯 = 행동주의 성향으로 알려진 이름. 최대주주 측 지분은 연말 기준이라 최근 변동은 반영이 늦을 수 있어요. 최대주주와 특수관계인의 정확한 합계는 최대주주등소유주식변동신고서를 확인하세요.</div></div>')
     guide = ('<div class="card"><details><summary><b>이 신호들을 어떻게 읽나요?</b></summary><ul class="muted" style="font-size:13px;padding-left:18px">'
              '<li><b>🗳 주주측 위임장 권유</b>: 주총에서 표를 모으려는 준비예요. 보통 주총 몇 주 전에 나오고, 안건(이사 선임·정관 변경)을 참고서류에서 확인하세요.</li>'
@@ -4320,7 +4345,7 @@ def _dsp_detail(conn, s_, code):
              '<li><b>👑 최대주주 변경 / 📈 지분 변동</b>: 지분 격차가 작으면 몇 %p 차로 주도권이 바뀌어요. 시간외 대량 매수, 우호 지분(자사주·제3자 배정·백기사)이 이어지는지 보세요.</li>'
              '<li><b>🎯 경영참여 5% 보유</b>: 단순 투자가 아니라 경영에 영향을 주려는 목적으로 신고한 보유자예요. 보유 목적이 바뀌는 보고는 분쟁의 신호탄인 경우가 많아요.</li>'
              '<li><b>캐스팅보트</b>: 산업은행·국민연금 같은 큰 기관의 지분과 입장이 승패를 가르기도 해요 (국민연금은 단순투자 보고로 이 화면의 5% 목록에 보여요).</li></ul></div>')
-    return head + tl_card + hold_card + guide
+    return head + meet_card + tl_card + hold_card + guide
 
 
 def view_legstudy(conn, q):

@@ -28,10 +28,10 @@ HOT_KINDS = {"litig", "injunction", "tender", "proxy_ext", "proposal", "owner_ch
 KIND_LABEL = {
     "litig": "경영권 분쟁 소송", "injunction": "가처분", "tender": "공개매수", "proxy_ext": "주주측 위임장 권유(표 대결)", "proxy_co": "회사 위임장 권유",
     "proposal": "주주제안·소수주주권·임시주총 청구", "owner_chg": "최대주주 변경", "blk_gen": "경영참여 목적 5% 보유(대량보유 일반)", "owner_buy": "최대주주 측 지분 변동",
-    "defense": "자기주식·제3자 배정(방어·우호지분)", "clarify": "풍문·보도 해명", "legal": "횡령·배임", "egm": "임시주주총회 소집",
+    "defense": "자기주식·제3자 배정(방어·우호지분)", "clarify": "풍문·보도 해명", "legal": "횡령·배임", "egm": "임시주주총회 소집", "agm": "주주총회 소집공고",
 }
 KIND_ICON = {"litig": "⚖", "injunction": "⚖", "tender": "📢", "proxy_ext": "🗳", "proxy_co": "🗳", "proposal": "📝", "owner_chg": "👑", "blk_gen": "🎯", "owner_buy": "📈",
-             "defense": "🛡", "clarify": "❓", "legal": "🚨", "egm": "📅"}
+             "defense": "🛡", "clarify": "❓", "legal": "🚨", "egm": "📅", "agm": "📅"}
 # 행동주의 성향으로 알려진 투자자·펀드 이름의 일부 (제출인 이름에 들어 있으면 표시). 직접 고칠 수 있게 상수로 둠
 ACTIVISTS = ["얼라인", "KCGI", "강성부", "플래시라이트", "차파트너스", "트러스톤", "라이프", "머스트", "FCP", "팰리서", "엘리엇", "ELLIOTT", "행동주의", "주주가치",
              "안다", "밸류파트너스", "서울마린", "파인밸류", "VIP", "에이치플러스", "아이온", "비케이", "KB자산"]
@@ -84,8 +84,8 @@ def classify(report_nm, flr_nm="", corp_name="", ptype=""):
         return "legal", 1.0, 0
     if re.search(r"풍문|보도에대한(해명|조회)|조회공시", t):
         return "clarify", 1.0, 0
-    if re.search(r"임시주주총회", t):
-        return "egm", 1.0, 0
+    if re.search(r"주주총회소집(공고|결의)|임시주주총회", t):
+        return ("egm", 1.0, 0) if "임시" in t else ("agm", 0.0, 0)          # 정기 소집공고는 점수 없이 주총 날짜 확인용으로만 저장
     return None
 
 
@@ -246,6 +246,60 @@ def structure_score(holder_pct, ext_holders, pbr=None):
     return dict(score=score, reasons=reasons, gap=gap)
 
 
+INSTITUTIONS = ["국민연금", "산업은행", "한국산업은행", "한국투자공사", "예금보험공사", "신용보증기금", "기술보증기금", "우정사업본부"]
+
+
+def swing_holders(holder_pct, ext):
+    """캐스팅보트: 최대주주 측과 맞서는 가장 큰 외부 보유자(경영참여 보고자 우선)의 격차보다 큰 지분을 가진 제3의 보유자 → [dict(name, pct, inst)]
+    격차가 작을수록 제3자의 한 표가 승패를 가르므로, 격차보다 지분이 큰 보유자를 캐스팅보트로 봐요."""
+    if holder_pct is None or not ext:
+        return []
+    gen = sorted([h for h in ext if h.get("tp") == "일반" and h.get("pct")], key=lambda h: -h["pct"])
+    top = gen[0] if gen else max(ext, key=lambda h: h.get("pct") or 0)
+    gap = abs(holder_pct - top["pct"])
+    out = []
+    for h in ext:
+        if h["name"] == top["name"] or not h.get("pct"):
+            continue
+        if h["pct"] >= max(gap, 3.0):
+            out.append(dict(name=h["name"], pct=h["pct"], inst=any(i in h["name"] for i in INSTITUTIONS), gap=gap, tp=h.get("tp")))
+    return sorted(out, key=lambda x: -x["pct"])
+
+
+_MEET = re.compile(r"일\s*시\s*[:：]?\s*(\d{4})\s*[년.\-]\s*(\d{1,2})\s*[월.\-]\s*(\d{1,2})")
+
+
+def meeting_date(text):
+    """주주총회 소집공고 본문 → 개최일 'YYYY-MM-DD' 또는 ''"""
+    m = _MEET.search(text or "")
+    if not m:
+        m = re.search(r"(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일", (text or "")[:3000])
+    if not m:
+        return ""
+    try:
+        return dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3))).isoformat()
+    except ValueError:
+        return ""
+
+
+def find_meeting(events, key, today=None, session=None):
+    """종목의 최근 주총 소집공고(정기·임시) 중 아직 안 열린 것의 날짜 → dict(date, rcept_no, title, kind) 또는 None"""
+    import fin_clues
+    today = today or dt.date.today()
+    cands = sorted([e for e in events if e["kind"] in ("egm", "agm") and e.get("rcept_no")], key=lambda e: e["date"], reverse=True)
+    for e in cands[:2]:
+        if (today - dt.date.fromisoformat(e["date"])).days > 75:
+            continue
+        try:
+            txt = fin_clues.fetch_document_text(e["rcept_no"], key, session)
+        except Exception:
+            continue
+        d = meeting_date(txt)
+        if d and d >= (today - dt.timedelta(days=2)).isoformat():
+            return dict(date=d, rcept_no=e["rcept_no"], title=e.get("title") or "", kind=e["kind"])
+    return None
+
+
 def potential_level(sc):
     return "가능성 높음" if sc >= 5 else "가능성" if sc >= 3 else None
 
@@ -333,10 +387,16 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
                     break
                 continue
             st_ = structure_score(hp, ext, pbr.get(code))
-            states[code]["struct"] = dict(holder_pct=hp, ext=ext, **st_)
+            states[code]["struct"] = dict(holder_pct=hp, ext=ext, swing=swing_holders(hp, ext), **st_)
             conn.execute("DELETE FROM dispute_holder WHERE code=?", (code,))
             conn.executemany("INSERT OR REPLACE INTO dispute_holder VALUES (?,?,?,?,?,?)", [(code, h["name"], h["pct"], h["tp"], h["date"], h["resn"]) for h in ext])
             time.sleep(0.15)
+    if key:
+        for code in [c for c in states if states[c]["ev"]][:40]:
+            try:
+                states[code]["meeting"] = find_meeting(by[code], key, today, session)
+            except Exception:
+                states[code]["meeting"] = None
     out = 0
     for code, s_ in states.items():
         level = s_["ev"]["level"] if s_["ev"] else None
@@ -347,7 +407,7 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
         if level is None:
             continue
         prev = conn.execute("SELECT level, alerted FROM dispute_state WHERE code=?", (code,)).fetchone()
-        payload = dict(ev=s_["ev"], struct=s_["struct"], events=sorted(by[code], key=lambda e: e["date"], reverse=True)[:30])
+        payload = dict(ev=s_["ev"], struct=s_["struct"], meeting=s_.get("meeting"), events=[e for e in sorted(by[code], key=lambda e: e["date"], reverse=True) if e["kind"] != "agm"][:30])
         conn.execute("INSERT OR REPLACE INTO dispute_state VALUES (?,?,?,?,?,?,?,?)",
                      (code, s_["name"], level, sc, json.dumps(payload, ensure_ascii=False), today.isoformat(), prev[0] if prev else None, prev[1] if prev else None))
         out += 1
