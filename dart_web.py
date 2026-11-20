@@ -3019,7 +3019,7 @@ def view_events(conn, q):
             mt_ = (s_["payload"] or {}).get("meeting")
             if mt_ and today.isoformat() <= mt_["date"] <= (today + _dt1.timedelta(days=udays)).isoformat():
                 law_rows.append(dict(d=mt_["date"], end="", title=f'{"임시" if mt_.get("kind") == "egm" else ""}주주총회: {s_["name"]} (지분분쟁 {s_["level"]})', kind="지분분쟁", events=[], src=dart_link(mt_["rcept_no"]) if mt_.get("rcept_no") else "",
-                                     note="소집공고에서 읽은 개최일", themes=[]))
+                                     note="소집공고에서 읽은 개최일", themes=[], always=True))
     except Exception:
         pass
     ups = et.upcoming(conn, today, udays, law_rows)
@@ -3058,8 +3058,8 @@ def view_events(conn, q):
         head = (f'<b>{"오늘" if dd == 0 else f"D-{dd}"}</b> · {escape(when)} · <b>{escape(u["title"])}</b> <span class="chip">{escape(u["kind"])}</span>'
                 f'<span class="muted" style="font-size:11px"> {escape(u.get("note") or "")}{srcl}</span>')
         if not blocks:
-            if show_mkt:
-                ucards += f'<div style="padding:5px 0;border-top:1px solid var(--line);font-size:13px">{head} <span class="muted" style="font-size:11px">· 시장 전체에 영향 (테마 직접 연결 없음)</span></div>'
+            if show_mkt or u.get("always"):
+                ucards += f'<div style="padding:5px 0;border-top:1px solid var(--line);font-size:13px">{head} <span class="muted" style="font-size:11px">· 종목 이벤트 (테마 연결 없음)</span></div>'
             else:
                 n_hid += 1
             continue
