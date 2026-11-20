@@ -3162,7 +3162,7 @@ def view_cycle(conn, q):
                '<div class="muted" style="margin-top:6px">코스피·금리 자료가 아직 부족해요 (시장·정책 데이터를 먼저 받아 주세요).</div>')
             + (f'<div style="margin-top:8px"><b style="font-size:13px">우라가미 틀로 본 후보 (금리 방향 × 주가 추세만 반영)</b><ul style="margin:4px 0;padding-left:18px;font-size:13px">{cand}</ul>'
                '<div class="muted" style="font-size:12px">실적 방향은 반영하지 않았어요. 후보일 뿐 판정이 아니에요.</div></div>' if cand else "")
-            + '<div style="margin-top:6px"><a class="chip" href="/diag">하락 점검 (과거 비슷하게 빠진 뒤 기록) ↗</a></div></div>')
+            + '<div style="margin-top:6px"><a class="chip" href="/diag">하락 점검 (과거 비슷하게 빠진 뒤 기록) ↗</a> <a class="chip" href="/world">해외 증시 사이클 (미국·일본·중국·유럽) ↗</a></div></div>')
     yrs = {"1": 1, "3": 3, "5": 5, "0": 0}.get(q.get("cr", "3"), 3)
     try:
         cd = cy.chart_data(conn, yrs)
@@ -3248,7 +3248,7 @@ def view_cycle(conn, q):
     return page("투자 사이클", intro + acard + live + gcard + tipc + _fold(thc, False))
 
 
-FIN_SORTS = {"upside": ("목표가 상승여력 높은 순", lambda r: 0), "score": ("점수 높은 순", lambda r: -(r["score"] or -1)), "rev": ("매출 증가율 순", lambda r: -(r["m"].get("rev_yoy") if r["m"].get("rev_yoy") is not None else -9)),
+FIN_SORTS = {"indrank": ("업종 안 순위 높은 순", lambda r: 0), "trend": ("점수 상승폭 큰 순", lambda r: 0), "upside": ("목표가 상승여력 높은 순", lambda r: 0), "score": ("점수 높은 순", lambda r: -(r["score"] or -1)), "rev": ("매출 증가율 순", lambda r: -(r["m"].get("rev_yoy") if r["m"].get("rev_yoy") is not None else -9)),
              "op": ("영업이익 증가율 순", lambda r: -(r["m"].get("op_yoy") if r["m"].get("op_yoy") is not None else -9)),
              "opm": ("영업이익률 순", lambda r: -(r["m"].get("opm") if r["m"].get("opm") is not None else -9)),
              "cash": ("현금 전환(영업CF/순이익) 순", lambda r: -(r["m"].get("ocf_to_ni") if r["m"].get("ocf_to_ni") is not None else -9)),
@@ -3342,6 +3342,36 @@ def view_fin(conn, q):
     only_pick = q.get("pick") == "1"
     only_rep = q.get("rp") == "1"
     reps_all = report_map(conn, [r["code"] for r in rows])
+    # 업종 안 순위 (분석한 종목이 5개 이상인 업종만) · 점수 추이 (보고서가 쌓인 종목)
+    ind_pos = {}
+    try:
+        import industry as _ind
+        imap = _ind.mapping(conn)
+        groups_ = {}
+        for r_ in rows:
+            if r_["score"] is not None and imap.get(r_["code"]):
+                groups_.setdefault(imap[r_["code"]], []).append(r_)
+        for g_, lst_ in groups_.items():
+            if len(lst_) < 5:
+                continue
+            lst_.sort(key=lambda x: -x["score"])
+            for i_, x_ in enumerate(lst_):
+                ind_pos[x_["code"]] = (i_ + 1, len(lst_), (i_ + 1) / len(lst_), g_)
+    except Exception:
+        ind_pos = {}
+    trend, hist_pts = {}, {}
+    try:
+        order_ = {"11013": 1, "11012": 2, "11014": 3, "11011": 4}
+        tmp = {}
+        for c_, y_, rc_, sc_ in conn.execute("SELECT code, year, rcode, score FROM fin_report WHERE score IS NOT NULL"):
+            tmp.setdefault(c_, []).append(((y_, order_.get(rc_, 0)), sc_))
+        for c_, lst_ in tmp.items():
+            lst_.sort()
+            hist_pts[c_] = [v for _, v in lst_][-4:]
+            if len(lst_) >= 2:
+                trend[c_] = lst_[-1][1] - lst_[-2][1]
+    except sqlite3.Error:
+        pass
     need_ri = any(k in crit for k in ("upmin", "tdown", "tup")) or sort == "upside"
     rinfo = {}
     if need_ri:
@@ -3358,10 +3388,14 @@ def view_fin(conn, q):
             continue
         if only_pick and r["code"] not in picks:
             continue
-        if crit and not _fin_match(r, crit, val.get(r["code"], (None, None)), mc.get(r["code"]), clue_info.get(r["code"]), rinfo.get(r["code"])):
+        if crit and not _fin_match(r, crit, val.get(r["code"], (None, None)), mc.get(r["code"]), clue_info.get(r["code"]), rinfo.get(r["code"]), ind_pos.get(r["code"]), trend.get(r["code"])):
             continue
         sel.append(r)
-    if sort == "upside":
+    if sort == "indrank":
+        sel.sort(key=lambda r: (r["code"] not in ind_pos, ind_pos.get(r["code"], (0, 0, 9))[2]))
+    elif sort == "trend":
+        sel.sort(key=lambda r: -(trend.get(r["code"]) if trend.get(r["code"]) is not None else -99))
+    elif sort == "upside":
         sel.sort(key=lambda r: -((rinfo.get(r["code"]) or {}).get("up") if (rinfo.get(r["code"]) or {}).get("up") is not None else -9))
     else:
         sel.sort(key=FIN_SORTS[sort][1])
@@ -3417,15 +3451,19 @@ def view_fin(conn, q):
         ci_ = clue_info.get(r["code"])
         clue_t = "" if not ci_ else (f'<span class="up">▲{ci_.get("good_n", 0)}</span> ' if ci_.get("good_n") else "") + (f'<span class="down">⚠{ci_.get("warn_n", 0)}</span>' if ci_.get("warn_n") else "")
         pp_t = f'{"-" if per is None else f"{per:.1f}"}/{"-" if pbr is None else f"{pbr:.1f}"}'
+        ip_ = ind_pos.get(r["code"])
+        hp_ = hist_pts.get(r["code"]) or []
+        pos_t = "" if not ip_ else f'<span title="{escape(ip_[3])}">{ip_[0]}/{ip_[1]}위</span>'
+        trd_t = "" if len(hp_) < 2 else " → ".join(f"{v:.0f}" for v in hp_) + f' <span class="{"up" if hp_[-1] > hp_[-2] else "down" if hp_[-1] < hp_[-2] else ""}">{"▲" if hp_[-1] > hp_[-2] else "▼" if hp_[-1] < hp_[-2] else "─"}</span>'
         trs += (f'<tr><td>{star(r["code"])}</td><td><a href="/ideas?{urlencode({"t": "fin", "code": r["code"]})}"><b>{escape(r["name"] or r["code"])}</b></a><br><span class="muted" style="font-size:11px">{escape(r["code"])} · {escape(_fin_label(r))}</span></td>'
                 f'<td><span class="chip {cls}" style="font-weight:700">{r["grade"]} {int(r["score"])}</span><br><span class="muted" style="font-size:10px">{parts}</span></td>'
-                f'<td>{_fin_pct(m.get("rev_yoy"))}</td><td>{turn_t}</td><td>{opm_t}</td><td>{roe_t}</td><td>{cash_t}</td><td>{debt_t}</td><td>{warn_t}</td><td style="font-size:12px">{clue_t}</td><td style="font-size:12px">{rep_t}</td>'
+                f'<td style="font-size:12px">{pos_t}<br><span class="muted">{trd_t}</span></td><td>{_fin_pct(m.get("rev_yoy"))}</td><td>{turn_t}</td><td>{opm_t}</td><td>{roe_t}</td><td>{cash_t}</td><td>{debt_t}</td><td>{warn_t}</td><td style="font-size:12px">{clue_t}</td><td style="font-size:12px">{rep_t}</td>'
                 f'<td class="muted" style="font-size:12px">{pp_t}<br>{_mcap_text(mc.get(r["code"]))}{px_t}</td></tr>')
     more = (f'<div class="muted" style="margin-top:6px">{len(show)}개 중 {min(limit, len(show))}개를 보여 줘요. <a href="{link(all="1")}">더 보기</a></div>'
             if len(show) > limit else f'<div class="muted" style="margin-top:6px">{len(show)}개 종목 · 조건에 맞는 종목이 너무 적으면 조건을 줄이고, 너무 많으면 프리셋을 겹쳐 직접 숫자를 조여 보세요.</div>')
     table = ('<div class="card"><b>좋은 기업 고르기</b><div class="muted" style="font-size:12px">한 번에 눌러 보는 기준(프리셋)이나 직접 숫자로 후보를 좁히고, ☆로 내 후보에 담아 비교해요. 숫자는 최근 정기보고서(누적) 기준이에요.</div>'
              f'<div style="margin:8px 0">{chips}</div>{desc}{form}'
-             + (f'<div class="scroll"><table><tr><th></th><th>종목</th><th>점수<br><span class="muted" style="font-size:10px">성장·수익·현금·안정</span></th><th>매출<br>전년비</th><th>영업이익<br>전년비</th><th>영업<br>이익률</th><th>ROE<br>연환산</th><th>영업CF<br>/순이익</th><th>부채<br>비율</th><th>경고</th><th>단서</th><th>리포트</th><th>PER/PBR<br>시총</th></tr>{trs}</table></div>' if trs else '<div class="muted">조건에 맞는 종목이 없어요.</div>')
+             + (f'<div class="scroll"><table><tr><th></th><th>종목</th><th>점수<br><span class="muted" style="font-size:10px">성장·수익·현금·안정</span></th><th>업종 안<br>추이</th><th>매출<br>전년비</th><th>영업이익<br>전년비</th><th>영업<br>이익률</th><th>ROE<br>연환산</th><th>영업CF<br>/순이익</th><th>부채<br>비율</th><th>경고</th><th>단서</th><th>리포트</th><th>PER/PBR<br>시총</th></tr>{trs}</table></div>' if trs else '<div class="muted">조건에 맞는 종목이 없어요.</div>')
              + more + '</div>')
     cmp_card = _fin_compare(rows, picks, val, mc) if picks and (only_pick or len(picks) >= 2) else ""
     alerts = fa.recent_alerts(conn, 30)
@@ -3439,10 +3477,15 @@ def view_fin(conn, q):
     bs_card = ""
     try:
         import broker_perf
-        bt = _broker_table(broker_perf.compute(conn), None, limit=15)
-        if bt:
-            bs_card = ('<div class="card"><details><summary><b>증권사 리포트 성적표</b> <span class="muted" style="font-size:12px">리포트 이후 1·3개월 주가, 목표가 도달률</span></summary>'
-                       + bt + f'<div class="muted" style="font-size:11px">{BROKER_NOTE}</div></details></div>')
+        bi_ = (q.get("bi") or "").strip()
+        inds_ = broker_perf.industries(conn)
+        bt = _broker_table(broker_perf.compute(conn, industry_name=bi_ or None), None, limit=15)
+        sel_i = ('<form method="get" action="/ideas" class="filters" style="margin:6px 0"><input type="hidden" name="t" value="fin">'
+                 + "".join(f'<input type="hidden" name="{k}" value="{escape(v)}">' for k, v in keep.items())
+                 + '<select name="bi"><option value="">전체 업종</option>' + "".join(f'<option value="{escape(g)}"{" selected" if g == bi_ else ""}>{escape(g)}</option>' for g in inds_) + '</select><button>업종별 보기</button></form>') if inds_ else ""
+        if bt or bi_:
+            bs_card = ('<div class="card"><details' + (" open" if bi_ else "") + '><summary><b>증권사 리포트 성적표</b> <span class="muted" style="font-size:12px">리포트 이후 1·3개월 주가, 목표가 도달률' + (f' · {escape(bi_)}' if bi_ else "") + '</span></summary>'
+                       + sel_i + (bt or '<div class="muted">이 업종에서 계산할 수 있는 리포트가 없어요 (주가를 받아 둔 종목의 리포트만 세요).</div>') + f'<div class="muted" style="font-size:11px">{BROKER_NOTE}</div></details></div>')
     except Exception:
         pass
     return page("재무제표 분석", flash + prep + al_card + table + cmp_card + bs_card + how, refresh=running)
@@ -3457,18 +3500,20 @@ FIN_PRESETS = {
     "gap_up": ("우량 + 증권사 낙관", "점수 70 이상이고 증권사 목표가 평균이 현재가보다 20% 이상 높음 — 재무도 좋고 증권사도 상승여력을 보는 종목 (리포트가 있는 종목만)", dict(min_score=70, upmin=0.20)),
     "gap_down": ("우량인데 목표가 하향", "점수 70 이상인데 최근 목표가를 내린 증권사가 올린 곳보다 많음 — 숫자는 좋은데 증권사 시각이 식는 중 (왜 그런지 리포트 확인)", dict(min_score=70, tdown=True)),
     "gap_warn": ("약한데 증권사 낙관", "점수 50 이하인데 목표가 평균이 현재가보다 20% 이상 높음 — 재무가 약한데 낙관일 때 근거를 따져 볼 종목", dict(max_score=50, upmin=0.20)),
+    "ind_top": ("업종 상위 20%", "같은 업종(분석한 종목 5개 이상) 안에서 점수가 상위 20% — 업종 특성을 빼고 보는 '업종 안의 우량주'", dict(indtop=0.20)),
+    "rising": ("점수 오른 종목", "직전 보고서보다 재무 점수가 5점 이상 오름 (보고서가 두 번 이상 쌓인 종목)", dict(rising=5)),
     "insider": ("내부자 매수 + 우량", "점수 60 이상이고 최근 120일 임원·주요주주가 순매수 — 자기 회사 주식을 사는 사람이 있는 종목 (공시 단서를 받아야 해요)", dict(min_score=60, insider=True)),
     "rnd": ("연구개발 투자형", "연구개발비가 매출의 5% 이상이고 점수 55 이상 · 감사의견 적정 (공시 본문에서 읽은 값이라 틀릴 수 있어요)", dict(min_score=55, rnd=5.0, audit_ok=True)),
     "shr": ("주주환원형", "점수 60 이상이고 배당을 하거나 자기주식을 취득·소각 — 이익을 주주에게 돌려주는 종목", dict(min_score=60, shr=True)),
     "profit": ("고수익·저부채", "ROE(연환산) 15% 이상 · 영업이익률 10% 이상 · 부채비율 100% 이하 — 버핏식 '좋은 사업'의 숫자 흔적", dict(roe=0.15, opm=0.10, debt=1.0)),
 }
-FIN_NUMS = {"up": ("upmin", 100), "mx": ("max_score", 1), "ex": ("exp", 1), "rd": ("rnd", 1), "ms": ("min_score", 1), "rv": ("rev", 100), "ov": ("op", 100), "om": ("opm", 100), "ro": ("roe", 100), "cs": ("cash", 1), "db": ("debt", 100), "pe": ("per", 1), "pb": ("pbr", 1), "cp": ("cap", 1)}
-FIN_NUM_FIELDS = [("up", FIN_NUMS["up"], "목표가 상승여력 ≥ (%)", "20"), ("mx", FIN_NUMS["mx"], "점수 ≤", "50"), ("ex", FIN_NUMS["ex"], "수출 비중 ≥ (%)", "50"), ("rd", FIN_NUMS["rd"], "연구개발비/매출 ≥ (%)", "5"), ("ms", FIN_NUMS["ms"], "점수 ≥", "70"), ("rv", FIN_NUMS["rv"], "매출 증가율 ≥ (%)", "10"), ("ov", FIN_NUMS["ov"], "영업이익 증가율 ≥ (%)", "10"),
+FIN_NUMS = {"it": ("indtop", 100), "rs": ("rising", 1), "up": ("upmin", 100), "mx": ("max_score", 1), "ex": ("exp", 1), "rd": ("rnd", 1), "ms": ("min_score", 1), "rv": ("rev", 100), "ov": ("op", 100), "om": ("opm", 100), "ro": ("roe", 100), "cs": ("cash", 1), "db": ("debt", 100), "pe": ("per", 1), "pb": ("pbr", 1), "cp": ("cap", 1)}
+FIN_NUM_FIELDS = [("it", FIN_NUMS["it"], "업종 안 상위 ≤ (%)", "20"), ("rs", FIN_NUMS["rs"], "점수 상승 ≥ (점)", "5"), ("up", FIN_NUMS["up"], "목표가 상승여력 ≥ (%)", "20"), ("mx", FIN_NUMS["mx"], "점수 ≤", "50"), ("ex", FIN_NUMS["ex"], "수출 비중 ≥ (%)", "50"), ("rd", FIN_NUMS["rd"], "연구개발비/매출 ≥ (%)", "5"), ("ms", FIN_NUMS["ms"], "점수 ≥", "70"), ("rv", FIN_NUMS["rv"], "매출 증가율 ≥ (%)", "10"), ("ov", FIN_NUMS["ov"], "영업이익 증가율 ≥ (%)", "10"),
                   ("om", FIN_NUMS["om"], "영업이익률 ≥ (%)", "10"), ("ro", FIN_NUMS["ro"], "ROE ≥ (%)", "10"), ("cs", FIN_NUMS["cs"], "영업CF/순이익 ≥ (배)", "1"),
                   ("db", FIN_NUMS["db"], "부채비율 ≤ (%)", "100"), ("pe", FIN_NUMS["pe"], "PER ≤", "15"), ("pb", FIN_NUMS["pb"], "PBR ≤", "1.5"), ("cp", FIN_NUMS["cp"], "시총 ≥ (억원)", "1000")]
 
 
-def _fin_match(r, c, vp, cap, ci=None, ri=None):
+def _fin_match(r, c, vp, cap, ci=None, ri=None, ip=None, tr=None):
     """종목 r이 조건 c(dict)를 모두 만족하나. 값이 없으면 그 조건은 불합격 (모르는 값으로 통과시키지 않음)"""
     m = r["m"]
     per, pbr = vp
@@ -3477,6 +3522,10 @@ def _fin_match(r, c, vp, cap, ci=None, ri=None):
     if "min_score" in c and r["score"] < c["min_score"]:
         return False
     if "max_score" in c and r["score"] > c["max_score"]:
+        return False
+    if "indtop" in c and (ip is None or ip[2] > c["indtop"]):
+        return False
+    if "rising" in c and (tr is None or tr < c["rising"]):
         return False
     if any(k in c for k in ("upmin", "tdown", "tup")):
         if not ri:
@@ -3962,6 +4011,171 @@ def _fin_detail(conn, r, code, rows, mc, val, fa, q=None):
             + _fin_statements_card(conn, code, r, q_.get("fbig") == "1") + _fin_doc_card(conn, code, q_)
             + _fold(f'<div class="card"><b>숫자 자세히</b><div class="scroll"><table><tr><th>항목</th><th>이번</th><th>전년 같은 기간 / 직전 연말</th><th>변화</th></tr>{body}{bs}</table></div>'
                     '<div class="muted" style="font-size:11px">손익·현금흐름은 누적 기준, 재무상태는 보고서 시점이에요. 금액은 원 단위를 억·조로 줄여 보여요. 차입금은 계정 이름으로 합친 추정값이에요.</div></div>', True))
+
+
+_WCACHE = {"t": 0.0, "v": None}
+SIT_CLS = {"up": "up", "down": "down", "turn_down": "down", "rebound": "", "flat": ""}
+SIT_FIT = {"up": "상승장 — 성장·추세 점수에 무게를 더했어요", "turn_down": "꺾임 초입 — 수익성·밸류에 무게를 조금 더했어요", "down": "하락장 — 수익성·밸류에 무게를 더하고 추세는 덜 봤어요",
+           "rebound": "반등 시도 — 추세·밸류에 무게를 조금 더했어요", "flat": "정체 — 수익성·밸류에 무게를 조금 더했어요"}
+
+
+def status_steps_html(st_, run_):
+    icon = {"ok": "✔", "fail": "✖", "run": "…", "wait": "·"}
+    if not st_:
+        return ""
+    body = "".join(f'<div style="margin:3px 0"><b>{icon.get(x["state"], "")} {escape(x["name"])}</b> '
+                   f'<span class="{"warn" if x["state"] == "fail" else "muted"}" style="font-size:12px">{escape(x.get("msg", ""))}</span></div>' for x in st_.get("steps", []))
+    return (f'<div style="margin-top:8px"><b style="font-size:13px">{"진행 중" if run_ else "마지막 실행 결과"}</b> '
+            f'<span class="muted" style="font-size:12px">{escape(st_.get("started", ""))} ~ {escape(st_.get("finished", "") or "…")}</span>{body}</div>')
+
+
+def world_analysis(conn):
+    """지수마다 국면·단계 검증·낙폭 구간 통계 (10분 캐시)"""
+    if _WCACHE["v"] is not None and time.time() - _WCACHE["t"] < 600:
+        return _WCACHE["v"]
+    import cycle_theory as cy
+    import world_markets as wm
+    out = {}
+    for name, sym, reg in wm.INDEXES + [("코스피", "KOSPI", "한국")]:
+        ser = wm.index_series(conn, sym)
+        cl = [v for _, v in ser]
+        ps = wm.price_state(cl)
+        if not ps:
+            continue
+        ss, ds = wm.stage_stats(cl), wm.dd_stats(cl)
+        out[sym] = dict(name=name, region=reg, series=ser, ps=ps, sit=cy.situation({"raw": ps}), stage=wm.stage_of(ps["below_ma"], ps["slope"]), ss=ss, ds=ds, vd=wm.verdict_stats(ss))
+    _WCACHE.update(t=time.time(), v=out)
+    return out
+
+
+def view_world(conn, q):
+    """시장 → 해외 증시: 미국·일본·중국·유럽 증시의 지금 국면, 과거에 그 판단이 통했는지 검증, 시장별 좋은 종목"""
+    import legis as lg
+    import world_markets as wm
+    d = Path(_DATA_DIR["path"] or ".")
+    st = lg.read_status(str(d / "world_status.json"))
+    running = bool(st and st.get("running"))
+    msg = q.get("msg", "")
+    flash = f'<div class="card {"warn" if msg.startswith("✖") else ""}">{escape(msg)}</div>' if msg else ""
+    an = world_analysis(conn)
+    stocks_all = wm.load_stocks(conn)
+    prep = ('<div class="card"><b>해외 증시</b><div class="muted" style="font-size:13px">미국 · 일본 · 중국(홍콩 포함) · 유럽 증시가 지금 어떤 국면인지 가격으로 보고, 같은 방법이 과거에 그 시장에서 통했는지 검증하고, 시장별 대표 종목을 점수로 골라 봐요 (네이버 증권 · 키 불필요).'
+            f' 지수 {len([k for k in an if k != "KOSPI"])}개 · 대표 종목 {len(stocks_all)}개</div>'
+            '<form method="post" action="/world/run" class="filters" style="margin:8px 0 0">'
+            f'<button{" disabled" if running else ""}>{"진행 중…" if running else ("다시 받기" if an else "지수·대표 종목 받고 분석하기")}</button>'
+            '<span class="muted" style="font-size:12px">별도 프로세스로 받아요 (지수 10초 · 종목 몇 분). 지수는 지금 수집 → 시장·정책에서도 같이 받아 와요.</span></form>'
+            + status_steps_html(st, running) + '</div>')
+    if not an:
+        return page("해외 증시", flash + prep + '<div class="card muted">아직 해외 지수가 없어요. 위 버튼으로 받아 주세요.</div>', refresh=running)
+    kospi = an.get("KOSPI")
+    # ---- 한눈에: 시장 표
+    trs = ""
+    for sym, a in an.items():
+        ps, sit = a["ps"], a["sit"]
+        vd = a["vd"]
+        st_hist = (a["ss"] or {}).get("stages", {}).get(a["stage"]) if a.get("ss") else None
+        vtxt = "-"
+        if vd and vd[0] is not None:
+            vtxt = ("통함" if vd[0] >= 0.03 else "약함" if vd[0] >= 0.01 else "의미 없음" if vd[0] > -0.01 else "거꾸로")
+        hist_t = "" if not st_hist else "이 단계 뒤 3개월 평균 " + format(st_hist["m60"], "+.1%")
+        rel = "" if not kospi or sym == "KOSPI" else f' <span class="muted" style="font-size:11px">(코스피 대비 {(ps["r12"] - kospi["ps"]["r12"]) * 100:+.0f}%p)</span>'
+        trs += (f'<tr{" style=background:var(--chip)" if sym == "KOSPI" else ""}><td><b>{escape(a["name"])}</b><br><span class="muted" style="font-size:11px">{escape(a["region"])}</span></td>'
+                f'<td><span class="chip {SIT_CLS.get(a["sit"]["key"], "")}">{escape(sit["label"])}</span></td>'
+                f'<td class="{"down" if ps["dd"] < -0.1 else ""}">{ps["dd"]:+.0%}</td><td>{"아래" if ps["below_ma"] else "위"}<br><span class="muted" style="font-size:11px">기울기 {ps["slope"]:+.1%}</span></td>'
+                f'<td>{ps["r3m"]:+.0%}</td><td>{ps["r12"]:+.0%}{rel}</td>'
+                f'<td>{vtxt}<br><span class="muted" style="font-size:11px">{hist_t}</span></td></tr>')
+    table = ('<div class="card"><b>지금 어떤 국면인가 — 시장별 한눈에</b><div class="muted" style="font-size:12px">가격 위치(200일선·낙폭·수익률)만으로 매긴 국면이에요. 마지막 열은 그 시장에서 200일선 단계 구분이 과거에 통했는지(2005~, 아래 검증 참고)예요.</div>'
+             f'<div class="scroll"><table><tr><th>시장</th><th>국면</th><th>고점 대비</th><th>200일선</th><th>3개월</th><th>12개월</th><th>단계 검증</th></tr>{trs}</table></div></div>')
+    # ---- 글로벌 종합
+    keys = [a["sit"]["key"] for sym, a in an.items() if sym != "KOSPI"]
+    cnt = {k: keys.count(k) for k in ("up", "turn_down", "down", "rebound", "flat")}
+    n_f = len(keys)
+    lines = []
+    lab = {"up": "상승", "turn_down": "하락 초입(꺾임)", "down": "하락 진행", "rebound": "반등 시도", "flat": "정체"}
+    lines.append(f"해외 지수 {n_f}개 중 " + " · ".join(f"{lab[k]} {v}개" for k, v in cnt.items() if v) + ".")
+    below_n = sum(1 for sym, a in an.items() if sym != "KOSPI" and a["ps"]["below_ma"])
+    lines.append(f"200일선 아래에 있는 지수 {below_n}개 / {n_f}개" + (" — 한 시장의 문제가 아니라 전반적인 조정 구간이에요." if below_n >= n_f * 0.7 else " — 시장마다 갈려 있어요." if 0.3 < below_n / n_f < 0.7 else " — 대부분 추세가 살아 있어요."))
+    if kospi:
+        worse = [a["name"] for sym, a in an.items() if sym != "KOSPI" and a["ps"]["dd"] < kospi["ps"]["dd"]]
+        lines.append(f"코스피 고점 대비 {kospi['ps']['dd']:+.0%}" + (f" — 해외에서 이보다 더 빠진 지수: {', '.join(worse)}" if worse else " — 해외 지수보다 낙폭이 깊어요 (한국만의 조정이 더 큰 모습)"))
+    ok_n = sum(1 for sym, a in an.items() if sym != "KOSPI" and a["vd"] and a["vd"][0] is not None and a["vd"][0] >= 0.01)
+    lines.append(f"과거 검증: 200일선 단계 구분이 의미 있었던 해외 지수는 {ok_n}개 / {n_f}개 — " + ("이 규칙이 대체로 통했어요." if ok_n >= n_f * 0.6 else "이 규칙만으로 바닥·천장을 가리기엔 신뢰하기 어려웠어요 (하락 단계 뒤에 반등이 컸던 시장이 많아요)." if ok_n <= n_f * 0.3 else "시장마다 달라서 보조 지표로만 보는 게 낫겠어요."))
+    syn = ('<div class="card"><b>글로벌 종합 — 지금 세계 증시는</b><ul style="padding-left:18px;margin:6px 0;font-size:13px">' + "".join(f"<li>{escape(x)}</li>" for x in lines)
+           + '</ul><div class="muted" style="font-size:12px">해외 시장은 금리·실적 같은 축이 없어 가격만으로 본 국면이에요. 한국은 투자 사이클 탭에서 금리·실적까지 같이 봐요. 판정이 아니라 후보이고 투자 권유가 아니에요.</div></div>')
+    # ---- 지역별
+    sections = ""
+    all_scored = []
+    for reg in wm.REGIONS:
+        main_sym = wm.REGION_MAIN[reg]
+        ma = an.get(main_sym)
+        if not ma:
+            continue
+        sk = ma["sit"]["key"]
+        idx_here = [(sym, a) for sym, a in an.items() if a["region"] == reg]
+        # 차트 (대표 지수, 최근 500일 + 200일선)
+        ser = ma["series"][-520:]
+        cl_all = [v for _, v in ma["series"]]
+        ma_pts = []
+        for i in range(len(ma["series"]) - len(ser), len(ma["series"])):
+            if i >= 199:
+                ma_pts.append((ma["series"][i][0], sum(cl_all[i - 199:i + 1]) / 200))
+        from dart_charts import line_chart
+        chart = line_chart([dict(name=ma["name"], pts=ser, color="price"), dict(name="200일선", pts=ma_pts, color="s2", dash=True)], yfmt="{:,.0f}")
+        # 검증 표
+        ver = ""
+        for sym, a in idx_here:
+            if not a.get("ss"):
+                continue
+            rows_ = ""
+            for stg in (2, 1, 3, 4):
+                x = a["ss"]["stages"].get(stg)
+                if not x:
+                    continue
+                cur = " ◀ 지금" if stg == a["stage"] else ""
+                rows_ += (f'<tr{" style=background:var(--chip)" if stg == a["stage"] else ""}><td>{wm.STAGE_NAME[stg]}{cur}</td><td>{x["n"]:,}일</td><td>{x["m60"]:+.1%}</td><td>{x["win60"]:.0%}</td>'
+                          f'<td>{"-" if x["m120"] is None else format(x["m120"], "+.1%")}</td></tr>')
+            drows = ""
+            cur_b = wm.dd_bucket_of(a["ps"]["dd"])
+            for bi, (_, bl) in enumerate(wm.DD_BUCKETS):
+                x = (a.get("ds") or {}).get(bi)
+                if not x:
+                    continue
+                drows += (f'<tr{" style=background:var(--chip)" if bi == cur_b else ""}><td>{bl}{" ◀ 지금" if bi == cur_b else ""}</td><td>{x["n"]:,}일</td><td>{x["m60"]:+.1%}</td><td>{x["win60"]:.0%}</td>'
+                          f'<td>{"-" if x["m120"] is None else format(x["m120"], "+.1%")}</td></tr>')
+            vd = a["vd"]
+            ver += (f'<details style="margin-top:6px"><summary><b>{escape(a["name"])}</b> <span class="muted" style="font-size:12px">검증: {escape(vd[1]) if vd else "-"}</span></summary>'
+                    f'<div style="margin-top:6px"><b style="font-size:12px">200일선 단계별 — 그 뒤 수익률 (전체 평균 3개월 {a["ss"]["base"]:+.1%})</b><div class="scroll"><table><tr><th>단계</th><th>해당 일수</th><th>3개월 뒤 평균</th><th>3개월 뒤 상승 비율</th><th>6개월 뒤 평균</th></tr>{rows_}</table></div></div>'
+                    + (f'<div style="margin-top:6px"><b style="font-size:12px">고점 대비 낙폭 구간별 — 그 뒤 수익률</b><div class="scroll"><table><tr><th>낙폭 구간</th><th>해당 일수</th><th>3개월 뒤 평균</th><th>3개월 뒤 상승 비율</th><th>6개월 뒤 평균</th></tr>{drows}</table></div></div>' if drows else "")
+                    + '<div class="muted" style="font-size:11px;margin-top:4px">매일의 단계를 매겨 그 뒤 60·120거래일 수익률을 평균 낸 값이에요. 날짜가 겹쳐 독립된 표본이 아니고, 지나간 기록이라 앞으로를 보장하지 않아요.</div></details>')
+        # 종목
+        sc_rows = []
+        for s_ in wm.load_stocks(conn, reg):
+            mm = wm.stock_metrics(s_["d"])
+            sc = wm.score_stock(mm, sk)
+            sc_rows.append((sc["total"], s_, mm, sc))
+            all_scored.append((sc["total"], reg, s_, mm, sc))
+        sc_rows.sort(key=lambda x: -x[0])
+        trs2 = ""
+        for tot, s_, mm, sc in sc_rows[:10]:
+            rs_ = "".join(f'<div style="font-size:11px" class="{"up" if k == "good" else "down" if k == "warn" else "muted"}">{"✔" if k == "good" else "⚠" if k == "warn" else "·"} {escape(t)}</div>' for k, t in sc["reasons"][:5])
+            pt = " · ".join(f'{k[:2]} {v:.0f}' for k, v in sc["parts"].items())
+            trs2 += (f'<tr><td><a href="https://m.stock.naver.com/worldstock/stock/{quote(s_["code"])}/total" target="_blank" rel="noopener noreferrer"><b>{escape(s_["name"])}</b></a><br><span class="muted" style="font-size:11px">{escape(s_["code"])}</span></td>'
+                     f'<td><span class="chip {"up" if tot >= 70 else ""}" style="font-weight:700">{tot:.0f}</span><br><span class="muted" style="font-size:10px">{pt}</span></td><td>{rs_}</td></tr>')
+        stk = (f'<div style="margin-top:8px"><b style="font-size:13px">{escape(reg)} 대표 종목 점수 순 (이 시장 국면: {escape(ma["sit"]["label"])})</b>'
+               f'<div class="muted" style="font-size:12px">{escape(SIT_FIT.get(sk, ""))}. 성장 · 수익성 · 밸류 · 추세 · 컨센서스(증권사 목표가) 다섯 가지로 매겨요.</div>'
+               + (f'<div class="scroll"><table><tr><th>종목</th><th>점수</th><th>근거</th></tr>{trs2}</table></div>' if trs2 else '<div class="muted">대표 종목을 아직 못 받았어요 (위 버튼).</div>') + '</div>')
+        sections += (f'<div class="card"><details open><summary><b>{escape(reg)}</b> <span class="chip {SIT_CLS.get(sk, "")}">{escape(ma["sit"]["label"])}</span> '
+                     f'<span class="muted" style="font-size:12px">{escape(ma["name"])} 고점 대비 {ma["ps"]["dd"]:+.0%} · 12개월 {ma["ps"]["r12"]:+.0%}</span></summary>'
+                     f'<div class="muted" style="font-size:12px;margin:4px 0">{escape(ma["sit"]["desc"])}</div>{chart}{ver}{stk}</details></div>')
+    # ---- 전체 상위
+    topall = ""
+    if all_scored:
+        all_scored.sort(key=lambda x: -x[0])
+        rows3 = "".join(f'<tr><td>{escape(reg)}</td><td><a href="https://m.stock.naver.com/worldstock/stock/{quote(s_["code"])}/total" target="_blank" rel="noopener noreferrer"><b>{escape(s_["name"])}</b></a></td>'
+                        f'<td><b>{tot:.0f}</b></td><td class="muted" style="font-size:12px">{escape(" · ".join(t for k, t in sc["reasons"] if k == "good")[:90])}</td></tr>' for tot, reg, s_, mm, sc in all_scored[:10])
+        topall = ('<div class="card"><b>지금 국면에서 점수가 높은 해외 종목 (전체 상위 10)</b><div class="scroll"><table><tr><th>시장</th><th>종목</th><th>점수</th><th>좋은 점</th></tr>' + rows3 + '</table></div>'
+                  '<div class="muted" style="font-size:12px">시장별 국면에 따라 가중치를 달리한 점수예요. 대표 종목 몇십 개(시총 큰 순으로 고른 목록)만 대상이라 시장 전체에서 고른 것이 아니고, 점수가 높아도 이미 오른 종목일 수 있어요. 유럽은 미국 상장 ADR이에요. 투자 추천이 아니에요.</div></div>')
+    return page("해외 증시", flash + prep + syn + table + topall + sections, refresh=running)
 
 
 def view_legstudy(conn, q):
@@ -4829,7 +5043,7 @@ def perf_url(**kw):
     return "/ideas?" + urlencode({"t": "perf", **kw})
 
 
-MARKET_HUB = {"/market": "시장 온도", "/cycle": "투자 사이클", "/events": "이벤트·테마", "/policy": "정책", "/radar": "대비 레이더", "/diag": "하락 점검", "/bills": "법안·종목", "/news": "속보", "/shorts": "공매도 리포트", "/derivs": "선물·채권", "/calendar": "달력"}
+MARKET_HUB = {"/market": "시장 온도", "/cycle": "투자 사이클", "/world": "해외 증시", "/events": "이벤트·테마", "/policy": "정책", "/radar": "대비 레이더", "/diag": "하락 점검", "/bills": "법안·종목", "/news": "속보", "/shorts": "공매도 리포트", "/derivs": "선물·채권", "/calendar": "달력"}
 
 
 REPORT_HUB = {"/": "보고서", "/new": "새 공시", "/reports": "증권사 리포트"}
@@ -6764,6 +6978,8 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     return self._redirect("/cycle" + (("?" + urlencode({"cr": q["cr"]})) if q.get("cr") else ""))
                 elif url.path == "/cycle":
                     body = view_cycle(conn, q)
+                elif url.path == "/world":
+                    body = view_world(conn, q)
                 elif url.path == "/ideas":
                     body = view_ideas(conn, q)
                 elif url.path == "/ranking":
@@ -6973,6 +7189,12 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 S = settings()
                 ok, why = S["legis_prepare"]() if "legis_prepare" in S else (False, "이 서버 버전은 지원하지 않아요")
                 return self._redirect("/ideas?" + urlencode({"t": "legis", "msg": ("✔ " if ok else "✖ ") + why}))
+            if path == "/world/run" and settings_api:
+                n = min(int(self.headers.get("Content-Length") or 0), 4096)
+                self.rfile.read(n)
+                S = settings()
+                ok, why = S["world_run"]() if "world_run" in S else (False, "이 서버 버전은 지원하지 않아요")
+                return self._redirect("/world?" + urlencode({"msg": ("✔ " if ok else "✖ ") + why}))
             if path == "/fin/clue_run" and settings_api:
                 n = min(int(self.headers.get("Content-Length") or 0), 4096)
                 self.rfile.read(n)

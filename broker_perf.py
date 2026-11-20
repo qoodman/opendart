@@ -11,7 +11,7 @@ import datetime as dt
 import sqlite3
 import time
 
-_CACHE = {"t": 0.0, "v": None}
+_CACHE = {}
 
 
 def _series(conn, code):
@@ -43,10 +43,20 @@ def _at(dates, closes, d, tol=7, after=False):
     return (i, closes[i]) if gap <= tol else None
 
 
-def compute(conn, today=None, days=730, use_cache=True):
+def industries(conn):
+    """리포트 성적에 쓸 수 있는 업종 이름 목록 (네이버 업종, 가나다순)"""
+    try:
+        import industry
+        return sorted({g for g in industry.mapping(conn).values() if g})
+    except Exception:
+        return []
+
+
+def compute(conn, today=None, days=730, use_cache=True, industry_name=None):
     """→ {증권사: dict(n, n1, r1, x1, n3, r3, x3, win3, buy_n, buy_win3, hit_n, hit, gap_n, gap)} (r=평균 수익률, x=지수 대비 초과, win=올랐던 비율, hit=목표 도달률, gap=목표/당시종가-1 평균)"""
-    if use_cache and _CACHE["v"] is not None and time.time() - _CACHE["t"] < 600:
-        return _CACHE["v"]
+    ckey = industry_name or ""
+    if use_cache and ckey in _CACHE and time.time() - _CACHE[ckey][0] < 600:
+        return _CACHE[ckey][1]
     import research
     today = today or dt.date.today()
     since = (today - dt.timedelta(days=days)).isoformat()
@@ -61,10 +71,19 @@ def compute(conn, today=None, days=730, use_cache=True):
         idates, icloses = [d for d, _ in idx], [float(v) for _, v in idx]
     except Exception:
         idates, icloses = [], []
+    allowed = None
+    if industry_name:
+        try:
+            import industry
+            allowed = {c for c, g in industry.mapping(conn).items() if g == industry_name}
+        except Exception:
+            allowed = set()
     agg = {}
     cache = {}
     last_day = today.isoformat()
     for code, d, broker, target, opinion in rows:
+        if allowed is not None and code not in allowed:
+            continue
         if code not in cache:
             cache[code] = _series(conn, code)
         dates, closes = cache[code]
@@ -104,5 +123,5 @@ def compute(conn, today=None, days=730, use_cache=True):
                       win3=(sum(1 for v in a["r3"] if v > 0) / len(a["r3"])) if a["r3"] else None,
                       buy_n=len(a["buy3"]), buy_win3=(sum(1 for v in a["buy3"] if v > 0) / len(a["buy3"])) if a["buy3"] else None,
                       hit_n=len(a["hit"]), hit=mean(a["hit"]), gap_n=len(a["gap"]), gap=mean(a["gap"]))
-    _CACHE.update(t=time.time(), v=out)
+    _CACHE[ckey] = (time.time(), out)
     return out

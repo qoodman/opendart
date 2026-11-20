@@ -698,6 +698,17 @@ def run_market_policy(log=print):
         except Exception as e:
             out["earnings"] = f"실패: {e}"
             log(f"실적 받기 실패: {e}")
+    if env("DART_WORLD", "1") != "0":           # 해외 증시(미국·일본·중국·유럽) 지수: 투자 사이클 비교용 (종목은 해외 증시 탭 버튼으로)
+        try:
+            import world_markets
+            wc = sqlite3.connect(results_db())
+            try:
+                out["world"] = world_markets.sync_indexes(wc, log=log)
+            finally:
+                wc.close()
+        except Exception as e:
+            out["world"] = f"실패: {e}"
+            log(f"해외 지수 실패: {e}")
     if env("DART_THEMES", "1") != "0":          # 법안 → 기업 짐작에 쓰는 테마(265개) → 종목 (네이버, 주 1회)
         try:
             import theme_map
@@ -929,6 +940,70 @@ def legstudy_run():
     except OSError:
         pass
     return True, "시작했어요 (별도 프로세스, 화면은 그대로 쓸 수 있어요). 과거 법안·주가를 받느라 처음에는 20~40분 걸릴 수 있어요."
+
+
+def world_run():
+    """해외 증시 탭의 '받고 분석하기': 해외 지수(2005~)와 대표 종목 재무·주가·증권사 목표가를 별도 프로세스로. (성공 여부, 안내)"""
+    import subprocess
+    import legis
+    status = data_dir() / "world_status.json"
+    st = legis.read_status(str(status))
+    if st and st.get("running"):
+        return False, "이미 진행 중이에요. 아래 진행 상황을 확인하세요."
+
+    def lower_priority():
+        try:
+            os.nice(10)
+        except OSError:
+            pass
+    try:
+        logf = open(data_dir() / "world.log", "ab")
+        proc = subprocess.Popen([sys.executable, str(ROOT / "dart_server.py"), "world-sync"], cwd=str(ROOT), stdout=logf, stderr=subprocess.STDOUT,
+                                start_new_session=True, preexec_fn=lower_priority)
+    except Exception as e:
+        return False, f"시작하지 못했어요: {type(e).__name__}: {str(e)[:100]}"
+    threading.Thread(target=proc.wait, daemon=True).start()
+    try:
+        status.write_text(json.dumps({"running": True, "pid": proc.pid, "started": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "finished": "",
+                                      "steps": [{"name": "해외 지수·대표 종목 받기 (네이버)", "state": "run", "msg": "시작"}]}, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+    return True, "시작했어요 (별도 프로세스). 지수는 10초쯤, 종목은 몇 분 걸려요."
+
+
+def cmd_world_sync(args):
+    """(서버 내부용) world_run()이 띄우는 별도 프로세스"""
+    import world_markets
+    status = str(data_dir() / "world_status.json")
+    st = {"running": True, "pid": os.getpid(), "started": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "finished": "",
+          "steps": [{"name": "해외 지수 받기 (2005~)", "state": "run", "msg": ""}, {"name": "대표 종목 받기 (재무·주가·목표가)", "state": "wait", "msg": ""}]}
+
+    def save():
+        try:
+            Path(status).write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
+    save()
+    conn = sqlite3.connect(results_db())
+    try:
+        try:
+            n = world_markets.sync_indexes(conn, log=lambda m: print(m, flush=True))
+            st["steps"][0].update(state="ok", msg=f"{n}개 지수")
+        except Exception as e:
+            st["steps"][0].update(state="fail", msg=f"{type(e).__name__}: {str(e)[:120]}")
+        st["steps"][1]["state"] = "run"
+        save()
+        try:
+            n = world_markets.sync_stocks(conn, log=lambda m: print(m, flush=True))
+            st["steps"][1].update(state="ok", msg=f"{n}개 종목 새로 받음 (6일 안에 받은 것은 건너뜀)")
+        except Exception as e:
+            st["steps"][1].update(state="fail", msg=f"{type(e).__name__}: {str(e)[:120]}")
+    finally:
+        conn.close()
+    st["running"] = False
+    st["finished"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    save()
+    return 0
 
 
 def fin_action(action, form):
@@ -2014,7 +2089,7 @@ def cmd_web(args):
                     update_info=update_info, check_update=check_update, start_update=start_update,
                     backup_list=backup_list, backup_busy=backup_busy, backup_start=backup_start,
                     backup_file=backup_file, krx_key=krx_key_now, save_krx_key=save_krx_key,
-                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, event_action=event_action, legstudy_run=legstudy_run, fin_run=fin_run, fin_clue_run=fin_clue_run, fin_action=fin_action, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
+                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, event_action=event_action, legstudy_run=legstudy_run, fin_run=fin_run, world_run=world_run, fin_clue_run=fin_clue_run, fin_action=fin_action, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
     serve(results_db(), host=args.host, port=args.port, child_env=child_env,
           get_key=lambda: read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", ""),
           save_key=save_key, settings_api=settings_api)
@@ -2039,6 +2114,7 @@ def main(argv=None):
     sub.add_parser("legis-prepare", help="(내부용) 입법 영향 기업 준비 작업")
     sub.add_parser("legis-study", help="(내부용) 입법 주가 분석 작업")
     sub.add_parser("fin-analyze", help="(내부용) 재무제표 분석 작업")
+    sub.add_parser("world-sync", help="(내부용) 해외 지수·종목 받기 작업")
     sub.add_parser("fin-clues", help="(내부용) 공시 단서 받기 작업")
     sub.add_parser("update", help="최신 코드 받아 설치")
     sub.add_parser("net-check")
@@ -2055,7 +2131,7 @@ def main(argv=None):
     a = p.parse_args(argv)
     return {"run": cmd_run, "web": cmd_web, "net-check": cmd_net_check, "notify-test": cmd_notify_test,
             "status": cmd_status, "set-env": cmd_set_env, "hk-check": cmd_hk_check, "reports-check": cmd_hk_check, "market-check": cmd_market_check, "parse-check": cmd_parse_check,
-            "tick": cmd_tick, "update": cmd_update, "legis-prepare": cmd_legis_prepare, "legis-study": cmd_legis_study, "fin-analyze": cmd_fin_analyze, "fin-clues": cmd_fin_clues}[a.cmd](a)
+            "tick": cmd_tick, "update": cmd_update, "legis-prepare": cmd_legis_prepare, "legis-study": cmd_legis_study, "fin-analyze": cmd_fin_analyze, "world-sync": cmd_world_sync, "fin-clues": cmd_fin_clues}[a.cmd](a)
 
 
 if __name__ == "__main__":
