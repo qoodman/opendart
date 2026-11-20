@@ -993,7 +993,7 @@ def send_dispute_alerts():
             except ValueError:
                 last = ""
             lines.append(f"[{lv}] {nm}({code}) 최근 신호 {last}")
-        notify(f"지분분쟁 {len(rows)}건", "\n".join(lines) + (f"\n…외 {len(rows) - 8}건" if len(rows) > 8 else ""), click=(url.rstrip("/") + "/dispute") if url else "", tags=("crossed_swords",))
+        notify(f"지분분쟁 {len(rows)}건", "\n".join(lines) + (f"\n…외 {len(rows) - 8}건" if len(rows) > 8 else ""), click=(url.rstrip("/") + "/ideas?t=dispute") if url else "", tags=("crossed_swords",))
         conn.executemany("UPDATE dispute_state SET alerted=? WHERE code=?", [(r[5], r[0]) for r in rows])
         conn.commit()
         return len(rows)

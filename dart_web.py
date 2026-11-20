@@ -4200,7 +4200,7 @@ def dispute_chip(conn, code):
     x = dispute_map(conn).get(code)
     if not x:
         return ""
-    return f'<a class="chip {DSP_CLS.get(x[0], "")}" style="text-decoration:none;font-weight:700" href="/dispute?code={quote(code)}" title="지분분쟁 레이더">⚔ 지분분쟁 {escape(x[0])}</a>'
+    return f'<a class="chip {DSP_CLS.get(x[0], "")}" style="text-decoration:none;font-weight:700" href="/ideas?t=dispute&code={quote(code)}" title="지분분쟁 레이더">⚔ 지분분쟁 {escape(x[0])}</a>'
 
 
 def _dsp_events_html(evs, n=3):
@@ -4254,9 +4254,9 @@ def view_dispute(conn, q):
     lv_sel = q.get("lv") if q.get("lv") in dp.LEVEL_ORDER else ""
     kw = (q.get("kw") or "").strip()
     cnt = {lv: sum(1 for s_ in states if s_["level"] == lv) for lv in dp.LEVEL_ORDER}
-    chips = " ".join((f'<b class="chip" style="background:var(--accent);color:var(--bg)">{lv} {n}</b>' if lv == lv_sel else f'<a class="chip {DSP_CLS.get(lv, "")}" href="/dispute?{urlencode({"lv": lv})}">{lv} {n}</a>') for lv, n in cnt.items())
-    chips += (' <a class="chip" href="/dispute">전체</a>' if lv_sel or kw else "")
-    form = ('<form method="get" action="/dispute" class="filters" style="margin:6px 0"><input type="search" name="kw" value="%s" placeholder="종목 이름·코드"><button>찾기</button></form>' % escape(kw))
+    chips = " ".join((f'<b class="chip" style="background:var(--accent);color:var(--bg)">{lv} {n}</b>' if lv == lv_sel else f'<a class="chip {DSP_CLS.get(lv, "")}" href="/ideas?{urlencode({"t": "dispute", "lv": lv})}">{lv} {n}</a>') for lv, n in cnt.items())
+    chips += (' <a class="chip" href="/ideas?t=dispute">전체</a>' if lv_sel or kw else "")
+    form = ('<form method="get" action="/ideas" class="filters" style="margin:6px 0"><input type="hidden" name="t" value="dispute"><input type="search" name="kw" value="%s" placeholder="종목 이름·코드"><button>찾기</button></form>' % escape(kw))
     sections = ""
     for lv in dp.LEVEL_ORDER:
         if lv_sel and lv != lv_sel:
@@ -4274,7 +4274,7 @@ def view_dispute(conn, q):
                 top = max(sc["ext"], key=lambda h: h["pct"])
                 gap = f'<div style="font-size:12px;margin:2px 0">최대주주 측 {sc["holder_pct"]:.1f}% vs {escape(top["name"])} {top["pct"]:.1f}% — <b class="{"down" if (sc.get("gap") or 99) <= 5 else ""}">격차 {sc["holder_pct"] - top["pct"]:.1f}%p</b></div>'
             rs_ = "".join(f'<div class="muted" style="font-size:12px">· {escape(r)}</div>' for r in (sc.get("reasons") or [])[:3]) if not ev else ""
-            body += (f'<div style="border-top:1px solid var(--line);padding:8px 0"><div><a href="/dispute?{urlencode({"code": s_["code"]})}"><b>{escape(s_["name"] or s_["code"])}</b></a> <span class="muted" style="font-size:12px">{escape(s_["code"])}</span> '
+            body += (f'<div style="border-top:1px solid var(--line);padding:8px 0"><div><a href="/ideas?{urlencode({"t": "dispute", "code": s_["code"]})}"><b>{escape(s_["name"] or s_["code"])}</b></a> <span class="muted" style="font-size:12px">{escape(s_["code"])}</span> '
                      f'<span class="chip {DSP_CLS.get(lv, "")}" style="font-weight:700">{lv}</span> <span class="muted" style="font-size:12px">점수 {s_["score"]:.1f}' + (f' · 최근 신호 {escape(ev["last"])}' if ev.get("last") else "") + f'</span> {fin_chip(conn, s_["code"], False)}</div>'
                      f'<div style="margin:3px 0">{kinds}</div>{gap}{rs_}{_dsp_events_html(pl.get("events") or [], 3)}</div>')
         more = f'<div class="muted" style="font-size:12px">{len(items)}개 중 60개만 보여 줘요 (찾기로 좁혀 보세요).</div>' if len(items) > 60 else ""
@@ -4287,11 +4287,11 @@ def view_dispute(conn, q):
 def _dsp_detail(conn, s_, code):
     import dispute as dp
     if not s_:
-        return ('<div class="card"><a href="/dispute" class="muted" style="font-size:12px">← 목록</a><div style="margin-top:6px">이 종목은 분쟁 신호나 구조 위험이 잡히지 않았어요 '
+        return ('<div class="card"><a href="/ideas?t=dispute" class="muted" style="font-size:12px">← 목록</a><div style="margin-top:6px">이 종목은 분쟁 신호나 구조 위험이 잡히지 않았어요 '
                 f'({escape(code)}). 최근 120일 공시와 5% 보유 구조 기준이에요.</div></div>')
     pl = s_["payload"]
     ev, sc = pl.get("ev") or {}, pl.get("struct") or {}
-    head = (f'<div class="card"><a href="/dispute" class="muted" style="font-size:12px">← 목록</a><div style="margin-top:4px"><b style="font-size:18px">{escape(s_["name"] or code)}</b> <span class="muted">{escape(code)}</span> '
+    head = (f'<div class="card"><a href="/ideas?t=dispute" class="muted" style="font-size:12px">← 목록</a><div style="margin-top:4px"><b style="font-size:18px">{escape(s_["name"] or code)}</b> <span class="muted">{escape(code)}</span> '
             f'<a class="chip" href="/stock?code={quote(code)}">종목 화면</a> <a class="chip" href="{naver_link(code)}" target="_blank" rel="noopener noreferrer">네이버 증권 ↗</a> {fin_chip(conn, code, False)}</div>'
             f'<div style="margin:8px 0"><span class="chip {DSP_CLS.get(s_["level"], "")}" style="font-size:16px;font-weight:700">{s_["level"]}</span> <span class="muted">점수 {s_["score"]:.1f} · 판정일 {escape(s_["updated"])}'
             + (f' · 이전 단계 {escape(s_["prev_level"])}' if s_.get("prev_level") and s_["prev_level"] != s_["level"] else "") + '</span></div>'
@@ -4773,12 +4773,12 @@ IDEA_TABS = {"overall": "종합", "mine": "내 종목 점수", "cheap": "기관 
              "rank": "종목 순위", "score": "점수표 (오일전문가)", "perf": "운용사 성적표",
              "lynch": "피터 린치", "buffett": "워렌 버핏",
              "graham": "벤저민 그레이엄", "magic": "마법공식", "fscore": "F-스코어", "momentum": "모멘텀",
-             "legis": "입법 영향 기업", "legstudy": "입법 주가 분석", "fin": "재무제표 분석"}
-IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "legis", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf", "legstudy", "fin"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
+             "legis": "입법 영향 기업", "legstudy": "입법 주가 분석", "fin": "재무제표 분석", "dispute": "지분분쟁"}
+IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "legis", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf", "legstudy", "fin", "dispute"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
 
 
 IDEA_SECTIONS = [("점수", ["overall", "mine"]), ("투자 방법", ["lynch", "buffett", "graham", "magic", "fscore", "momentum"]),
-                 ("종목 찾기", ["cheap", "cluster", "super", "legis", "fin", "rank"]), ("평가·성적", ["score", "perf", "legstudy"])]
+                 ("종목 찾기", ["cheap", "cluster", "super", "legis", "fin", "dispute", "rank"]), ("평가·성적", ["score", "perf", "legstudy"])]
 
 
 def idea_tab_html(active, link=None):
@@ -5188,7 +5188,7 @@ def perf_url(**kw):
     return "/ideas?" + urlencode({"t": "perf", **kw})
 
 
-MARKET_HUB = {"/market": "시장 온도", "/cycle": "투자 사이클", "/world": "해외 증시", "/dispute": "지분분쟁", "/events": "이벤트·테마", "/policy": "정책", "/radar": "대비 레이더", "/diag": "하락 점검", "/bills": "법안·종목", "/news": "속보", "/shorts": "공매도 리포트", "/derivs": "선물·채권", "/calendar": "달력"}
+MARKET_HUB = {"/market": "시장 온도", "/cycle": "투자 사이클", "/world": "해외 증시", "/events": "이벤트·테마", "/policy": "정책", "/radar": "대비 레이더", "/diag": "하락 점검", "/bills": "법안·종목", "/news": "속보", "/shorts": "공매도 리포트", "/derivs": "선물·채권", "/calendar": "달력"}
 
 
 REPORT_HUB = {"/": "보고서", "/new": "새 공시", "/reports": "증권사 리포트"}
@@ -5209,6 +5209,12 @@ def view_ideas(conn, q):
         q = {**q, "t": "overall"}
     if q.get("t") == "mine":
         return view_mine(conn, q)
+    if q.get("t") == "dispute":
+        _CTX.pre = idea_tabs_row("dispute")
+        try:
+            return view_dispute(conn, q)
+        finally:
+            _CTX.pre = ""
     if q.get("t") == "fin":
         _CTX.pre = idea_tabs_row("fin")
         try:
@@ -7126,8 +7132,8 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     body = view_cycle(conn, q)
                 elif url.path == "/world":
                     body = view_world(conn, q)
-                elif url.path == "/dispute":
-                    body = view_dispute(conn, q)
+                elif url.path == "/dispute":          # 지분분쟁은 아이디어 탭으로 옮겼어요 (예전 주소 호환)
+                    return self._redirect("/ideas?" + urlencode({"t": "dispute", **{k: v for k, v in q.items() if not k.startswith("_")}}))
                 elif url.path == "/ideas":
                     body = view_ideas(conn, q)
                 elif url.path == "/ranking":
@@ -7342,7 +7348,7 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 self.rfile.read(n)
                 S = settings()
                 ok, why = S["dispute_run"]() if "dispute_run" in S else (False, "이 서버 버전은 지원하지 않아요")
-                return self._redirect("/dispute?" + urlencode({"msg": ("✔ " if ok else "✖ ") + why}))
+                return self._redirect("/ideas?" + urlencode({"t": "dispute", "msg": ("✔ " if ok else "✖ ") + why}))
             if path == "/world/run" and settings_api:
                 n = min(int(self.headers.get("Content-Length") or 0), 4096)
                 self.rfile.read(n)
