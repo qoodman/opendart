@@ -4178,6 +4178,151 @@ def view_world(conn, q):
     return page("해외 증시", flash + prep + syn + table + topall + sections, refresh=running)
 
 
+_DSP = {"t": 0.0, "v": {}}
+DSP_CLS = {"치열": "down", "시작": "down", "징후": "", "가능성 높음": "", "가능성": ""}
+
+
+def dispute_map(conn):
+    """{종목코드: (단계, 점수)} — 지분분쟁 판정 (30초 재사용, 없으면 {})"""
+    if time.time() - _DSP["t"] < 30:
+        return _DSP["v"]
+    out = {}
+    try:
+        for c, lv, sc in conn.execute("SELECT code, level, score FROM dispute_state"):
+            out[c] = (lv, sc)
+    except sqlite3.Error:
+        out = {}
+    _DSP.update(t=time.time(), v=out)
+    return out
+
+
+def dispute_chip(conn, code):
+    x = dispute_map(conn).get(code)
+    if not x:
+        return ""
+    return f'<a class="chip {DSP_CLS.get(x[0], "")}" style="text-decoration:none;font-weight:700" href="/dispute?code={quote(code)}" title="지분분쟁 레이더">⚔ 지분분쟁 {escape(x[0])}</a>'
+
+
+def _dsp_events_html(evs, n=3):
+    import dispute as dp
+    out = ""
+    for e in evs[:n]:
+        lab = dp.KIND_LABEL.get(e["kind"], e["kind"])
+        t = escape((e.get("title") or "")[:60])
+        t = f'<a href="{dart_link(e["rcept_no"])}" target="_blank" rel="noopener noreferrer">{t}</a>' if e.get("rcept_no") else t
+        out += (f'<div style="font-size:12px;margin:2px 0"><span class="muted">{escape(e["date"])}</span> {dp.KIND_ICON.get(e["kind"], "")} <b>{escape(lab)}</b> · {t}'
+                + (f' <span class="muted">· {escape(e["flr"])}</span>' if e.get("flr") else "") + '</div>')
+    return out
+
+
+def view_dispute(conn, q):
+    """시장 → 지분분쟁: 분쟁 가능성이 있는 종목, 막 시작한 종목, 치열하게 싸우는 종목"""
+    import dispute as dp
+    import legis as lg
+    d = Path(_DATA_DIR["path"] or ".")
+    st = lg.read_status(str(d / "dispute_status.json"))
+    running = bool(st and st.get("running"))
+    msg = q.get("msg", "")
+    flash = f'<div class="card {"warn" if msg.startswith("✖") else ""}">{escape(msg)}</div>' if msg else ""
+    states = dp.load_states(conn)
+    by_code = {s_["code"]: s_ for s_ in states}
+    try:
+        last_scan = (conn.execute("SELECT value FROM dispute_meta WHERE key='scanned'").fetchone() or [""])[0]
+    except sqlite3.Error:
+        last_scan = ""
+    prep = ('<div class="card"><b>지분분쟁 레이더</b>'
+            '<div class="muted" style="font-size:13px">경영권·지분 분쟁이 <b>벌어지고 있는 종목</b>(치열·시작)과 <b>분쟁 가능성이 있는 종목</b>(징후·가능성)을 DART 공시로 찾아요. '
+            f'분석한 종목 {len(states)}개' + (f' · 마지막 공시 훑기 {escape(last_scan)}' if last_scan else "") + '</div>'
+            '<form method="post" action="/dispute/run" class="filters" style="margin:8px 0 0">'
+            f'<button{" disabled" if running else ""}>{"진행 중…" if running else ("공시 새로 훑기" if states else "공시 훑고 분석하기")}</button>'
+            '<span class="muted" style="font-size:12px">처음엔 최근 120일 공시를 훑어 몇 분 걸리고(별도 프로세스), 다음부터는 새 공시만 봐요. 새로 시작·치열이 되면 푸시로 알려요.</span></form>'
+            + status_steps_html(st, running) + '</div>')
+    how = ('<div class="card"><details><summary><b>어떻게 찾고 판단하나요? (꼭 알아 둘 한계)</b></summary>'
+           '<div style="font-size:13px;margin-top:6px"><b>벌어지고 있다는 신호</b>(공시 제목으로 잡아요): ⚖ 경영권 분쟁 소송·가처분(신주발행금지·의결권행사금지·주총금지) · 🗳 <b>주주측 위임장 권유</b>(회사가 아닌 쪽이 의결권을 모으는 표 대결) · '
+           '📢 공개매수 · 📝 주주제안·소수주주권·임시주총 청구 · 👑 최대주주 변경 · 🎯 경영참여 목적 5% 보유(대량보유 <b>일반</b> 보고, 행동주의 포함). '
+           '🛡 자기주식 취득·처분/제3자 배정, ❓ 풍문 해명, 🚨 횡령·배임은 분쟁 중에 자주 나와서 <b>다른 신호와 함께일 때만</b> 점수에 반영해요.</div>'
+           '<ul class="muted" style="font-size:13px;padding-left:18px"><li><b>치열</b>: 서로 다른 신호가 3가지 이상이거나, 위임장 권유+소송·가처분, 공개매수+위임장·가처분처럼 양쪽이 맞붙는 조합이 최근 90일 안에 있음 (최근 공시일수록 크게 셈)</li>'
+           '<li><b>시작</b>: 위 신호가 최근 90일 안에 나왔고 아직 맞붙는 조합은 아님</li><li><b>징후</b>: 경영참여 목적 5% 보유자(특히 행동주의)가 새로 나타남</li>'
+           '<li><b>가능성</b>: 분쟁 공시는 없지만 구조가 위험함 — 최대주주 측과 가장 큰 외부 5% 보유자의 <b>지분 격차</b>가 작고, 경영참여·행동주의 보유자가 있거나, 외부 보유자가 지분을 늘리는 중 (저PBR이면 가산)</li></ul>'
+           '<ul class="muted" style="font-size:12px;padding-left:18px"><li>제목으로 읽기 때문에 놓치거나 과하게 잡을 수 있어요(예: 회사 자체 위임장 권유는 약하게만 셈). 지분 격차는 최대주주 측 연말 지분과 최근 5% 보고를 견준 값이라 실제와 다를 수 있어요.</li>'
+           '<li>공시는 사실이지만 <b>누가 이길지, 주가가 어떻게 될지는 알려 주지 않아요.</b> 분쟁 기대로 주가가 이미 크게 움직였을 수 있고, 합의로 끝나면 빠르게 식기도 해요. 투자 추천이 아니에요.</li></ul></details></div>')
+    code = (q.get("code") or "").strip()
+    if code:
+        return page("지분분쟁", flash + _dsp_detail(conn, by_code.get(code), code))
+    if not states:
+        return page("지분분쟁", flash + prep + how + '<div class="card muted">아직 분석한 결과가 없어요. 위 버튼으로 공시를 훑어 주세요 (DART 키가 설정에 있어야 해요).</div>', refresh=running)
+    lv_sel = q.get("lv") if q.get("lv") in dp.LEVEL_ORDER else ""
+    kw = (q.get("kw") or "").strip()
+    cnt = {lv: sum(1 for s_ in states if s_["level"] == lv) for lv in dp.LEVEL_ORDER}
+    chips = " ".join((f'<b class="chip" style="background:var(--accent);color:var(--bg)">{lv} {n}</b>' if lv == lv_sel else f'<a class="chip {DSP_CLS.get(lv, "")}" href="/dispute?{urlencode({"lv": lv})}">{lv} {n}</a>') for lv, n in cnt.items())
+    chips += (' <a class="chip" href="/dispute">전체</a>' if lv_sel or kw else "")
+    form = ('<form method="get" action="/dispute" class="filters" style="margin:6px 0"><input type="search" name="kw" value="%s" placeholder="종목 이름·코드"><button>찾기</button></form>' % escape(kw))
+    sections = ""
+    for lv in dp.LEVEL_ORDER:
+        if lv_sel and lv != lv_sel:
+            continue
+        items = [s_ for s_ in states if s_["level"] == lv and (not kw or kw in (s_["name"] or "") or kw in s_["code"])]
+        if not items:
+            continue
+        body = ""
+        for s_ in items[:60]:
+            pl = s_["payload"]
+            ev, sc = pl.get("ev") or {}, pl.get("struct") or {}
+            kinds = "".join(f'<span class="chip" title="{escape(dp.KIND_LABEL.get(k, k))}" style="margin:1px">{dp.KIND_ICON.get(k, "")} {escape(dp.KIND_LABEL.get(k, k))}</span>' for k in (ev.get("hot") or []) + [k for k in (ev.get("kinds") or []) if k not in (ev.get("hot") or [])][:3])
+            gap = ""
+            if sc.get("holder_pct") is not None and sc.get("ext"):
+                top = max(sc["ext"], key=lambda h: h["pct"])
+                gap = f'<div style="font-size:12px;margin:2px 0">최대주주 측 {sc["holder_pct"]:.1f}% vs {escape(top["name"])} {top["pct"]:.1f}% — <b class="{"down" if (sc.get("gap") or 99) <= 5 else ""}">격차 {sc["holder_pct"] - top["pct"]:.1f}%p</b></div>'
+            rs_ = "".join(f'<div class="muted" style="font-size:12px">· {escape(r)}</div>' for r in (sc.get("reasons") or [])[:3]) if not ev else ""
+            body += (f'<div style="border-top:1px solid var(--line);padding:8px 0"><div><a href="/dispute?{urlencode({"code": s_["code"]})}"><b>{escape(s_["name"] or s_["code"])}</b></a> <span class="muted" style="font-size:12px">{escape(s_["code"])}</span> '
+                     f'<span class="chip {DSP_CLS.get(lv, "")}" style="font-weight:700">{lv}</span> <span class="muted" style="font-size:12px">점수 {s_["score"]:.1f}' + (f' · 최근 신호 {escape(ev["last"])}' if ev.get("last") else "") + f'</span> {fin_chip(conn, s_["code"], False)}</div>'
+                     f'<div style="margin:3px 0">{kinds}</div>{gap}{rs_}{_dsp_events_html(pl.get("events") or [], 3)}</div>')
+        more = f'<div class="muted" style="font-size:12px">{len(items)}개 중 60개만 보여 줘요 (찾기로 좁혀 보세요).</div>' if len(items) > 60 else ""
+        desc = {"치열": "서로 맞붙는 신호가 겹친, 지금 가장 뜨거운 분쟁", "시작": "분쟁 신호가 막 나온 종목", "징후": "경영참여 목적 5% 보유자가 나타난 종목",
+                "가능성 높음": "분쟁 공시는 없지만 지분 구조가 아슬아슬한 종목", "가능성": "구조상 분쟁 가능성이 있는 종목"}[lv]
+        sections += (f'<div class="card"><details{" open" if lv in ("치열", "시작") or lv_sel else ""}><summary><b>{lv}</b> <span class="muted" style="font-size:12px">{len(items)}개 · {desc}</span></summary>{body}{more}</details></div>')
+    return page("지분분쟁", flash + prep + f'<div class="card"><div style="margin-bottom:4px">{chips}</div>{form}</div>' + (sections or '<div class="card muted">조건에 맞는 종목이 없어요.</div>') + how, refresh=running)
+
+
+def _dsp_detail(conn, s_, code):
+    import dispute as dp
+    if not s_:
+        return ('<div class="card"><a href="/dispute" class="muted" style="font-size:12px">← 목록</a><div style="margin-top:6px">이 종목은 분쟁 신호나 구조 위험이 잡히지 않았어요 '
+                f'({escape(code)}). 최근 120일 공시와 5% 보유 구조 기준이에요.</div></div>')
+    pl = s_["payload"]
+    ev, sc = pl.get("ev") or {}, pl.get("struct") or {}
+    head = (f'<div class="card"><a href="/dispute" class="muted" style="font-size:12px">← 목록</a><div style="margin-top:4px"><b style="font-size:18px">{escape(s_["name"] or code)}</b> <span class="muted">{escape(code)}</span> '
+            f'<a class="chip" href="/stock?code={quote(code)}">종목 화면</a> <a class="chip" href="{naver_link(code)}" target="_blank" rel="noopener noreferrer">네이버 증권 ↗</a> {fin_chip(conn, code, False)}</div>'
+            f'<div style="margin:8px 0"><span class="chip {DSP_CLS.get(s_["level"], "")}" style="font-size:16px;font-weight:700">{s_["level"]}</span> <span class="muted">점수 {s_["score"]:.1f} · 판정일 {escape(s_["updated"])}'
+            + (f' · 이전 단계 {escape(s_["prev_level"])}' if s_.get("prev_level") and s_["prev_level"] != s_["level"] else "") + '</span></div>'
+            + (f'<div style="font-size:13px">최근 90일 신호: ' + ", ".join(escape(dp.KIND_LABEL.get(k, k)) for k in (ev.get("hot") or [])) + f' · 최근 30일 {ev.get("recent30", 0)}건' + (" · 행동주의 성향 보유자 관련" if ev.get("activist") else "") + '</div>' if ev else "")
+            + '</div>')
+    tl = ""
+    for e in (pl.get("events") or []):
+        tl += _dsp_events_html([e], 1)
+    tl_card = ('<div class="card"><b>공시 타임라인</b> <span class="muted" style="font-size:12px">(최근 180일, 최신순)</span>' + (tl or '<div class="muted">분쟁 신호 공시가 없어요.</div>') + '</div>')
+    hold_card = ""
+    if sc and sc.get("ext") is not None:
+        rows = ""
+        if sc.get("holder_pct") is not None:
+            rows += f'<tr style="background:var(--chip)"><td><b>최대주주 및 특수관계인 합계</b></td><td><b>{sc["holder_pct"]:.2f}%</b></td><td>-</td><td class="muted">연말 사업보고서 기준</td><td></td></tr>'
+        for h in sorted(sc["ext"], key=lambda h: -h["pct"]):
+            chg_t = "" if h.get("chg") is None else format(h["chg"], "+.2f") + "%p"
+            rows += (f'<tr><td>{escape(h["name"])}{" 🎯" if h.get("activist") else ""}</td><td>{h["pct"]:.2f}%</td><td>{escape(h.get("tp") or "")}</td><td class="muted" style="font-size:12px">{escape(h.get("date") or "")} {escape(h.get("resn") or "")}</td>'
+                     f'<td>{chg_t}</td></tr>')
+        why = "".join(f'<li>{escape(r)}</li>' for r in sc.get("reasons") or [])
+        hold_card = ('<div class="card"><b>지분 구조</b>' + (f'<div class="scroll"><table><tr><th>보유자</th><th>지분율</th><th>보고 종류</th><th>마지막 보고</th><th>직전 대비</th></tr>{rows}</table></div>' if rows else "")
+                     + (f'<div style="margin-top:6px;font-size:13px"><b>분쟁 가능성 근거</b> (구조 점수 {sc.get("score", 0)})<ul style="padding-left:18px;margin:4px 0">{why}</ul></div>' if why else "")
+                     + '<div class="muted" style="font-size:11px">일반 = 경영참여 목적 보고, 약식 = 단순·일반투자 보고. 🎯 = 행동주의 성향으로 알려진 이름. 최대주주 측 지분은 연말 기준이라 최근 변동은 반영이 늦을 수 있어요. 최대주주와 특수관계인의 정확한 합계는 최대주주등소유주식변동신고서를 확인하세요.</div></div>')
+    guide = ('<div class="card"><details><summary><b>이 신호들을 어떻게 읽나요?</b></summary><ul class="muted" style="font-size:13px;padding-left:18px">'
+             '<li><b>🗳 주주측 위임장 권유</b>: 주총에서 표를 모으려는 준비예요. 보통 주총 몇 주 전에 나오고, 안건(이사 선임·정관 변경)을 참고서류에서 확인하세요.</li>'
+             '<li><b>⚖ 가처분·소송</b>: 신주발행·의결권 행사·주총 개최를 법원에서 막거나 허용받으려는 싸움이에요. 결정 날짜가 분수령이 되는 경우가 많아요.</li>'
+             '<li><b>👑 최대주주 변경 / 📈 지분 변동</b>: 지분 격차가 작으면 몇 %p 차로 주도권이 바뀌어요. 시간외 대량 매수, 우호 지분(자사주·제3자 배정·백기사)이 이어지는지 보세요.</li>'
+             '<li><b>🎯 경영참여 5% 보유</b>: 단순 투자가 아니라 경영에 영향을 주려는 목적으로 신고한 보유자예요. 보유 목적이 바뀌는 보고는 분쟁의 신호탄인 경우가 많아요.</li>'
+             '<li><b>캐스팅보트</b>: 산업은행·국민연금 같은 큰 기관의 지분과 입장이 승패를 가르기도 해요 (국민연금은 단순투자 보고로 이 화면의 5% 목록에 보여요).</li></ul></div>')
+    return head + tl_card + hold_card + guide
+
+
 def view_legstudy(conn, q):
     """아이디어 → 입법 주가 분석: 과거 법안의 단계 날짜 전후로, 연결된 기업의 주가가 지수보다 얼마나 더 움직였나 (이벤트 스터디)"""
     import bill_history
@@ -5043,7 +5188,7 @@ def perf_url(**kw):
     return "/ideas?" + urlencode({"t": "perf", **kw})
 
 
-MARKET_HUB = {"/market": "시장 온도", "/cycle": "투자 사이클", "/world": "해외 증시", "/events": "이벤트·테마", "/policy": "정책", "/radar": "대비 레이더", "/diag": "하락 점검", "/bills": "법안·종목", "/news": "속보", "/shorts": "공매도 리포트", "/derivs": "선물·채권", "/calendar": "달력"}
+MARKET_HUB = {"/market": "시장 온도", "/cycle": "투자 사이클", "/world": "해외 증시", "/dispute": "지분분쟁", "/events": "이벤트·테마", "/policy": "정책", "/radar": "대비 레이더", "/diag": "하락 점검", "/bills": "법안·종목", "/news": "속보", "/shorts": "공매도 리포트", "/derivs": "선물·채권", "/calendar": "달력"}
 
 
 REPORT_HUB = {"/": "보고서", "/new": "새 공시", "/reports": "증권사 리포트"}
@@ -6376,8 +6521,9 @@ def report_box(conn, code, name, reps, close=None, with_fin=True):
     else:
         body = '<span class="muted">증권사 리포트: 최근 1년 없음 (다루는 증권사가 없거나 아직 수집 전)</span>'
     fc_ = fin_chip(conn, code) if with_fin else ""
-    if fc_:
-        body = f'<div style="margin-bottom:4px">{fc_}</div>' + body
+    dc_ = dispute_chip(conn, code)
+    if fc_ or dc_:
+        body = f'<div style="margin-bottom:4px">{dc_} {fc_}</div>' + body
     sh = short_hits(conn, name)
     if sh:
         body += ('<div style="margin-top:3px"><span class="chip warn">공매도 리포트 %d건</span> ' % len(sh)
@@ -6980,6 +7126,8 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     body = view_cycle(conn, q)
                 elif url.path == "/world":
                     body = view_world(conn, q)
+                elif url.path == "/dispute":
+                    body = view_dispute(conn, q)
                 elif url.path == "/ideas":
                     body = view_ideas(conn, q)
                 elif url.path == "/ranking":
@@ -7189,6 +7337,12 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 S = settings()
                 ok, why = S["legis_prepare"]() if "legis_prepare" in S else (False, "이 서버 버전은 지원하지 않아요")
                 return self._redirect("/ideas?" + urlencode({"t": "legis", "msg": ("✔ " if ok else "✖ ") + why}))
+            if path == "/dispute/run" and settings_api:
+                n = min(int(self.headers.get("Content-Length") or 0), 4096)
+                self.rfile.read(n)
+                S = settings()
+                ok, why = S["dispute_run"]() if "dispute_run" in S else (False, "이 서버 버전은 지원하지 않아요")
+                return self._redirect("/dispute?" + urlencode({"msg": ("✔ " if ok else "✖ ") + why}))
             if path == "/world/run" and settings_api:
                 n = min(int(self.headers.get("Content-Length") or 0), 4096)
                 self.rfile.read(n)

@@ -942,6 +942,78 @@ def legstudy_run():
     return True, "시작했어요 (별도 프로세스, 화면은 그대로 쓸 수 있어요). 과거 법안·주가를 받느라 처음에는 20~40분 걸릴 수 있어요."
 
 
+def dispute_run():
+    """지분분쟁 탭의 '공시 훑고 분석하기': DART 공시에서 분쟁 신호를 찾고 종목별 단계를 판정. 별도 프로세스(낮은 우선순위). (성공 여부, 안내)"""
+    import subprocess
+    import legis
+    status = data_dir() / "dispute_status.json"
+    st = legis.read_status(str(status))
+    if st and st.get("running"):
+        return False, "이미 진행 중이에요. 아래 진행 상황을 확인하세요."
+    if not (read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", "")):
+        return False, "DART_API_KEY가 없어요. 설정에서 DART 키를 먼저 넣어 주세요."
+
+    def lower_priority():
+        try:
+            os.nice(10)
+        except OSError:
+            pass
+    try:
+        logf = open(data_dir() / "dispute.log", "ab")
+        proc = subprocess.Popen([sys.executable, str(ROOT / "dart_server.py"), "dispute-sync"], cwd=str(ROOT), stdout=logf, stderr=subprocess.STDOUT,
+                                start_new_session=True, preexec_fn=lower_priority)
+    except Exception as e:
+        return False, f"시작하지 못했어요: {type(e).__name__}: {str(e)[:100]}"
+    threading.Thread(target=proc.wait, daemon=True).start()
+    try:
+        status.write_text(json.dumps({"running": True, "pid": proc.pid, "started": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "finished": "",
+                                      "steps": [{"name": "공시 훑기", "state": "run", "msg": "시작"}, {"name": "종목별 단계 판정·지분 구조", "state": "wait", "msg": ""}]}, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+    return True, "시작했어요 (별도 프로세스). 처음에는 최근 120일을 훑어서 몇 분 걸리고, 다음부터는 새로 나온 것만 봐요."
+
+
+def send_dispute_alerts():
+    """분쟁 단계가 새로 '시작'·'치열'이 된 종목을 푸시로 알림 (같은 판정은 한 번만)"""
+    conn = sqlite3.connect(results_db())
+    try:
+        rows = conn.execute("SELECT code, name, level, score, payload, updated FROM dispute_state WHERE level IN ('치열','시작') AND (prev_level IS NULL OR prev_level != level) "
+                            "AND (alerted IS NULL OR alerted != updated) ORDER BY score DESC").fetchall()
+    except sqlite3.Error:
+        conn.close()
+        return 0
+    try:
+        if not rows:
+            return 0
+        url = env("DASHBOARD_URL")
+        lines = []
+        for code, nm, lv, sc, pl, up in rows[:8]:
+            try:
+                last = (json.loads(pl).get("ev") or {}).get("last", "")
+            except ValueError:
+                last = ""
+            lines.append(f"[{lv}] {nm}({code}) 최근 신호 {last}")
+        notify(f"지분분쟁 {len(rows)}건", "\n".join(lines) + (f"\n…외 {len(rows) - 8}건" if len(rows) > 8 else ""), click=(url.rstrip("/") + "/dispute") if url else "", tags=("crossed_swords",))
+        conn.executemany("UPDATE dispute_state SET alerted=? WHERE code=?", [(r[5], r[0]) for r in rows])
+        conn.commit()
+        return len(rows)
+    except Exception as e:
+        print(f"지분분쟁 알림 실패: {e}", flush=True)
+        return 0
+    finally:
+        conn.close()
+
+
+def cmd_dispute_sync(args):
+    """(서버 내부용) dispute_run()이 띄우는 별도 프로세스"""
+    import dispute
+    key = read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", "")
+    dispute.run_job(str(results_db()), key, str(data_dir() / "dispute_status.json"), log=lambda m: print(m, flush=True))
+    if env("DART_DISPUTE_ALERT", "1") != "0":
+        send_dispute_alerts()
+    return 0
+
+
 def world_run():
     """해외 증시 탭의 '받고 분석하기': 해외 지수(2005~)와 대표 종목 재무·주가·증권사 목표가를 별도 프로세스로. (성공 여부, 안내)"""
     import subprocess
@@ -2089,7 +2161,7 @@ def cmd_web(args):
                     update_info=update_info, check_update=check_update, start_update=start_update,
                     backup_list=backup_list, backup_busy=backup_busy, backup_start=backup_start,
                     backup_file=backup_file, krx_key=krx_key_now, save_krx_key=save_krx_key,
-                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, event_action=event_action, legstudy_run=legstudy_run, fin_run=fin_run, world_run=world_run, fin_clue_run=fin_clue_run, fin_action=fin_action, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
+                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, event_action=event_action, legstudy_run=legstudy_run, fin_run=fin_run, world_run=world_run, dispute_run=dispute_run, fin_clue_run=fin_clue_run, fin_action=fin_action, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
     serve(results_db(), host=args.host, port=args.port, child_env=child_env,
           get_key=lambda: read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", ""),
           save_key=save_key, settings_api=settings_api)
@@ -2115,6 +2187,7 @@ def main(argv=None):
     sub.add_parser("legis-study", help="(내부용) 입법 주가 분석 작업")
     sub.add_parser("fin-analyze", help="(내부용) 재무제표 분석 작업")
     sub.add_parser("world-sync", help="(내부용) 해외 지수·종목 받기 작업")
+    sub.add_parser("dispute-sync", help="(내부용) 지분분쟁 공시 훑기 작업")
     sub.add_parser("fin-clues", help="(내부용) 공시 단서 받기 작업")
     sub.add_parser("update", help="최신 코드 받아 설치")
     sub.add_parser("net-check")
@@ -2131,7 +2204,7 @@ def main(argv=None):
     a = p.parse_args(argv)
     return {"run": cmd_run, "web": cmd_web, "net-check": cmd_net_check, "notify-test": cmd_notify_test,
             "status": cmd_status, "set-env": cmd_set_env, "hk-check": cmd_hk_check, "reports-check": cmd_hk_check, "market-check": cmd_market_check, "parse-check": cmd_parse_check,
-            "tick": cmd_tick, "update": cmd_update, "legis-prepare": cmd_legis_prepare, "legis-study": cmd_legis_study, "fin-analyze": cmd_fin_analyze, "world-sync": cmd_world_sync, "fin-clues": cmd_fin_clues}[a.cmd](a)
+            "tick": cmd_tick, "update": cmd_update, "legis-prepare": cmd_legis_prepare, "legis-study": cmd_legis_study, "fin-analyze": cmd_fin_analyze, "world-sync": cmd_world_sync, "dispute-sync": cmd_dispute_sync, "fin-clues": cmd_fin_clues}[a.cmd](a)
 
 
 if __name__ == "__main__":
