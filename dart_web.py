@@ -3019,7 +3019,7 @@ def view_events(conn, q):
             mt_ = (s_["payload"] or {}).get("meeting")
             if mt_ and today.isoformat() <= mt_["date"] <= (today + _dt1.timedelta(days=udays)).isoformat():
                 law_rows.append(dict(d=mt_["date"], end="", title=f'{"임시" if mt_.get("kind") == "egm" else ""}주주총회: {s_["name"]} (지분분쟁 {s_["level"]})', kind="지분분쟁", events=[], src=dart_link(mt_["rcept_no"]) if mt_.get("rcept_no") else "",
-                                     note="소집공고에서 읽은 개최일", themes=[], always=True))
+                                     note="소집공고에서 읽은 개최일" + (" · 안건: " + ", ".join(a_["type"] for a_ in mt_["agenda"] if a_["key"])[:80] if mt_.get("agenda") and any(a_["key"] for a_ in mt_["agenda"]) else ""), themes=[], always=True))
     except Exception:
         pass
     ups = et.upcoming(conn, today, udays, law_rows)
@@ -4319,7 +4319,25 @@ def _dsp_detail(conn, s_, code):
         dd_ = (dt.date.fromisoformat(mt["date"]) - dt.date.today()).days
         meet_card = ('<div class="card"><b>📅 주주총회 일정</b><div style="margin:4px 0;font-size:15px"><b>' + escape(mt["date"]) + f'</b> <span class="chip down" style="font-weight:700">{"오늘" if dd_ == 0 else f"D-{dd_}" if dd_ > 0 else f"{-dd_}일 전"}</span> '
                      + (f'<a class="chip" href="{dart_link(mt["rcept_no"])}" target="_blank" rel="noopener noreferrer">소집공고 ↗</a>' if mt.get("rcept_no") else "") + '</div>'
-                     '<div class="muted" style="font-size:12px">소집공고 본문의 개최일시를 읽은 값이에요 (이사 선임·정관 변경 등 안건은 공고에서 확인). 이 일정은 아이디어 → 이벤트 일정에도 올라가요. 표 대결이면 위임장 권유 참고서류와 의결권 행사 마감도 함께 보세요.</div></div>')
+                     + (f'<div style="font-size:13px">의결권 행사 기준일(주주명부 확정): <b>{escape(mt["record_date"])}</b> <span class="muted" style="font-size:12px">— 이 날 이후에 산 주식은 이번 주총 의결권이 없어요</span></div>' if mt.get("record_date") else "")
+                     + (('<div style="margin-top:6px"><b style="font-size:13px">상정 안건</b>' + "".join(
+                         f'<div style="font-size:13px;margin:3px 0">제{a_["no"]}호 <span class="chip{" down" if a_["key"] else ""}" style="font-size:11px">{escape(a_["type"])}</span> {escape(a_["title"])}' + (' <span class="chip down" style="font-size:10px">주주제안</span>' if a_.get("proposal") else "") + '</div>' for a_ in mt["agenda"])
+                         + '<div class="muted" style="font-size:11px">빨간 칩은 경영권에 직접 닿는 안건(이사 선임·해임, 정관 변경, 합병·분할, 신주 발행 등)이에요.</div></div>') if mt.get("agenda") else "")
+                     + '<div class="muted" style="font-size:12px">소집공고 본문을 읽은 값이에요 (못 읽은 항목은 빠져요). 이 일정은 아이디어 → 이벤트 일정에도 올라가요. 표 대결이면 위임장 권유 참고서류와 의결권 행사 마감도 함께 보세요.</div></div>')
+    prox_card = ""
+    prox = pl.get("proxies") or []
+    if prox:
+        cols = ""
+        for px_ in prox:
+            ag = "".join(f'<div style="font-size:12px;margin:2px 0">제{a_["no"]}호 <span class="chip{" down" if a_["key"] else ""}" style="font-size:10px">{escape(a_["type"])}</span> {escape(a_["title"][:60])}</div>' for a_ in (px_.get("agenda") or [])[:8])
+            cols += (f'<div style="flex:1 1 240px;border:1px solid var(--line);border-radius:8px;padding:8px;margin:4px"><b>{escape(px_["filer"])}</b> '
+                     f'<span class="chip {"down" if px_["ext"] else ""}" style="font-size:11px">{"주주측 권유" if px_["ext"] else "회사측 권유"}</span>'
+                     f'<div class="muted" style="font-size:11px">공시 {escape(px_["date"])}' + (f' · 권유기간 {escape(px_["period"])}' if px_.get("period") else "") + '</div>'
+                     + (f'<div style="font-size:12px;margin:4px 0">취지: {escape(px_["purpose"])}</div>' if px_.get("purpose") else "")
+                     + (ag or '<div class="muted" style="font-size:12px">안건을 못 읽었어요 — 참고서류 원문을 확인하세요</div>')
+                     + f' <a class="chip" href="{dart_link(px_["rcept_no"])}" target="_blank" rel="noopener noreferrer">참고서류 ↗</a></div>')
+        prox_card = ('<div class="card"><b>🗳 위임장 권유 — 양측 안건 비교</b><div style="display:flex;flex-wrap:wrap;margin:4px -4px">' + cols + '</div>'
+                     '<div class="muted" style="font-size:11px">최근 90일 위임장 권유 참고서류에서 제출인마다 가장 최근 것을 읽었어요. 같은 자리(이사 선임 등)에 서로 다른 후보를 내면 표 대결이에요. 안건·기간은 본문에서 자동으로 읽은 값이라 원문으로 확인하세요.</div></div>')
     tl = ""
     for e in (pl.get("events") or []):
         tl += _dsp_events_html([e], 1)
@@ -4345,7 +4363,7 @@ def _dsp_detail(conn, s_, code):
              '<li><b>👑 최대주주 변경 / 📈 지분 변동</b>: 지분 격차가 작으면 몇 %p 차로 주도권이 바뀌어요. 시간외 대량 매수, 우호 지분(자사주·제3자 배정·백기사)이 이어지는지 보세요.</li>'
              '<li><b>🎯 경영참여 5% 보유</b>: 단순 투자가 아니라 경영에 영향을 주려는 목적으로 신고한 보유자예요. 보유 목적이 바뀌는 보고는 분쟁의 신호탄인 경우가 많아요.</li>'
              '<li><b>캐스팅보트</b>: 산업은행·국민연금 같은 큰 기관의 지분과 입장이 승패를 가르기도 해요 (국민연금은 단순투자 보고로 이 화면의 5% 목록에 보여요).</li></ul></div>')
-    return head + meet_card + tl_card + hold_card + guide
+    return head + meet_card + prox_card + tl_card + hold_card + guide
 
 
 def view_legstudy(conn, q):

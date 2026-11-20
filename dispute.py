@@ -282,6 +282,95 @@ def meeting_date(text):
         return ""
 
 
+# 안건 분류 (지배구조·경영권에 직접 닿는 안건은 key=True)
+_AGENDA_TYPES = [
+    (r"이사.{0,6}해임|해임.{0,4}이사|감사.{0,4}해임", "이사·감사 해임", True),
+    (r"이사.{0,4}(선임|선출)|사내이사|사외이사|기타비상무", "이사 선임", True),
+    (r"감사위원.{0,8}(선임|분리)|감사.{0,4}선임", "감사(위원) 선임", True),
+    (r"정관.{0,4}(변경|개정)", "정관 변경", True),
+    (r"집중투표", "집중투표제", True),
+    (r"합병|분할|영업양수|영업양도|주식.{0,3}교환|주식.{0,3}이전", "합병·분할", True),
+    (r"자기주식.{0,6}(소각|취득)|주식소각|감자", "자사주·소각·감자", False),
+    (r"배당", "배당", False),
+    (r"보수한도|이사.{0,4}보수|퇴직금", "이사 보수·퇴직금", False),
+    (r"주식매수선택권|스톡옵션", "스톡옵션", False),
+    (r"재무제표|결산", "재무제표 승인", False),
+    (r"신주|유상증자|전환사채|신주인수권|주식.{0,4}발행", "신주·사채 발행", True),
+]
+
+
+def classify_agenda(title):
+    for pat, label, key_ in _AGENDA_TYPES:
+        if re.search(pat, title):
+            return label, key_
+    return "기타", False
+
+
+def parse_agenda(text):
+    """소집공고·위임장 권유 본문 → [dict(no, title, type, key, proposal(주주제안 표시 여부))] (제1호 의안 …). 못 찾으면 []"""
+    out, seen = [], set()
+    lines = (text or "").split("\n")
+    for ln in lines:
+        flat = ln.replace("\t", " ").strip()
+        m = re.match(r"^[\-\*ㆍ·○◦\s]*(?:제\s*)?(\d{1,2})\s*(?:호\s*)?(?:의안|안건)\s*[:：.\-]?\s*(.{4,120})$", flat)
+        if not m:
+            continue
+        no, title = m.group(1), m.group(2).strip()
+        if no in seen or len(title) < 4:
+            continue
+        seen.add(no)
+        label, key_ = classify_agenda(title)
+        out.append(dict(no=int(no), title=title[:110], type=label, key=key_, proposal=("주주제안" in title or "주주제안" in flat)))
+        if len(out) >= 15:
+            break
+    return out
+
+
+def record_date(text):
+    """주주총회 소집공고의 의결권 행사 기준일(주주명부 확정일) → 'YYYY-MM-DD' 또는 ''"""
+    for m in re.finditer(r"기준일[^\d]{0,12}(\d{4})\s*[년.\-]\s*(\d{1,2})\s*[월.\-]\s*(\d{1,2})", text or ""):
+        try:
+            return dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3))).isoformat()
+        except ValueError:
+            continue
+    return ""
+
+
+def parse_proxy(text):
+    """위임장 권유 참고서류 본문 → dict(period, agenda[], purpose) (읽은 것만)"""
+    out = {}
+    m = re.search(r"권유\s*기간\s*[:：]?\s*([^\n]{6,80})", text or "")
+    if m:
+        out["period"] = re.sub(r"\s+", " ", m.group(1)).strip()
+    ag = parse_agenda(text)
+    if ag:
+        out["agenda"] = ag
+    m = re.search(r"(?:권유의\s*취지|권유\s*취지|권유\s*목적)\s*[:：]?\s*([^\n]{10,200})", text or "")
+    if m:
+        out["purpose"] = re.sub(r"\s+", " ", m.group(1)).strip()
+    return out
+
+
+def find_proxies(events, key, today=None, session=None, limit=4):
+    """최근 90일 위임장 권유 공시 → [dict(filer, date, rcept_no, ext(주주측 여부), period, agenda, purpose)] (제출인마다 가장 최근 것)"""
+    import fin_clues
+    today = today or dt.date.today()
+    seen, out = set(), []
+    for e in sorted([e for e in events if e["kind"] in ("proxy_ext", "proxy_co") and e.get("rcept_no")], key=lambda e: e["date"], reverse=True):
+        if (today - dt.date.fromisoformat(e["date"])).days > 90 or e.get("flr") in seen:
+            continue
+        seen.add(e.get("flr"))
+        try:
+            txt = fin_clues.fetch_document_text(e["rcept_no"], key, session)
+        except Exception:
+            txt = ""
+        info = parse_proxy(txt) if txt else {}
+        out.append(dict(filer=e.get("flr") or "", date=e["date"], rcept_no=e["rcept_no"], ext=(e["kind"] == "proxy_ext"), **info))
+        if len(out) >= limit:
+            break
+    return out
+
+
 def find_meeting(events, key, today=None, session=None):
     """종목의 최근 주총 소집공고(정기·임시) 중 아직 안 열린 것의 날짜 → dict(date, rcept_no, title, kind) 또는 None"""
     import fin_clues
@@ -296,7 +385,7 @@ def find_meeting(events, key, today=None, session=None):
             continue
         d = meeting_date(txt)
         if d and d >= (today - dt.timedelta(days=2)).isoformat():
-            return dict(date=d, rcept_no=e["rcept_no"], title=e.get("title") or "", kind=e["kind"])
+            return dict(date=d, rcept_no=e["rcept_no"], title=e.get("title") or "", kind=e["kind"], agenda=parse_agenda(txt), record_date=record_date(txt))
     return None
 
 
@@ -397,6 +486,10 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
                 states[code]["meeting"] = find_meeting(by[code], key, today, session)
             except Exception:
                 states[code]["meeting"] = None
+            try:
+                states[code]["proxies"] = find_proxies(by[code], key, today, session)
+            except Exception:
+                states[code]["proxies"] = []
     out = 0
     for code, s_ in states.items():
         level = s_["ev"]["level"] if s_["ev"] else None
@@ -407,7 +500,7 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
         if level is None:
             continue
         prev = conn.execute("SELECT level, alerted FROM dispute_state WHERE code=?", (code,)).fetchone()
-        payload = dict(ev=s_["ev"], struct=s_["struct"], meeting=s_.get("meeting"), events=[e for e in sorted(by[code], key=lambda e: e["date"], reverse=True) if e["kind"] != "agm"][:30])
+        payload = dict(ev=s_["ev"], struct=s_["struct"], meeting=s_.get("meeting"), proxies=s_.get("proxies") or [], events=[e for e in sorted(by[code], key=lambda e: e["date"], reverse=True) if e["kind"] != "agm"][:30])
         conn.execute("INSERT OR REPLACE INTO dispute_state VALUES (?,?,?,?,?,?,?,?)",
                      (code, s_["name"], level, sc, json.dumps(payload, ensure_ascii=False), today.isoformat(), prev[0] if prev else None, prev[1] if prev else None))
         out += 1
