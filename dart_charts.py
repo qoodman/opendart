@@ -166,7 +166,7 @@ def net_line(series):
             f'vector-effect="non-scaling-stroke" stroke-linejoin="round"/></svg>')
 
 
-def line_chart(series, yfmt="{:,.0f}", step=False, zero=False, area=False, height=190):
+def line_chart(series, yfmt="{:,.0f}", step=False, zero=False, area=False, height=190, marks=None):
     """여러 선 그래프 (서버에서 SVG로 그림, 스크립트 없음). series=[dict(name, pts=[(YYYY-MM-DD, 값)], color='s1'|'s2'|'s3'|'price', dash=False, step=False)]
     zero=True면 0선을 그려 주고, area=True면 첫 선 아래를 칠함. 끝점 값을 선 끝에 적음. (HTML 조각 반환)"""
     series = [s for s in series if s.get("pts")]
@@ -224,6 +224,14 @@ def line_chart(series, yfmt="{:,.0f}", step=False, zero=False, area=False, heigh
         out.append(f'<path d="{d_}" fill="none" stroke="{col}" stroke-width="{2 if k == 0 else 1.5}" stroke-linejoin="round"{" stroke-dasharray=\"4 3\"" if s.get("dash") else ""}/>')
         ld, lv = pts[-1]
         out.append(f'<circle cx="{X(ld):.1f}" cy="{Y(lv):.1f}" r="3" fill="{col}" stroke="var(--ring)" stroke-width="1.5"/>')
+    if marks and series:
+        base_pts = dict(series[0]["pts"])
+        for md, label in marks:
+            cand = [d for d in allx if d >= md]
+            d_ = cand[0] if cand else None
+            if d_ is None or d_ not in base_pts:
+                continue
+            out.append(f'<circle cx="{X(d_):.1f}" cy="{Y(base_pts[d_]):.1f}" r="4.5" fill="var(--s2)" stroke="var(--ring)" stroke-width="1.5"><title>{escape(md)} {escape(label)}</title></circle>')
     out.append("</svg>")
     leg = "".join(f'<span><i class="ln" style="background:var(--{s.get("color", "s1")})"></i>{escape(s["name"])} <b>{escape(yfmt.format(s["pts"][-1][1]))}</b></span>' for s in series)
     return f'<div class="legend">{leg}</div>' + "".join(out)

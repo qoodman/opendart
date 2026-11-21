@@ -490,6 +490,13 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
                 states[code]["proxies"] = find_proxies(by[code], key, today, session)
             except Exception:
                 states[code]["proxies"] = []
+    for code in [c for c in states if states[c]["ev"] and states[c]["ev"]["level"] in ("치열", "시작")][:40]:       # 신호 공시일 전후 주가를 보여 주려고 일별 주가도 받아 둠
+        try:
+            import bill_watch
+            bill_watch.ensure_stock(conn, code, names.get(code, ""))
+            bill_watch.refresh_prices(conn, code)
+        except Exception:
+            pass
     out = 0
     for code, s_ in states.items():
         level = s_["ev"]["level"] if s_["ev"] else None

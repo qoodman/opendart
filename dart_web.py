@@ -4300,6 +4300,75 @@ def view_dispute(conn, q):
     return page("지분분쟁", flash + prep + f'<div class="card"><div style="margin-bottom:4px">{chips}</div>{form}</div>' + (sections or '<div class="card muted">조건에 맞는 종목이 없어요.</div>') + how, refresh=running)
 
 
+def _react(ser, idx, d):
+    """신호일 d(YYYY-MM-DD)의 종가와 이후 5·20거래일, 현재까지 수익률(지수 대비 초과 포함). 주가가 부족하면 None"""
+    import bisect
+    dates = [x for x, _ in ser]
+    i = bisect.bisect_right(dates, d) - 1
+    if i < 0 or (dt.date.fromisoformat(d) - dt.date.fromisoformat(dates[i])).days > 7:
+        return None
+    c0 = ser[i][1]
+    idates = [x for x, _ in idx]
+
+    def ix(day):
+        j = bisect.bisect_right(idates, day) - 1
+        return idx[j][1] if j >= 0 else None
+    out = dict(c0=c0, day=dates[i])
+    for h, k in ((5, "5"), (20, "20")):
+        if i + h < len(ser):
+            r = ser[i + h][1] / c0 - 1
+            out["r" + k] = r
+            a0, a1 = ix(dates[i]), ix(dates[i + h])
+            out["x" + k] = (r - (a1 / a0 - 1)) if a0 and a1 else None
+    out["since"] = ser[-1][1] / c0 - 1
+    return out
+
+
+def _dsp_price_card(conn, code, events):
+    """분쟁 종목 주가: 신호 공시일 표시 차트와 신호별 이후 주가 반응"""
+    import dispute as dp
+    from dart_charts import line_chart
+    ser = price_map(conn, code)
+    px_btn = ('<form method="post" action="/fin/px" class="filters" style="margin:6px 0 0"><input type="hidden" name="code" value="%s"><input type="hidden" name="back" value="%s">'
+              '<button>주가 받기 (네이버)</button></form>' % (escape(code), escape(urlencode({"t": "dispute", "code": code}))))
+    if len(ser) < 30:
+        return '<div class="card"><b>분쟁 신호와 주가</b><div class="muted" style="font-size:13px">일별 주가가 없어요. 받으면 신호 공시일이 표시된 차트와 신호별 이후 주가 반응이 나와요.</div>' + px_btn + '</div>'
+    try:
+        import legis as lg
+        import stock_market
+        idx = list(stock_market.series(conn, "idx:KOSDAQ" if lg.market_of(conn, code) == "KOSDAQ" else "idx:KOSPI"))
+    except Exception:
+        idx = []
+    keys = [e for e in events if e["kind"] in dp.HOT_KINDS or e["kind"] in ("blk_gen", "egm")]
+    byd = {}
+    for e in keys:
+        byd.setdefault(e["date"], []).append(e)
+    dates_sorted = sorted(byd)
+    marks = [(d, " · ".join(dp.KIND_LABEL.get(e["kind"], e["kind"]) for e in byd[d])) for d in dates_sorted if d >= ser[0][0]]
+    chart = line_chart([dict(name="종가", pts=ser[-320:], color="price")], yfmt="{:,.0f}", marks=marks)
+    pc = lambda v: "-" if v is None else f'<span class="{"up" if v > 0 else "down" if v < 0 else ""}">{v:+.1%}</span>'
+    trs = ""
+    for d in sorted(byd, reverse=True)[:10]:
+        r = _react(ser, idx, d)
+        lab = " · ".join(f'{dp.KIND_ICON.get(e["kind"], "")} {escape(dp.KIND_LABEL.get(e["kind"], e["kind"]))}' for e in byd[d])
+        if not r:
+            trs += f'<tr><td>{escape(d)}</td><td style="font-size:12px">{lab}</td><td colspan="4" class="muted">주가 기록 밖</td></tr>'
+            continue
+        trs += (f'<tr><td>{escape(d)}</td><td style="font-size:12px">{lab}</td><td>{won(r["c0"])}</td>'
+                f'<td>{pc(r.get("r5"))}<br><span class="muted" style="font-size:10px">지수대비 {pc(r.get("x5"))}</span></td>'
+                f'<td>{pc(r.get("r20"))}<br><span class="muted" style="font-size:10px">지수대비 {pc(r.get("x20"))}</span></td><td>{pc(r.get("since"))}</td></tr>')
+    first = next((d for d in dates_sorted if byd[d] and any(e["kind"] in dp.HOT_KINDS for e in byd[d])), None)
+    summ = ""
+    if first:
+        r0 = _react(ser, idx, first)
+        if r0:
+            seg = [c for d_, c in ser if d_ >= r0["day"]]
+            summ = (f'<div style="font-size:13px;margin:4px 0">첫 분쟁 신호({escape(first)}) 이후: 종가 {won(r0["c0"])}원 → 지금 {won(ser[-1][1])}원 ({pc(r0["since"])}) · 그 사이 최고 {won(max(seg))}원({max(seg) / r0["c0"] - 1:+.0%}) · 최저 {won(min(seg))}원({min(seg) / r0["c0"] - 1:+.0%})</div>')
+    return ('<div class="card"><b>분쟁 신호와 주가</b> <span class="muted" style="font-size:12px">● = 분쟁 신호가 공시된 날</span>' + summ + chart
+            + (f'<div class="scroll"><table><tr><th>신호일</th><th>신호</th><th>그날 종가</th><th>5거래일 뒤</th><th>20거래일 뒤</th><th>지금까지</th></tr>{trs}</table></div>' if trs else "")
+            + '<div class="muted" style="font-size:11px">분쟁 기대감은 공시 전에 주가에 먼저 반영되기도 하고, 합의·소송 결과에 따라 급락할 수도 있어요. 신호일은 공시 접수일 기준이고 같은 날 다른 소식이 섞여요. 지수 대비는 코스피(코스닥 종목은 코스닥) 기준 초과수익이에요.</div></div>')
+
+
 def _dsp_detail(conn, s_, code):
     import dispute as dp
     if not s_:
@@ -4363,7 +4432,7 @@ def _dsp_detail(conn, s_, code):
              '<li><b>👑 최대주주 변경 / 📈 지분 변동</b>: 지분 격차가 작으면 몇 %p 차로 주도권이 바뀌어요. 시간외 대량 매수, 우호 지분(자사주·제3자 배정·백기사)이 이어지는지 보세요.</li>'
              '<li><b>🎯 경영참여 5% 보유</b>: 단순 투자가 아니라 경영에 영향을 주려는 목적으로 신고한 보유자예요. 보유 목적이 바뀌는 보고는 분쟁의 신호탄인 경우가 많아요.</li>'
              '<li><b>캐스팅보트</b>: 산업은행·국민연금 같은 큰 기관의 지분과 입장이 승패를 가르기도 해요 (국민연금은 단순투자 보고로 이 화면의 5% 목록에 보여요).</li></ul></div>')
-    return head + meet_card + prox_card + tl_card + hold_card + guide
+    return head + meet_card + _dsp_price_card(conn, code, pl.get("events") or []) + prox_card + tl_card + hold_card + guide
 
 
 def view_legstudy(conn, q):
