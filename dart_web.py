@@ -1056,6 +1056,40 @@ def deriv_spark(points):
     return sparkline(points[-120:]) if points and len(points) >= 2 else ""
 
 
+def _vol_card(conn):
+    """선물·채권: 변동성 한도 (실현 변동성 → 하루·한 달 폭, 변동성 타깃팅 한도)"""
+    import vol_limit as vl
+    try:
+        r = vl.compute(conn)
+    except Exception:
+        r = None
+    if not r:
+        return ""
+    v = r["v20"]
+    lv = vl.level(v)
+    bar = ""
+    if r.get("hist"):
+        bar = ('<div class="muted" style="font-size:12px;margin-top:6px">코스피 20거래일 실제 변동성 추이 (%)</div>'
+               + line_chart([dict(name="변동성", pts=[(f"{d[:4]}-{d[4:6]}-{d[6:8]}", round(x * 100, 1)) for d, x in r["hist"]], color="s1")], yfmt="{:.0f}%"))
+    corr = ""
+    if r.get("corr") is not None:
+        corr = (f'<div style="margin-top:6px">외국인 현물 순매수와 코스피 등락의 상관계수 (최근 {r["corr_n"]}거래일): <b>{r["corr"]:+.2f}</b> '
+                '<span class="muted" style="font-size:12px">1에 가까울수록 외국인이 사는 날 오르고 파는 날 내렸다는 뜻이에요. 상관이 높다고 외국인이 원인이라는 보장은 없어요.</span></div>')
+    mult = r["limit_mult"]
+    return ('<div class="card"><details open><summary><b>변동성 한도 — 외국인이 담을 수 있는 금액은 변동성에 반비례해요</b></summary>'
+            f'<div class="row" style="margin-top:6px"><span>코스피 최근 20거래일 실제 변동성 (연환산)</span><b class="big">{v:.0%}</b></div>'
+            f'<div style="margin:4px 0"><span class="chip {"down" if v >= 0.35 else ""}">{escape(lv)}</span> '
+            f'<span class="muted">60일 {r["v60"]:.0%} · 1년 {r["v250"]:.0%}' + (f' · 과거 중앙값 {r["hist_med"]:.0%} · 지금은 과거 {r["pct"]:.0%} 지점' if r.get("pct") is not None else "") + '</span></div>'
+            f'<div>하루 폭 약 <b>±{r["day"]:.1%}</b> · 한 달 폭 약 <b>±{r["month"]:.1%}</b> <span class="muted" style="font-size:12px">(연 변동성 ÷ √250, ÷ √12 — “하루 폭 ≈ 변동성 ÷ 16”)</span></div>'
+            f'<div style="margin-top:6px">변동성 타깃팅(손실한도 ÷ 변동성)으로 보면, 평상시({vl.BASE:.0%})에 담던 금액의 <b>{mult:.0%}</b>만 담을 수 있어요'
+            + (f' — 변동성이 {vl.BASE:.0%}대로 돌아오면 한도가 약 {mult ** -1:.1f}배로 열려요' if mult < 1 else "") + '.</div>'
+            f'<div class="muted" style="font-size:12px">최근 1년 하루 5% 넘게 움직인 날 {r["big5"]}거래일 (자료 전체 {r["n"]}거래일 중 {r["big5_all"]}일)</div>'
+            + corr + bar
+            + '<div class="muted" style="font-size:11px;margin-top:6px">거래소 공식 VKOSPI는 옵션 가격으로 계산한 ‘앞으로의 예상치’라서 이 값(지난 20일 실제 움직임)과 달라요. 아래 내재변동성이 비슷한 예상치예요 (VKOSPI는 investing.com 등에서 확인). '
+              '변동성 타깃팅은 일부 대형 투자자의 방식이고, 모든 외국인이 이렇게 움직이는 건 아니에요. 외국인 매도의 원인이 변동성인지, 변동성이 매도의 결과인지는 이 숫자만으론 구분되지 않아요(서로 영향). 투자 판단용 조언이 아니에요.</div>'
+            '</details></div>')
+
+
 def view_derivs(conn, q):
     import deriv_bond as dvb
     tab = "learn" if q.get("t") == "learn" else "signals"
@@ -1113,7 +1147,7 @@ def view_derivs(conn, q):
             f'<span class="muted">(신호 {n}개 합 {tot:+d})</span></div>'
             '<div class="muted" style="margin-top:6px"><b>주의:</b> 신호는 \'가설\'이에요. 선물·채권 숫자가 주식의 앞날을 보장하지 않고, 기준값은 제가 정한 단순한 값이에요. 투자 추천이 아니에요. '
             '용어가 낯설면 위쪽 <a href="/derivs?t=learn">배우기</a>를 먼저 보세요.</div></div>')
-    return page("선물·채권", tabs + head + cards + curve_card + stock_card + exp + pending)
+    return page("선물·채권", tabs + head + _vol_card(conn) + cards + curve_card + stock_card + exp + pending)
 
 
 def view_stock(conn, code, q=None):
