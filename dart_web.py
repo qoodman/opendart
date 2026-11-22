@@ -4060,9 +4060,12 @@ def world_analysis(conn):
 def _etf_table(conn):
     """해외 증시: ETF 전체 목록 (자산군별 접기)"""
     import world_markets as wm
-    rows = asset_analysis(conn)["rows"]
+    try:
+        rows = asset_analysis(conn)["rows"]
+    except Exception as e:
+        return f'<div class="card warn"><b>해외 ETF</b><div class="muted" style="font-size:12px">ETF 분석 중 오류: {escape(type(e).__name__)}: {escape(str(e)[:150])}</div></div>'
     if not rows:
-        return ""
+        return '<div class="card"><b>해외 ETF</b><div class="muted" style="font-size:12px">아직 ETF 자료가 없어요. 위 “다시 받기”를 눌러 3단계(다자산 ETF 받기)까지 끝나면 나와요.</div></div>'
     pc = lambda v: "-" if v is None else f'<span class="{"up" if v > 0 else "down" if v < 0 else ""}">{v:+.0%}</span>'
     stg = {1: "바닥·반등", 2: "상승", 3: "꺾임", 4: "하락"}
     out = ""
@@ -4612,9 +4615,14 @@ def global_phase(an):
 
 def asset_analysis(conn):
     """다자산 ETF 지표와 관점별 점수 (10분 캐시) → dict(rows[], phase, n)"""
-    if _ACACHE["v"] is not None and time.time() - _ACACHE["t"] < 600:
-        return _ACACHE["v"]
     import world_markets as wm
+    try:
+        stamp = conn.execute("SELECT COUNT(*), MAX(fetched) FROM world_asset").fetchone()
+        stamp = (stamp[0], stamp[1])
+    except sqlite3.Error:
+        stamp = (0, None)
+    if _ACACHE["v"] is not None and _ACACHE.get("stamp") == stamp and time.time() - _ACACHE["t"] < 600:
+        return _ACACHE["v"]
     an = world_analysis(conn)
     phase = global_phase(an)
     spy = wm.asset_series(conn, "SPY")
@@ -4629,8 +4637,9 @@ def asset_analysis(conn):
         sc = wm.asset_scores(m, cls, phase)
         ss = wm.stage_stats([v for _, v in ser]) if len(ser) >= 500 else None
         rows.append(dict(code=code, name=name, cls=cls, desc=desc, m=m, sc=sc, vd=wm.verdict_stats(ss) if ss else None))
-    out = dict(rows=rows, phase=phase)
-    _ACACHE.update(t=time.time(), v=out)
+    out = dict(rows=rows, phase=phase, stamp=stamp)
+    if rows:
+        _ACACHE.update(t=time.time(), v=out, stamp=stamp)
     return out
 
 
