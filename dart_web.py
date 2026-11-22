@@ -4435,6 +4435,241 @@ def _dsp_detail(conn, s_, code):
     return head + meet_card + _dsp_price_card(conn, code, pl.get("events") or []) + prox_card + tl_card + hold_card + guide
 
 
+_PICKS = {"t": 0.0, "v": None}
+
+
+def gather_pick_features(conn):
+    """종목마다 투자처 점수에 쓸 신호를 한곳에 모음 → ({코드: 특징 dict}, 이름 {코드: 이름}, 국면 키 또는 None). 5분 캐시. 없는 자료는 빠짐."""
+    if _PICKS["v"] is not None and time.time() - _PICKS["t"] < 300:
+        return _PICKS["v"]
+    import fin_analyzer as fa
+    import fin_clues as fc
+    feats, names = {}, {}
+    # 재무제표 분석
+    try:
+        order_ = {"11013": 1, "11012": 2, "11014": 3, "11011": 4}
+        tmp = {}
+        for c_, y_, rc_, sc_ in conn.execute("SELECT code, year, rcode, score FROM fin_report WHERE score IS NOT NULL"):
+            tmp.setdefault(c_, []).append(((y_, order_.get(rc_, 0)), sc_))
+        delta = {c_: (sorted(l_)[-1][1] - sorted(l_)[-2][1]) for c_, l_ in tmp.items() if len(l_) >= 2}
+        for r in fa.latest(conn):
+            if r["score"] is None:
+                continue
+            m = r["m"]
+            f = dict(fin_score=r["score"], parts=r["parts"], rev_yoy=m.get("rev_yoy"), op_yoy=m.get("op_yoy"), op=m.get("op"), opm=m.get("opm"), roe=m.get("roe"), debt_ratio=m.get("debt_ratio"),
+                     ocf_to_ni=m.get("ocf_to_ni"), fcf=m.get("fcf"), turn=bool(m.get("op_py") is not None and m["op_py"] <= 0 < (m.get("op") or 0)), score_delta=delta.get(r["code"]),
+                     warn_n=sum(1 for k, _ in r["signals"] if k == "warn"), grade=r["grade"])
+            feats[r["code"]] = f
+            names[r["code"]] = r["name"] or r["code"]
+    except Exception:
+        pass
+    # 공시 단서
+    try:
+        for c_, info in fc.load_all_info(conn).items():
+            f = feats.setdefault(c_, {})
+            f.update(insider_net=info.get("insider_net"), shr=bool((info.get("dps") or 0) > 0 or (info.get("buyback") or 0) > 0 or (info.get("burn") or 0) > 0),
+                     rnd=info.get("rnd_ratio"), audit_opinion=info.get("opinion"), clue_warn_n=info.get("warn_n", 0))
+    except Exception:
+        pass
+    # 기관 매수(단순투자 공시)·가치투자 점수·모멘텀
+    try:
+        if has_table(conn, "summary"):
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(summary)")}
+            since = (dt.date.today() - dt.timedelta(days=365)).isoformat()
+            rows = conn.execute("SELECT 종목코드 code, MAX(종목명) name, '' mk, COUNT(DISTINCT 제출인) n FROM summary WHERE 변동일 >= ? AND 매수수량 > 0 AND 평균매수단가 > 0 AND 제출인 NOT LIKE '%국민연금%' GROUP BY 종목코드", (since,)).fetchall()
+            cards = overall_cards(conn, rows)
+            closes = latest_closes(conn) if has_table(conn, "prices") else {}
+            avgp = {}
+            for c_, a_, q_ in conn.execute("SELECT 종목코드, SUM(매수수량*평균매수단가), SUM(매수수량) FROM summary WHERE 변동일 >= ? AND 매수수량 > 0 AND 평균매수단가 > 0 AND 제출인 NOT LIKE '%국민연금%' GROUP BY 종목코드", (since,)):
+                if q_:
+                    avgp[c_] = a_ / q_
+            nmap = {r["code"]: (r["name"], r["n"]) for r in rows}
+            for c in cards:
+                f = feats.setdefault(c["code"], {})
+                names.setdefault(c["code"], c["name"])
+                sc = c["sc"]
+                f.update(lynch=sc.get("lynch"), buffett=sc.get("buffett"), graham=sc.get("graham"), fscore=sc.get("fscore"), momentum=sc.get("momentum"),
+                         guru_avg=(sum(v for k, v in sc.items() if k in VALUE_KEYS) / max(1, sum(1 for k in sc if k in VALUE_KEYS))) if any(k in VALUE_KEYS for k in sc) else None,
+                         inst_n=nmap.get(c["code"], ("", 0))[1])
+                cl = closes.get(c["code"])
+                if cl and avgp.get(c["code"]):
+                    f["inst_gap"] = cl[1] / avgp[c["code"]] - 1
+    except Exception:
+        pass
+    # 밸류에이션·업종·증권사·분쟁·가격 추세
+    vals = value_map(conn)
+    try:
+        import industry
+        imap = industry.mapping(conn)
+    except Exception:
+        imap = {}
+    dsp = dispute_map(conn)
+    codes = list(feats)
+    reps = report_map(conn, codes) if codes else {}
+    for c_ in codes:
+        f = feats[c_]
+        v = vals.get(c_) or {}
+        f["per"], f["pbr"], f["div"] = v.get("per"), v.get("pbr"), v.get("div")
+        f["group"] = imap.get(c_)
+        if c_ in dsp:
+            f["dispute"] = dsp[c_][0]
+        if c_ in reps:
+            tg_, nb_ = consensus(conn, c_)
+            cl_ = close_any(conn, c_)
+            if tg_ and cl_:
+                f["upside"] = tg_ / cl_ - 1
+            up_n, dn_n, _s, _c = target_moves(conn, c_)
+            f["tg_up"], f["tg_dn"] = up_n, dn_n
+            f["nrep"] = len(reps[c_])
+        ser = price_map(conn, c_)
+        if len(ser) >= 120:
+            cl_ = [x for _, x in ser]
+            ma = sum(cl_[-120:]) / min(120, len(cl_[-120:]))
+            f["above_ma"] = cl_[-1] > ma
+            f["trend_down"] = cl_[-1] < ma
+            f["r3m"] = cl_[-1] / cl_[-64] - 1 if len(cl_) >= 64 else None
+    phase = None
+    try:
+        import cycle_theory as cy
+        sit = cy.situation(cy.indicators(conn))
+        phase = sit["key"] if sit else None
+    except Exception:
+        pass
+    out = (feats, names, phase)
+    _PICKS.update(t=time.time(), v=out)
+    return out
+
+
+def rank_picks(conn):
+    """→ ({short|mid|long: [(코드, 이름, 결과 dict)] 점수 높은 순, 자료 충분도 50% 이상만}, flags {코드: [...]}, phase)"""
+    import picks as pk
+    feats, names, phase = gather_pick_features(conn)
+    res = {h: [] for h in pk.HORIZONS}
+    flags = {}
+    for code, f in feats.items():
+        hs = pk.horizon_scores(f, phase)
+        flags[code] = hs["flags"]
+        for h in pk.HORIZONS:
+            r = hs[h]
+            if r["score"] is not None and r["cov"] >= 0.5:
+                res[h].append((code, names.get(code, code), r))
+    for h in res:
+        res[h].sort(key=lambda x: -x[2]["score"])
+    return res, flags, phase
+
+
+PHASE_GUIDE = {
+    "down": ("하락 진행", "방향이 정해지기 전이라 비중을 작게 하고, 이벤트·수급이 확인된 종목만 짧게 보는 쪽", "금리·실적 방향이 바뀌는 시점까지 우량·저평가 종목을 나눠서 보는 쪽", "낙폭이 큰 시기는 질 좋은 기업을 나눠 모으는 구간으로 자주 거론돼요 (보장은 아니에요)"),
+    "turn_down": ("하락 초입(꺾임)", "추세가 꺾이는 중이라 추격보다 지켜보며 촉매가 있는 종목 위주", "방어력(현금흐름·낮은 부채)과 가격 부담이 적은 종목으로 기울이는 쪽", "아직 하락이 진행될 수 있어서 분할과 현금 비중이 중요해요"),
+    "up": ("상승", "추세와 실적 모멘텀이 이어지는 종목 중심", "실적 개선이 확인되고 컨센서스가 올라가는 종목 중심", "과열 신호(최근 급등·높은 PER)를 경계하며 우량주를 이어 가는 쪽"),
+    "rebound": ("반등 시도", "반등이 추세 전환인지 확인될 때까지 짧게, 확인된 종목만", "실적 개선과 저평가가 겹치는 종목을 분할로", "낙폭 과대 우량주를 나눠서 보는 쪽"),
+    "flat": ("정체(횡보)", "방향 없이 움직이므로 이벤트·수급이 있는 종목만 짧게", "업종·종목 간 순환을 보며 실적이 좋아지는 종목", "횡보 중에는 가격 부담이 적은 우량주를 천천히"),
+}
+
+
+def _pick_table(conn, lst, flags, n=10, hz=""):
+    trs = ""
+    for i, (code, name, r) in enumerate(lst[:n], 1):
+        rs_ = "".join(f'<div style="font-size:11px" class="up">✔ {escape(t)}</div>' for t in r["reasons"][:3])
+        fl_ = "".join(f'<div style="font-size:11px" class="down">⚠ {escape(t)}</div>' for t in (flags.get(code) or [])[:3])
+        cov = r["cov"]
+        trs += (f'<tr><td>{i}</td><td><a href="/ideas?{urlencode({"t": "fin", "code": code})}"><b>{escape(name)}</b></a><br><span class="muted" style="font-size:11px">{escape(code)}</span><br>{fin_chip(conn, code, False)} {dispute_chip(conn, code)}</td>'
+                f'<td><b style="font-size:16px">{r["score"]:.0f}</b><br><span class="muted" style="font-size:10px">충분도 {cov:.0%}</span></td><td>{rs_}{fl_}</td></tr>')
+    return trs
+
+
+def view_picks(conn, q):
+    """아이디어 → 투자처: 단기·중기·장기 관점별로 지금 앱이 가진 신호가 좋은 종목"""
+    import picks as pk
+    res, flags, phase = rank_picks(conn)
+    g = PHASE_GUIDE.get(phase or "")
+    intro = ('<div class="card"><b>투자처 — 단기 · 중기 · 장기</b>'
+             '<div class="muted" style="font-size:13px">재무제표 점수, 공시 단서, 증권사 목표가, 린치·버핏·그레이엄·F-스코어, 모멘텀, 기관 매수, 지분분쟁, 사이클 국면을 <b>관점마다 다르게 가중</b>해서 종목을 골라 봐요. '
+             '“최적”이 아니라 <b>지금 앱이 가진 신호로 볼 때 그 관점에 맞는 후보</b>예요.</div></div>')
+    cyc = ""
+    if g:
+        cyc = ('<div class="card"><b>지금 국면은 “' + escape(g[0]) + '”</b> <span class="muted" style="font-size:12px">(코스피 가격 위치 기준 · 투자 사이클 탭에서 이론별로 자세히)</span>'
+               '<ul style="padding-left:18px;margin:6px 0;font-size:13px"><li><b>단기(1~3개월)</b> — ' + escape(g[1]) + '</li><li><b>중기(3~12개월)</b> — ' + escape(g[2]) + '</li><li><b>장기(1~3년+)</b> — ' + escape(g[3]) + '</li></ul>'
+               '<div class="muted" style="font-size:12px">사이클 이론에서 흔히 쓰는 생각의 틀을 옮긴 것이고 개인 상황(자금·기간·위험 감내)을 모르는 일반론이에요.</div></div>')
+    n = 10 if q.get("all") != "1" else 40
+    cards = ""
+    top_sets = {}
+    for h, (nm, per) in pk.HORIZONS.items():
+        lst = res.get(h) or []
+        top_sets[h] = {c for c, _, _ in lst[:20]}
+        tb = _pick_table(conn, lst, flags, n, h)
+        desc = {"short": "모멘텀·이벤트·수급·실적 모멘텀·가격 매력 중심 — 빠르게 바뀌는 신호",
+                "mid": "실적 개선·컨센서스·밸류·추세·재무 건전·사이클 궁합 — 분기 단위 변화",
+                "long": "재무 우량·수익성/현금·가치투자 점수·안정성·주주환원·가격 부담 — 오래 가져갈 기업의 체력"}[h]
+        cards += (f'<div class="card"><details open><summary><b>{nm} ({per})</b> <span class="muted" style="font-size:12px">{desc} · 후보 {len(lst)}개</span></summary>'
+                  + (f'<div class="scroll"><table><tr><th>#</th><th>종목</th><th>점수</th><th>근거·주의</th></tr>{tb}</table></div>' if tb else '<div class="muted" style="margin-top:6px">자료가 충분한 종목이 아직 없어요 (재무제표 분석·공시 단서·시장 수집을 먼저 해 주세요).</div>')
+                  + '</details></div>')
+    inter = set.intersection(*top_sets.values()) if top_sets and all(top_sets.values()) else set()
+    inter_card = ""
+    if inter:
+        names_ = {c: nmv for h in res for c, nmv, _ in res[h]}
+        inter_card = ('<div class="card"><b>세 관점 모두 상위 20에 든 종목</b><div style="margin-top:4px">' + " ".join(f'<a class="chip" href="/ideas?{urlencode({"t": "fin", "code": c})}">{escape(names_.get(c, c))}</a>' for c in sorted(inter)) + '</div>'
+                      '<div class="muted" style="font-size:12px">단기·중기·장기 신호가 모두 좋은 종목이에요. 다만 자료가 많은 종목이 유리한 구조라 자료가 적은 종목은 빠질 수 있어요.</div></div>')
+    # 해외 후보
+    world = ""
+    try:
+        import world_markets as wm
+        an = world_analysis(conn)
+        rows_ = []
+        for s_ in wm.load_stocks(conn):
+            sk = (an.get(wm.REGION_MAIN.get(s_["region"], "")) or {}).get("sit", {}).get("key")
+            m_ = wm.stock_metrics(s_["d"])
+            sc = wm.score_stock(m_, sk)
+            w_ = sc["weights"]
+            rt = {k: sc["parts"][nm_] / w_[kk] for nm_, kk, k in (("성장", "growth", "g"), ("수익성", "profit", "p"), ("밸류", "value", "v"), ("추세", "trend", "t"), ("컨센서스", "consensus", "c"))}
+            rows_.append((s_, rt, sc))
+        if rows_:
+            mix = {"short": {"t": .4, "c": .3, "g": .3}, "mid": {"g": .3, "c": .25, "t": .2, "v": .25}, "long": {"p": .4, "v": .3, "g": .3}}
+            wl = ""
+            for h, (nm, per) in pk.HORIZONS.items():
+                top = sorted(rows_, key=lambda x: -sum(x[1][k] * w for k, w in mix[h].items()))[:5]
+                wl += (f'<div style="margin:4px 0"><b style="font-size:13px">{nm}</b> ' + " · ".join(
+                    f'<a href="https://m.stock.naver.com/worldstock/stock/{quote(s_["code"])}/total" target="_blank" rel="noopener noreferrer">{escape(s_["name"])}</a> <span class="muted" style="font-size:11px">{escape(s_["region"])}</span>' for s_, rt, sc in top) + '</div>')
+            world = ('<div class="card"><details><summary><b>해외 후보 (해외 증시 탭의 대표 종목 점수를 관점별로 다시 가중)</b></summary>' + wl
+                     + '<div class="muted" style="font-size:12px">단기는 추세·컨센서스, 중기는 성장·컨센서스·밸류, 장기는 수익성·밸류·성장에 무게를 둬요. 해외는 대표 종목 몇십 개만 대상이에요. <a href="/world">해외 증시 →</a></div></details></div>')
+    except Exception:
+        pass
+    # 과거 선정 성과
+    perf = ""
+    try:
+        def price_of(code):
+            ser = price_map(conn, code)
+            return ser[-1][1] if ser else close_any(conn, code)
+        import stock_market
+        kospi = list(stock_market.series(conn, "idx:KOSPI"))
+        kd = [d_ for d_, _ in kospi]
+
+        def index_ret(d):
+            import bisect
+            i0 = bisect.bisect_right(kd, d) - 1
+            return (kospi[-1][1] / kospi[i0][1] - 1) if i0 >= 0 else None
+        pf = pk.performance(conn, price_of, index_ret)
+        n_snap = (conn.execute("SELECT COUNT(DISTINCT d) FROM pick_hist").fetchone() or [0])[0]
+        if pf:
+            rows_ = "".join(f'<tr><td>{pk.HORIZONS[h][0]}</td><td>{v["n"]}</td><td>{v["days"]:.0f}일</td><td>{v["mean"]:+.1%}</td><td>{"-" if v["excess"] is None else format(v["excess"], "+.1%")}</td><td>{v["win"]:.0%}</td></tr>' for h, v in pf.items())
+            perf = ('<div class="card"><b>과거 선정 성과 (이 화면이 기록해 둔 선정 기준)</b><div class="scroll"><table><tr><th>관점</th><th>선정 횟수</th><th>평균 경과</th><th>평균 수익률</th><th>코스피 대비</th><th>오른 비율</th></tr>' + rows_ + '</table></div>'
+                    '<div class="muted" style="font-size:12px">선정일 종가 → 지금 종가예요. 표본이 작고 기간이 짧으면 우연일 수 있어요. 점수 가중치를 정할 때 쓴 데이터가 아니라 기록 이후의 실제 결과라 가장 솔직한 검증이에요.</div></div>')
+        else:
+            perf = (f'<div class="card"><b>과거 선정 성과</b><div class="muted" style="font-size:13px">아직 20일 넘게 지난 선정 기록이 없어요 (지금까지 기록한 날 {n_snap}일). 아래 버튼이나 매일 수집에서 선정을 기록해 두면, 시간이 지난 뒤 실제로 어땠는지 여기서 보여 줘요.</div>'
+                    '<form method="post" action="/picks/snap" class="filters" style="margin:6px 0 0"><button>오늘 선정 기록하기</button></form></div>')
+    except Exception:
+        pass
+    how = ('<div class="card"><details><summary><b>어떻게 골랐나요? (꼭 알아 둘 한계)</b></summary><ul class="muted" style="font-size:13px;padding-left:18px">'
+           '<li><b>단기</b>: 모멘텀 30 · 이벤트·수급(내부자 순매수, 목표가 상향, 점수 상승, 기관 매수) 25 · 실적 모멘텀 20 · 기관 평균 매수가 대비 가격 15 · 목표가 여력 10</li>'
+           '<li><b>중기</b>: 실적 개선 30 · 컨센서스 20 · 밸류 15 · 추세 15 · 재무 건전 10 · 지금 사이클과 업종 궁합 10</li>'
+           '<li><b>장기</b>: 재무 우량 30 · 수익성·현금 20 · 가치투자 점수 20 · 안정성 10 · 주주환원 10 · 가격 부담 10</li></ul>'
+           '<ul class="muted" style="font-size:12px;padding-left:18px"><li>가중치는 제가 정한 것이고 과거 성과로 맞춘 값이 아니에요. 자료가 없는 항목은 빼고 다시 계산하며 충분도 50% 미만은 순위에서 뺐어요. 자료가 많은 종목(재무 분석·공시 단서·기관 매수가 있는 종목)이 유리해요.</li>'
+           '<li>영업적자·감사 이슈·경고 다수·지분분쟁·과열은 점수를 깎지 않고 ⚠로 따로 붙였어요. 후보가 이미 많이 올랐을 수 있어요.</li>'
+           '<li>최적의 투자처를 알려 주는 게 아니라 후보를 좁히는 도구예요. 투자 판단과 손익은 본인 몫이고 투자 추천이 아니에요.</li></ul></details></div>')
+    more = '<div style="margin:6px 0"><a class="chip" href="/ideas?t=picks&all=1">후보 더 보기 (40개)</a></div>' if q.get("all") != "1" else '<div style="margin:6px 0"><a class="chip" href="/ideas?t=picks">접기</a></div>'
+    return page("투자처", intro + cyc + cards + more + inter_card + world + perf + how)
+
+
 def view_legstudy(conn, q):
     """아이디어 → 입법 주가 분석: 과거 법안의 단계 날짜 전후로, 연결된 기업의 주가가 지수보다 얼마나 더 움직였나 (이벤트 스터디)"""
     import bill_history
@@ -4885,11 +5120,11 @@ IDEA_TABS = {"overall": "종합", "mine": "내 종목 점수", "cheap": "기관 
              "rank": "종목 순위", "score": "점수표 (오일전문가)", "perf": "운용사 성적표",
              "lynch": "피터 린치", "buffett": "워렌 버핏",
              "graham": "벤저민 그레이엄", "magic": "마법공식", "fscore": "F-스코어", "momentum": "모멘텀",
-             "legis": "입법 영향 기업", "legstudy": "입법 주가 분석", "fin": "재무제표 분석", "dispute": "지분분쟁"}
-IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "legis", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf", "legstudy", "fin", "dispute"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
+             "legis": "입법 영향 기업", "legstudy": "입법 주가 분석", "fin": "재무제표 분석", "dispute": "지분분쟁", "picks": "투자처"}
+IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "legis", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf", "legstudy", "fin", "dispute", "picks"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
 
 
-IDEA_SECTIONS = [("점수", ["overall", "mine"]), ("투자 방법", ["lynch", "buffett", "graham", "magic", "fscore", "momentum"]),
+IDEA_SECTIONS = [("점수", ["picks", "overall", "mine"]), ("투자 방법", ["lynch", "buffett", "graham", "magic", "fscore", "momentum"]),
                  ("종목 찾기", ["cheap", "cluster", "super", "legis", "fin", "dispute", "rank"]), ("평가·성적", ["score", "perf", "legstudy"])]
 
 
@@ -5321,6 +5556,12 @@ def view_ideas(conn, q):
         q = {**q, "t": "overall"}
     if q.get("t") == "mine":
         return view_mine(conn, q)
+    if q.get("t") == "picks":
+        _CTX.pre = idea_tabs_row("picks")
+        try:
+            return view_picks(conn, q)
+        finally:
+            _CTX.pre = ""
     if q.get("t") == "dispute":
         _CTX.pre = idea_tabs_row("dispute")
         try:
@@ -7455,6 +7696,12 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 S = settings()
                 ok, why = S["legis_prepare"]() if "legis_prepare" in S else (False, "이 서버 버전은 지원하지 않아요")
                 return self._redirect("/ideas?" + urlencode({"t": "legis", "msg": ("✔ " if ok else "✖ ") + why}))
+            if path == "/picks/snap" and settings_api:
+                n = min(int(self.headers.get("Content-Length") or 0), 4096)
+                self.rfile.read(n)
+                S = settings()
+                ok, why = S["picks_snapshot"]() if "picks_snapshot" in S else (False, "이 서버 버전은 지원하지 않아요")
+                return self._redirect("/ideas?" + urlencode({"t": "picks", "msg": ("✔ " if ok else "✖ ") + why}))
             if path == "/dispute/run" and settings_api:
                 n = min(int(self.headers.get("Content-Length") or 0), 4096)
                 self.rfile.read(n)

@@ -698,6 +698,12 @@ def run_market_policy(log=print):
         except Exception as e:
             out["earnings"] = f"실패: {e}"
             log(f"실적 받기 실패: {e}")
+    if env("DART_PICKS", "1") != "0":           # 투자처 탭: 오늘의 단기·중기·장기 선정을 기록해 두고 나중에 성과를 보여 줌
+        try:
+            ok_, why_ = picks_snapshot()
+            out["picks"] = why_ if ok_ else f"실패: {why_}"
+        except Exception as e:
+            out["picks"] = f"실패: {e}"
     if env("DART_WORLD", "1") != "0":           # 해외 증시(미국·일본·중국·유럽) 지수: 투자 사이클 비교용 (종목은 해외 증시 탭 버튼으로)
         try:
             import world_markets
@@ -940,6 +946,31 @@ def legstudy_run():
     except OSError:
         pass
     return True, "시작했어요 (별도 프로세스, 화면은 그대로 쓸 수 있어요). 과거 법안·주가를 받느라 처음에는 20~40분 걸릴 수 있어요."
+
+
+def picks_snapshot():
+    """투자처 탭의 '오늘 선정 기록하기': 단기·중기·장기 상위 15를 그날 종가와 함께 기록 → (성공 여부, 안내)"""
+    import dart_web
+    import picks
+    conn = sqlite3.connect(results_db())
+    conn.row_factory = sqlite3.Row
+    try:
+        dart_web._PICKS["v"] = None
+        res, _flags, _phase = dart_web.rank_picks(conn)
+        top = {h: [(c, n, r["score"]) for c, n, r in lst[:15]] for h, lst in res.items()}
+        closes = {}
+        for lst in top.values():
+            for c, _n, _s in lst:
+                ser = dart_web.price_map(conn, c)
+                v = ser[-1][1] if ser else dart_web.close_any(conn, c)
+                if v:
+                    closes[c] = v
+        n = picks.snapshot(conn, top, closes)
+        return True, f"선정 {n}건을 기록했어요." if n else "선정할 종목이 없어요 (재무제표 분석·시장 수집을 먼저 해 주세요)."
+    except Exception as e:
+        return False, f"{type(e).__name__}: {str(e)[:120]}"
+    finally:
+        conn.close()
 
 
 def dispute_run():
@@ -2161,7 +2192,7 @@ def cmd_web(args):
                     update_info=update_info, check_update=check_update, start_update=start_update,
                     backup_list=backup_list, backup_busy=backup_busy, backup_start=backup_start,
                     backup_file=backup_file, krx_key=krx_key_now, save_krx_key=save_krx_key,
-                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, event_action=event_action, legstudy_run=legstudy_run, fin_run=fin_run, world_run=world_run, dispute_run=dispute_run, fin_clue_run=fin_clue_run, fin_action=fin_action, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
+                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, event_action=event_action, legstudy_run=legstudy_run, fin_run=fin_run, world_run=world_run, picks_snapshot=picks_snapshot, dispute_run=dispute_run, fin_clue_run=fin_clue_run, fin_action=fin_action, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
     serve(results_db(), host=args.host, port=args.port, child_env=child_env,
           get_key=lambda: read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", ""),
           save_key=save_key, settings_api=settings_api)
