@@ -4057,6 +4057,26 @@ def world_analysis(conn):
     return out
 
 
+def _etf_table(conn):
+    """해외 증시: ETF 전체 목록 (자산군별 접기)"""
+    import world_markets as wm
+    rows = asset_analysis(conn)["rows"]
+    if not rows:
+        return ""
+    pc = lambda v: "-" if v is None else f'<span class="{"up" if v > 0 else "down" if v < 0 else ""}">{v:+.0%}</span>'
+    stg = {1: "바닥·반등", 2: "상승", 3: "꺾임", 4: "하락"}
+    out = ""
+    for grp in ("주식", "채권", "실물·원자재", "대체"):
+        trs = ""
+        for r in sorted([r for r in rows if wm.CLASS_GROUP[r["cls"]] == grp], key=lambda r: (r["cls"], -(r["m"]["r12"] or -9))):
+            m = r["m"]
+            trs += (f'<tr><td><b>{escape(r["name"])}</b><br><span class="muted" style="font-size:11px">{escape(r["code"])} · {escape(wm.CLASS_NAME[r["cls"]])}</span></td>'
+                    f'<td>{pc(m["r1m"])}</td><td>{pc(m["r3m"])}</td><td>{pc(m["r12"])}</td><td>{pc(m["cagr5"])}</td><td>{m["vol"]:.0%}</td><td>{m["dd"]:+.0%}</td><td>{stg[m["stage"]]}</td></tr>')
+        if trs:
+            out += (f'<details style="margin-top:6px"><summary><b>{escape(grp)} ETF</b></summary><div class="scroll"><table><tr><th>ETF</th><th>1개월</th><th>3개월</th><th>12개월</th><th>연 5년</th><th>변동성</th><th>고점 대비</th><th>추세</th></tr>{trs}</table></div></details>')
+    return ('<div class="card"><b>해외 ETF — 주식·채권·원자재·대체</b><div class="muted" style="font-size:12px">미국 상장 ETF 가격 기록 기준이에요. 관점별 추천은 아이디어 → 투자처에 있어요.</div>' + out + '</div>')
+
+
 def view_world(conn, q):
     """시장 → 해외 증시: 미국·일본·중국·유럽 증시의 지금 국면, 과거에 그 판단이 통했는지 검증, 시장별 좋은 종목"""
     import legis as lg
@@ -4184,7 +4204,7 @@ def view_world(conn, q):
                         f'<td><b>{tot:.0f}</b></td><td class="muted" style="font-size:12px">{escape(" · ".join(t for k, t in sc["reasons"] if k == "good")[:90])}</td></tr>' for tot, reg, s_, mm, sc in all_scored[:10])
         topall = ('<div class="card"><b>지금 국면에서 점수가 높은 해외 종목 (전체 상위 10)</b><div class="scroll"><table><tr><th>시장</th><th>종목</th><th>점수</th><th>좋은 점</th></tr>' + rows3 + '</table></div>'
                   '<div class="muted" style="font-size:12px">시장별 국면에 따라 가중치를 달리한 점수예요. 대표 종목 몇십 개(시총 큰 순으로 고른 목록)만 대상이라 시장 전체에서 고른 것이 아니고, 점수가 높아도 이미 오른 종목일 수 있어요. 유럽은 미국 상장 ADR이에요. 투자 추천이 아니에요.</div></div>')
-    return page("해외 증시", flash + prep + syn + table + topall + sections, refresh=running)
+    return page("해외 증시", flash + prep + syn + table + topall + _etf_table(conn) + sections, refresh=running)
 
 
 _DSP = {"t": 0.0, "v": {}}
