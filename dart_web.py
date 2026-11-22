@@ -4578,6 +4578,107 @@ def _pick_table(conn, lst, flags, n=10, hz=""):
     return trs
 
 
+_ACACHE = {"t": 0.0, "v": None}
+
+
+def global_phase(an):
+    """해외 지수들의 국면 중 가장 많은 것 (동률이면 하락 쪽 우선) → 'up'|'turn_down'|'down'|'rebound'|'flat' 또는 None"""
+    keys = [a["sit"]["key"] for sym, a in an.items() if sym != "KOSPI" and a.get("sit")]
+    if not keys:
+        return None
+    pri = ["down", "turn_down", "flat", "rebound", "up"]
+    return max(pri, key=lambda k: (keys.count(k), -pri.index(k)))
+
+
+def asset_analysis(conn):
+    """다자산 ETF 지표와 관점별 점수 (10분 캐시) → dict(rows[], phase, n)"""
+    if _ACACHE["v"] is not None and time.time() - _ACACHE["t"] < 600:
+        return _ACACHE["v"]
+    import world_markets as wm
+    an = world_analysis(conn)
+    phase = global_phase(an)
+    spy = wm.asset_series(conn, "SPY")
+    cl = [v for _, v in spy]
+    spy_rets = [cl[i] / cl[i - 1] - 1 for i in range(1, len(cl))] if len(cl) > 300 else None
+    rows = []
+    for code, name, cls, desc in wm.ASSETS:
+        ser = wm.asset_series(conn, code)
+        m = wm.asset_metrics(ser, spy_rets) if ser else None
+        if not m:
+            continue
+        sc = wm.asset_scores(m, cls, phase)
+        ss = wm.stage_stats([v for _, v in ser]) if len(ser) >= 500 else None
+        rows.append(dict(code=code, name=name, cls=cls, desc=desc, m=m, sc=sc, vd=wm.verdict_stats(ss) if ss else None))
+    out = dict(rows=rows, phase=phase)
+    _ACACHE.update(t=time.time(), v=out)
+    return out
+
+
+def _asset_card(conn):
+    """투자처 탭: 해외·다자산(주식·채권·금·원자재·리츠·달러·가상자산) 투자처"""
+    import picks as pk
+    import world_markets as wm
+    aa = asset_analysis(conn)
+    rows = aa["rows"]
+    if not rows:
+        return ('<div class="card"><b>해외·다자산 투자처</b><div class="muted" style="font-size:13px">아직 해외 자산(ETF) 자료가 없어요. 시장 → 해외 증시에서 “지수·대표 종목 받고 분석하기”를 누르면 채권·금·원자재·리츠·달러·가상자산 ETF까지 받아요.</div></div>')
+    phase = aa["phase"]
+    g = PHASE_GUIDE.get(phase or "")
+    fit = wm.CLASS_FIT.get(phase or "", {})
+    pc = lambda v: "-" if v is None else f'<span class="{"up" if v > 0 else "down" if v < 0 else ""}">{v:+.0%}</span>'
+    stg = {1: "바닥·반등", 2: "상승", 3: "꺾임", 4: "하락"}
+    # 자산군 한눈에
+    trs = ""
+    for cls, cname in wm.CLASS_NAME.items():
+        lst = [r for r in rows if r["cls"] == cls and r["sc"]["mid"]["score"] is not None]
+        if not lst:
+            continue
+        best = max(lst, key=lambda r: r["sc"]["mid"]["score"])
+        f = fit.get(cls)
+        arrow = "" if f is None else ('<span class="up">▲ 잘 맞음</span>' if f >= 0.65 else '<span class="down">▼ 안 맞음</span>' if f <= 0.4 else "━ 보통")
+        trs += (f'<tr><td><b>{escape(cname)}</b><br><span class="muted" style="font-size:11px">{escape(wm.CLASS_GROUP[cls])}</span></td><td>{arrow}</td><td>{escape(best["name"])}<br><span class="muted" style="font-size:11px">{escape(best["code"])}</span></td>'
+                f'<td>{pc(best["m"]["r3m"])}</td><td>{pc(best["m"]["r12"])}</td><td>{stg[best["m"]["stage"]]}</td></tr>')
+    overview = f'<div class="scroll"><table><tr><th>자산군</th><th>지금 국면 궁합</th><th>대표 (점수 높은 ETF)</th><th>3개월</th><th>12개월</th><th>추세</th></tr>{trs}</table></div>'
+    # 관점별 상위
+    cols = ""
+    for h, (nm, per) in pk.HORIZONS.items():
+        top = sorted([r for r in rows if r["sc"][h]["score"] is not None], key=lambda r: -r["sc"][h]["score"])[:8]
+        li = ""
+        for r in top:
+            rs_ = " · ".join(escape(t) for t in r["sc"][h]["reasons"][:2])
+            vd = r["vd"]
+            vt = "" if not vd or vd[0] is None else f' <span class="muted" style="font-size:10px">200일선 규칙 검증: {"통함" if vd[0] >= 0.03 else "약함" if vd[0] >= 0.01 else "의미 없음" if vd[0] > -0.01 else "거꾸로"}</span>'
+            li += (f'<div style="border-top:1px solid var(--line);padding:5px 0;font-size:13px"><b>{escape(r["name"])}</b> <span class="muted" style="font-size:11px">{escape(wm.CLASS_NAME[r["cls"]])} · {escape(r["code"])}</span> '
+                   f'<span class="chip {"up" if r["sc"][h]["score"] >= 70 else ""}" style="font-weight:700">{r["sc"][h]["score"]:.0f}</span>{vt}<div class="muted" style="font-size:12px">{rs_}</div>'
+                   f'<div style="font-size:11px" class="muted">1개월 {pc(r["m"]["r1m"])} · 3개월 {pc(r["m"]["r3m"])} · 12개월 {pc(r["m"]["r12"])} · 연 변동성 {r["m"]["vol"]:.0%} · 고점 대비 {r["m"]["dd"]:+.0%}</div></div>')
+        cols += f'<details open style="margin-top:8px"><summary><b>{nm} ({per})</b></summary>{li}</details>'
+    # 섞어 담는 후보
+    mix = ""
+    for h, (nm, per) in pk.HORIZONS.items():
+        parts_ = []
+        for grp in ("주식", "채권", "실물·원자재", "대체"):
+            lst = [r for r in rows if wm.CLASS_GROUP[r["cls"]] == grp and r["sc"][h]["score"] is not None]
+            if lst:
+                b = max(lst, key=lambda r: r["sc"][h]["score"])
+                parts_.append(f'<span class="chip">{escape(grp)}: <b>{escape(b["name"])}</b></span>')
+        mix += f'<div style="margin:4px 0"><b style="font-size:13px">{nm}</b> ' + " ".join(parts_) + '</div>'
+    fx = ""
+    try:
+        import stock_market
+        usd = list(stock_market.series(conn, "ecos:usdkrw"))
+        if usd:
+            fx = f'<div style="font-size:12px;margin-top:4px">원/달러 {usd[-1][1]:,.0f}원 — 달러 자산은 환율이 오르면 환차익, 내리면 환차손이에요 (환헤지 ETF가 아니면 환율 영향을 그대로 받아요).</div>'
+    except Exception:
+        pass
+    return ('<div class="card"><details open><summary><b>해외·다자산 투자처 — 주식 · 채권 · 금 · 원자재 · 리츠 · 달러 · 가상자산</b></summary>'
+            + (f'<div class="muted" style="font-size:12px;margin:4px 0">전 세계 주식시장 국면: <b>{escape(g[0])}</b> — 자산군 궁합은 이 국면에서 흔히 쓰는 생각의 틀(일반론)이에요.</div>' if g else "")
+            + overview + '<div style="margin-top:8px"><b style="font-size:13px">관점별 상위 자산 (미국 상장 ETF 기준)</b></div>' + cols
+            + '<div style="margin-top:10px"><b style="font-size:13px">섞어 담는 후보 — 자산군마다 점수 1위</b>' + mix + '<div class="muted" style="font-size:11px">자산군이 달라야 서로 다르게 움직여 분산이 돼요. 담는 비율은 개인 상황에 달려서 정하지 않았어요.</div></div>' + fx
+            + '<div class="muted" style="font-size:11px;margin-top:6px">가격 기록(모멘텀·추세·변동성·장기 수익·미국 주식과의 상관)과 국면 궁합만으로 매긴 점수예요. 이미 오른 자산이 유리하게 나오는 쏠림이 있고, 장기 점수는 과거 5년 수익에 기대서 그 시기에 강했던 자산(예: 에너지)이 높게 나올 수 있어요. '
+              '원유·원자재 ETF는 선물 롤오버 비용이, 가상자산은 큰 변동성이, 하이일드·신흥국채는 신용 위험이 있어요. 수수료·세금·환전 비용은 반영하지 않았고 투자 추천이 아니에요. <a href="/world">해외 증시 →</a></div>'
+            + '</details></div>')
+
+
 def view_picks(conn, q):
     """아이디어 → 투자처: 단기·중기·장기 관점별로 지금 앱이 가진 신호가 좋은 종목"""
     import picks as pk
@@ -4667,7 +4768,7 @@ def view_picks(conn, q):
            '<li>영업적자·감사 이슈·경고 다수·지분분쟁·과열은 점수를 깎지 않고 ⚠로 따로 붙였어요. 후보가 이미 많이 올랐을 수 있어요.</li>'
            '<li>최적의 투자처를 알려 주는 게 아니라 후보를 좁히는 도구예요. 투자 판단과 손익은 본인 몫이고 투자 추천이 아니에요.</li></ul></details></div>')
     more = '<div style="margin:6px 0"><a class="chip" href="/ideas?t=picks&all=1">후보 더 보기 (40개)</a></div>' if q.get("all") != "1" else '<div style="margin:6px 0"><a class="chip" href="/ideas?t=picks">접기</a></div>'
-    return page("투자처", intro + cyc + cards + more + inter_card + world + perf + how)
+    return page("투자처", intro + cyc + cards + more + inter_card + _asset_card(conn) + world + perf + how)
 
 
 def view_legstudy(conn, q):

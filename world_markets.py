@@ -405,3 +405,124 @@ def load_stocks(conn, region=None):
     except sqlite3.Error:
         return []
     return [dict(code=r[0], region=r[1], name=r[2], d=json.loads(r[3]), fetched=r[4]) for r in rows]
+
+
+# ---------------- 다자산 (ETF) ----------------
+# (네이버 해외주식 코드, 이름, 자산군 키, 설명)
+ASSETS = [
+    ("SPY", "미국 대형주 (S&P500)", "eq_us", "S&P500 추종"), ("QQQ.O", "미국 나스닥100", "eq_us", "대형 기술주 중심"), ("IWM", "미국 소형주 (러셀2000)", "eq_us", "소형주"),
+    ("VT", "전 세계 주식", "eq_us", "선진·신흥 전체"), ("EFA", "선진국(미국 제외)", "eq_dm", "유럽·일본 등"), ("EWJ", "일본 주식", "eq_dm", "MSCI Japan"), ("VGK", "유럽 주식", "eq_dm", "FTSE Europe"),
+    ("EEM", "신흥국 주식", "eq_em", "MSCI 신흥국"), ("FXI", "중국 대형주", "eq_em", "중국 대형 H주"), ("MCHI.O", "중국 주식 (MSCI)", "eq_em", "MSCI China"), ("KWEB.K", "중국 인터넷", "eq_em", "중국 플랫폼 기업"),
+    ("INDA.K", "인도 주식", "eq_em", "MSCI India"), ("EWZ", "브라질 주식", "eq_em", "MSCI Brazil"), ("EWY", "한국 주식 (미국 상장)", "eq_em", "MSCI Korea"),
+    ("XLK", "미국 기술 섹터", "sec_cyc", "기술"), ("SMH.O", "반도체", "sec_cyc", "반도체 기업"), ("XLI", "미국 산업재", "sec_cyc", "산업재"), ("XLF", "미국 금융", "sec_cyc", "금융"), ("ITA", "미국 방산·항공", "sec_cyc", "방위산업"),
+    ("XLE", "미국 에너지 섹터", "commodity", "에너지 기업"), ("XLV", "미국 헬스케어", "sec_def", "헬스케어"), ("XLP", "미국 필수소비재", "sec_def", "필수소비재"), ("XLU", "미국 유틸리티", "sec_def", "유틸리티"),
+    ("SCHD.K", "미국 배당 성장", "dividend", "배당 성장주"), ("VYM", "미국 고배당", "dividend", "고배당주"), ("USMV.K", "미국 저변동성", "dividend", "변동성 낮은 주식"),
+    ("TLT.O", "미국 장기국채 (20년+)", "bond_long", "금리 하락에 민감"), ("IEF.O", "미국 중기국채 (7~10년)", "bond_long", "중기 국채"), ("SHY.O", "미국 단기국채 (1~3년)", "bond_short", "금리 변동에 둔감"),
+    ("BND.O", "미국 종합채권", "bond_short", "채권 전체"), ("TIP", "미국 물가연동채", "bond_short", "인플레이션 방어"), ("LQD", "미국 투자등급 회사채", "bond_short", "신용 위험 낮은 회사채"),
+    ("HYG", "미국 하이일드 회사채", "bond_hy", "위험 선호에 민감"), ("EMB.O", "신흥국 달러채", "bond_hy", "신흥국 국채"),
+    ("GLD", "금", "gold", "금 현물"), ("IAU", "금 (저비용)", "gold", "금 현물"), ("SLV", "은", "gold", "은 현물"), ("GDX", "금광 기업", "gold", "금광 주식 (변동성 큼)"),
+    ("USO", "원유", "commodity", "선물 기반 (롤오버 비용)"), ("DBC", "원자재 종합", "commodity", "에너지·금속·농산물"), ("CPER.K", "구리", "commodity", "경기에 민감한 금속"),
+    ("VNQ", "미국 리츠(부동산)", "reit", "부동산 투자 신탁"),
+    ("UUP", "달러 (인덱스)", "dollar", "달러 강세에 투자"),
+    ("IBIT.O", "비트코인", "crypto", "비트코인 현물 ETF"), ("ETHA.O", "이더리움", "crypto", "이더리움 현물 ETF"),
+]
+CLASS_NAME = {"eq_us": "미국 주식", "eq_dm": "선진국 주식", "eq_em": "신흥국 주식", "sec_cyc": "경기민감 섹터", "sec_def": "방어 섹터", "dividend": "배당·저변동", "bond_long": "장기·중기 국채",
+              "bond_short": "단기·종합 채권", "bond_hy": "하이일드·신흥국채", "gold": "금·은", "commodity": "원자재·에너지", "reit": "부동산(리츠)", "dollar": "달러", "crypto": "가상자산"}
+CLASS_GROUP = {"eq_us": "주식", "eq_dm": "주식", "eq_em": "주식", "sec_cyc": "주식", "sec_def": "주식", "dividend": "주식", "bond_long": "채권", "bond_short": "채권", "bond_hy": "채권",
+               "gold": "실물·원자재", "commodity": "실물·원자재", "reit": "대체", "dollar": "대체", "crypto": "대체"}
+# 국면(전 세계 주식시장 기준) × 자산군 궁합 0~1 — 투자 시계·경기 사이클에서 흔히 쓰는 생각의 틀을 옮긴 것 (일반론, 검증된 값이 아님)
+CLASS_FIT = {
+    "up": dict(eq_us=.8, eq_dm=.7, eq_em=.7, sec_cyc=.85, sec_def=.45, dividend=.55, bond_long=.35, bond_short=.4, bond_hy=.7, gold=.45, commodity=.6, reit=.6, dollar=.3, crypto=.75),
+    "turn_down": dict(eq_us=.5, eq_dm=.45, eq_em=.4, sec_cyc=.4, sec_def=.7, dividend=.7, bond_long=.6, bond_short=.7, bond_hy=.35, gold=.7, commodity=.45, reit=.45, dollar=.65, crypto=.35),
+    "down": dict(eq_us=.35, eq_dm=.3, eq_em=.25, sec_cyc=.25, sec_def=.75, dividend=.65, bond_long=.65, bond_short=.8, bond_hy=.3, gold=.8, commodity=.4, reit=.35, dollar=.75, crypto=.2),
+    "rebound": dict(eq_us=.65, eq_dm=.6, eq_em=.65, sec_cyc=.7, sec_def=.5, dividend=.55, bond_long=.5, bond_short=.5, bond_hy=.6, gold=.5, commodity=.55, reit=.55, dollar=.4, crypto=.55),
+    "flat": dict(eq_us=.55, eq_dm=.5, eq_em=.45, sec_cyc=.5, sec_def=.6, dividend=.7, bond_long=.55, bond_short=.65, bond_hy=.5, gold=.6, commodity=.5, reit=.5, dollar=.5, crypto=.45),
+}
+
+
+def sync_assets(conn, log=print, session=None, sleep=0.3):
+    ensure(conn)
+    import stock_market
+    conn.execute("CREATE TABLE IF NOT EXISTS world_asset (code TEXT PRIMARY KEY, cls TEXT, name TEXT, name_en TEXT, fetched TEXT)")
+    n = 0
+    for code, name, cls, _ in ASSETS:
+        try:
+            pts = _chart(f"item/{code}", "20100101", session)
+        except requests.RequestException as e:
+            log(f"  ✖ {code}: {type(e).__name__}")
+            continue
+        if len(pts) < 60:
+            continue
+        stock_market.save_series(conn, f"wasset:{code}", pts)
+        conn.execute("INSERT OR REPLACE INTO world_asset VALUES (?,?,?,?,?)", (code, cls, name, "", dt.date.today().isoformat()))
+        n += 1
+        time.sleep(sleep)
+    conn.commit()
+    log(f"[해외 자산] {n}개 받음")
+    return n
+
+
+def asset_series(conn, code):
+    import stock_market
+    return list(stock_market.series(conn, f"wasset:{code}"))
+
+
+def asset_metrics(ser, spy_rets=None):
+    """[(날짜, 종가)] → dict(last, r1m, r3m, r6m, r12m, cagr3, cagr5, vol, dd, ps, stage, corr, span) 또는 None"""
+    import math
+    cl = [v for _, v in ser]
+    ps = price_state(cl)
+    if not ps:
+        return None
+    rets = [cl[i] / cl[i - 1] - 1 for i in range(1, len(cl))]
+    last252 = rets[-252:]
+    mu = sum(last252) / len(last252)
+    var = sum((x - mu) ** 2 for x in last252) / max(1, len(last252) - 1)
+    m = dict(last=cl[-1], r1m=ps["r1m"], r3m=ps["r3m"], r12=ps["r12"], dd=ps["dd"], ps=ps, vol=math.sqrt(var) * math.sqrt(252), stage=stage_of(ps["below_ma"], ps["slope"]), span=len(cl))
+    m["r6m"] = cl[-1] / cl[-127] - 1 if len(cl) > 127 else None
+    for yrs, k in ((3, "cagr3"), (5, "cagr5")):
+        n = 252 * yrs
+        m[k] = (cl[-1] / cl[-n - 1]) ** (1 / yrs) - 1 if len(cl) > n + 1 else None
+    if spy_rets:
+        a, b = last252, spy_rets[-len(last252):]
+        k = min(len(a), len(b))
+        if k > 100:
+            a, b = a[-k:], b[-k:]
+            ma, mb = sum(a) / k, sum(b) / k
+            cov = sum((x - ma) * (y - mb) for x, y in zip(a, b))
+            va, vb = sum((x - ma) ** 2 for x in a), sum((y - mb) ** 2 for y in b)
+            m["corr"] = cov / math.sqrt(va * vb) if va > 0 and vb > 0 else None
+    return m
+
+
+def asset_scores(m, cls, phase=None):
+    """자산 지표 → {short, mid, long: dict(score, reasons[])}. 가격 기록만으로 보는 모멘텀·추세·위험조정 수익·분산 기여와 국면 궁합"""
+    ps = m["ps"]
+    fit = (CLASS_FIT.get(phase or "") or {}).get(cls)
+    lin = lambda v, lo, hi: None if v is None else max(0.0, min(1.0, (v - lo) / (hi - lo)))
+    trend = (0.75 if not ps["below_ma"] else 0.2) + (0.2 if ps["slope"] > 0 else 0.0)
+    volv = lin(-m["vol"], -0.40, -0.08)
+    sharpe12 = lin(m["r12"] / m["vol"] if m["vol"] else None, -0.5, 1.5)
+    out = {}
+    rs = {}
+
+    def comb(items):
+        have = [(w, v, r) for w, v, r in items if v is not None]
+        if not have:
+            return dict(score=None, reasons=[])
+        tw = sum(w for w, _, _ in have)
+        sc = sum(w * v for w, v, _ in have) / tw * 100
+        rs_ = [r for w, v, r in sorted(have, key=lambda x: -(x[0] * x[1])) if v >= 0.65 and r][:3]
+        return dict(score=sc, reasons=rs_)
+    out["short"] = comb([(35, lin(m["r3m"] * 0.6 + m["r1m"] * 0.4, -0.12, 0.2), f"최근 1·3개월 {m['r1m']:+.0%}·{m['r3m']:+.0%}로 모멘텀이 좋아요"),
+                         (25, trend, "200일선 위에서 오르는 추세"), (15, volv, f"변동성이 낮아요 (연 {m['vol']:.0%})"),
+                         (25, fit, "지금 시장 국면에 잘 맞는 자산군")])
+    out["mid"] = comb([(35, lin((m["r12"] * 0.6 + (m["r6m"] if m["r6m"] is not None else m["r12"]) * 0.4), -0.15, 0.35), f"6·12개월 수익 {m['r12']:+.0%}"),
+                       (20, trend, "추세가 살아 있어요"), (20, sharpe12, "변동성 대비 수익이 좋아요"), (25, fit, "지금 시장 국면에 잘 맞는 자산군")])
+    lt = m["cagr5"] if m["cagr5"] is not None else m["cagr3"]
+    ltv = None if lt is None else (lin(lt, 0.0, 0.14))
+    cr = lin((lt or 0) / m["vol"] if (lt is not None and m["vol"]) else None, 0.0, 0.8)
+    div = None if m.get("corr") is None else lin(-m["corr"], -0.9, 0.5)
+    out["long"] = comb([(35, ltv, f"장기 연 수익 {lt:+.0%}" if lt is not None else ""), (25, cr, "장기 위험조정 수익이 좋아요"), (20, div, f"미국 주식과 상관이 낮아 분산 효과가 커요 (상관 {m.get('corr', 0):.2f})"),
+                        (10, lin(m["dd"], -0.35, -0.02), "낙폭이 크지 않아요"), (10, fit, "지금 시장 국면에 잘 맞는 자산군")])
+    return out

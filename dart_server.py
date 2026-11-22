@@ -1068,7 +1068,7 @@ def world_run():
     threading.Thread(target=proc.wait, daemon=True).start()
     try:
         status.write_text(json.dumps({"running": True, "pid": proc.pid, "started": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "finished": "",
-                                      "steps": [{"name": "해외 지수·대표 종목 받기 (네이버)", "state": "run", "msg": "시작"}]}, ensure_ascii=False), encoding="utf-8")
+                                      "steps": [{"name": "해외 지수·대표 종목·다자산 받기 (네이버)", "state": "run", "msg": "시작"}]}, ensure_ascii=False), encoding="utf-8")
     except OSError:
         pass
     return True, "시작했어요 (별도 프로세스). 지수는 10초쯤, 종목은 몇 분 걸려요."
@@ -1079,7 +1079,7 @@ def cmd_world_sync(args):
     import world_markets
     status = str(data_dir() / "world_status.json")
     st = {"running": True, "pid": os.getpid(), "started": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "finished": "",
-          "steps": [{"name": "해외 지수 받기 (2005~)", "state": "run", "msg": ""}, {"name": "대표 종목 받기 (재무·주가·목표가)", "state": "wait", "msg": ""}]}
+          "steps": [{"name": "해외 지수 받기 (2005~)", "state": "run", "msg": ""}, {"name": "대표 종목 받기 (재무·주가·목표가)", "state": "wait", "msg": ""}, {"name": "다자산 ETF 받기 (채권·금·원자재·리츠·달러·가상자산 등)", "state": "wait", "msg": ""}]}
 
     def save():
         try:
@@ -1101,6 +1101,13 @@ def cmd_world_sync(args):
             st["steps"][1].update(state="ok", msg=f"{n}개 종목 새로 받음 (6일 안에 받은 것은 건너뜀)")
         except Exception as e:
             st["steps"][1].update(state="fail", msg=f"{type(e).__name__}: {str(e)[:120]}")
+        st["steps"][2]["state"] = "run"
+        save()
+        try:
+            n = world_markets.sync_assets(conn, log=lambda m: print(m, flush=True))
+            st["steps"][2].update(state="ok", msg=f"{n}개 자산")
+        except Exception as e:
+            st["steps"][2].update(state="fail", msg=f"{type(e).__name__}: {str(e)[:120]}")
     finally:
         conn.close()
     st["running"] = False
