@@ -1163,14 +1163,36 @@ def view_crash(conn, q):
                  '<div class="muted" style="font-size:11px">표본이 몇 건 안 돼서 결론이 아니에요. 나눠 사기는 더 내려가는 구간에선 평균 단가를 낮추지만, 바로 반등하면 덜 사서 손해예요. 현금 부족이 자주 생기는 점도 보세요.</div></div>')
     else:
         split = '<div class="card"><b>3. 낙폭 단계로 나눠 사는 규칙</b><div class="muted">코스피 지수 자료가 3년치 이상 필요해요 (지금 수집 → 시장·정책만).</div></div>'
-    check = ('<div class="card"><b>4. 투자 전에 먼저 점검할 것</b><ul style="margin:6px 0 0 18px">'
+    try:
+        import allocation as al
+        usd, krw = al.compare(conn, False), al.compare(conn, True)
+    except Exception:
+        usd = krw = None
+    if usd:
+        kmap = {r["name"]: r for r in (krw or {"rows": []})["rows"]}
+        trs = ""
+        for r in usd["rows"]:
+            st, k = r["st"], kmap.get(r["name"])
+            ks = k["st"] if k else None
+            trs += (f'<tr><td><b>{escape(r["name"])}</b><br><span class="muted" style="font-size:11px">{escape(r["desc"])}</span></td>'
+                    f'<td>{pc(st["cagr"])}</td><td>{pc(st["mdd"])}</td><td>{pc(st["worst12"])}</td>'
+                    f'<td>{pc(r["eps"].get("2020 코로나"))}</td><td>{pc(r["eps"].get("2022 금리 급등"))}</td>'
+                    f'<td>{pc(ks["cagr"]) if ks else "-"}</td><td>{pc(ks["mdd"]) if ks else "-"}</td></tr>')
+        alloc = ('<div class="card"><b>4. 자산배분 틀 비교 (같은 기간, 매월 비중 맞추기)</b>'
+                 f'<div class="muted" style="font-size:12px">{usd["start"]} ~ 지금, 미국 상장 ETF로 돌린 결과예요 (원화 열은 환율을 곱한 값{"이고 " + krw["start"] + "부터" if krw else ""}). 지수·채권·금·원자재·달러 ETF의 <b>가격 수익만</b> 계산했어요.</div>'
+                 f'<div class="scroll"><table><tr><th>배분</th><th>연 수익<br>(달러)</th><th>최대 낙폭</th><th>최악 12개월</th><th>2020 코로나<br>구간</th><th>2022 금리<br>구간</th><th>연 수익<br>(원화)</th><th>최대 낙폭<br>(원화)</th></tr>{trs}</table></div>'
+                 '<div class="muted" style="font-size:11px;margin-top:4px">읽는 법: 대체로 수익이 낮은 배분이 낙폭도 작지만, 주식+금+달러처럼 예외도 있어요. 2022년처럼 주식·채권이 같이 내린 구간에선 채권 비중이 큰 배분도 크게 내렸고, 금·달러·단기채가 버텼어요. '
+                 '<b>배당·이자를 뺀 가격 기준이라 채권·배당 자산(특히 단기채·국채)이 실제보다 불리하게 나와요.</b> 기간이 2010년대 이후 미국 주식 강세장을 포함해서 주식 비중이 큰 쪽이 유리하게 보일 수 있고, 과거 성적이 앞날을 보장하지 않아요. 비중은 예시이고 추천이 아니에요.</div></div>')
+    else:
+        alloc = ""
+    check = ('<div class="card"><b>5. 투자 전에 먼저 점검할 것</b><ul style="margin:6px 0 0 18px">'
              '<li><b>생활비 6~12개월치 현금</b>이 따로 있는지 — 없으면 바닥에서 강제로 팔게 돼요.</li>'
              '<li><b>빚</b>: 변동금리·단기 만기 대출이 있으면 상환이나 만기 조정이 확실한 수익이에요. 부동산이 같이 내리면 레버리지가 가장 위험해요.</li>'
              '<li><b>내 한도 줄이기</b>: 시장 화면의 변동성 한도 카드처럼, 변동성이 커지면 투자 한도를 먼저 줄이는 방법이 있어요.</li>'
              '<li><b>분할 규칙은 미리 적어 두기</b>: 낙폭 구간마다 어느 만큼 살지 정해 두면 공포 속에서 판단하지 않아도 돼요.</li>'
              '<li><b>하나가 아니라 유형이 다른 자산</b>: 위 2번 표처럼 유형이 바뀌면 방어가 되는 자산도 바뀌어요.</li></ul>'
              '<div class="muted" style="font-size:12px;margin-top:6px">관련 화면: <a href="/cycle">투자 사이클</a> · <a href="/diag">하락 점검</a> · <a href="/ideas?t=picks">투자처(해외·다자산)</a> · <a href="/world">해외 증시 ETF</a></div></div>')
-    return page("동반 하락 대응", intro + _vol_card(conn) + _conc_card(conn) + diag + past + split + check)
+    return page("동반 하락 대응", intro + _vol_card(conn) + _conc_card(conn) + diag + past + split + alloc + check)
 
 
 def view_derivs(conn, q):
