@@ -1090,6 +1090,61 @@ def _vol_card(conn):
             '</details></div>')
 
 
+def view_crash(conn, q):
+    """시장 → 동반 하락 대응: 하락 유형 진단 · 과거 하락에서 자산별 성적 · 분할 매수 규칙 비교 · 먼저 점검할 것"""
+    import crash_response as cr
+    intro = ('<div class="card"><b>자산 동반 하락 대응</b><div class="muted" style="font-size:13px">주식·채권·금·부동산이 같이 흔들릴 때 무엇을 보면 좋을지 정리했어요. '
+             '<b>최적의 답을 알려 주는 화면이 아니에요.</b> 하락의 유형을 가격으로 나눠 보고, 과거 비슷한 구간에서 자산별로 어땠는지, 낙폭 단계로 나눠 사는 규칙이 과거에 어땠는지를 보여 줘요. 투자 권유가 아니에요.</div></div>')
+    pc = lambda v: "-" if v is None else f'<span class="{"up" if v > 0 else "down" if v < 0 else ""}">{v:+.0%}</span>'
+    try:
+        dg = cr.diagnose(conn)
+    except Exception:
+        dg = None
+    if dg:
+        trs = "".join(f'<tr><td>{escape(r["name"])}</td><td>{pc(r["r1m"])}</td><td>{pc(r["r3m"])}</td><td>{pc(r["dd"])}</td></tr>' for r in dg["rows"])
+        diag = ('<div class="card"><b>1. 지금 하락은 어떤 유형인가</b>'
+                f'<div style="margin:6px 0">{escape(dg["text"])}</div>'
+                f'<div class="muted" style="font-size:12px">{dg["n"]}개 자산 중 {dg["down"]}개가 최근 3개월 하락 · 미국 상장 ETF 기준 (원화 환산 아님)</div>'
+                f'<div class="scroll"><table><tr><th>자산</th><th>1개월</th><th>3개월</th><th>1년 고점 대비</th></tr>{trs}</table></div>'
+                '<div class="muted" style="font-size:11px">구분 규칙은 제가 정한 단순 규칙이에요: 주식 3개월 -3% 이하일 때, 중기국채가 같이 내리면 금리 상승형, 금이 내리고 달러가 오르면 유동성 위기형, 국채가 오르면 경기 둔화형.</div></div>')
+    else:
+        diag = '<div class="card"><b>1. 지금 하락은 어떤 유형인가</b><div class="muted">해외 자산(ETF) 자료가 아직 없어요. 시장 → 해외 증시에서 받아 주세요.</div></div>'
+    eps = cr.episode_table(conn)
+    cols = [k for k in cr.KEYS if k != "IBIT.O"]
+    th = "".join(f'<th>{escape(cr.LABEL[k])}</th>' for k in cols)
+    body = ""
+    for e in eps:
+        tds = ""
+        for k in cols:
+            c_ = e["cells"].get(k)
+            tds += f'<td>{pc(c_[0]) if c_ else "-"}<br><span class="muted" style="font-size:11px">{pc(c_[1]) if c_ else ""}</span></td>'
+        body += f'<tr><td><b>{escape(e["name"])}</b><br><span class="muted" style="font-size:11px">{e["d0"]} → {e["d1"]}</span></td>{tds}</tr>'
+    past = ('<div class="card"><b>2. 과거 하락 구간에서 자산별 성적</b>'
+            '<div class="muted" style="font-size:12px">각 칸: 위는 하락 시작→바닥 수익, 아래는 바닥 이후 6개월 수익. 구간 날짜는 제가 고른 것이라 다르게 잡으면 숫자가 달라져요.</div>'
+            f'<div class="scroll"><table><tr><th>구간</th>{th}</tr>{body}</table></div>'
+            '<div class="muted" style="font-size:11px">읽는 법: 같은 자산도 하락 유형마다 성적이 달랐어요 — 예를 들어 장기 국채는 경기 둔화형에선 올랐지만 금리 상승형(2022)에선 크게 내렸어요. 하락 구간 안에서 금도 내린 적이 있었어요. 표에 없는 2008년은 ETF 자료가 2010년부터라 빠졌어요.</div></div>')
+    ts = cr.tranche_study(conn)
+    if ts:
+        rows = "".join(f'<tr><td>{e["date"][:4]}-{e["date"][4:6]}-{e["date"][6:8]}</td><td>{pc(e["depth"])}</td><td>{pc(e["lump"])}</td><td>{pc(e["stage"])}</td><td>{e["cash"]:.0%}</td></tr>' for e in ts)
+        avg = lambda k: sum(e[k] for e in ts) / len(ts)
+        win = sum(1 for e in ts if e["stage"] > e["lump"])
+        split = ('<div class="card"><b>3. 낙폭 단계로 나눠 사는 규칙, 과거엔 어땠나 (코스피)</b>'
+                 '<div class="muted" style="font-size:12px">규칙: 고점 대비 -20% 처음 닿는 날 전액 매수 (A) vs −20·−30·−40%에 3등분 매수 (B). 도달 못 한 분량은 현금으로 두고, 첫 신호 후 약 1년 뒤 전체 자산 기준으로 비교했어요.</div>'
+                 f'<div class="scroll"><table><tr><th>첫 신호일</th><th>그 뒤 최대 낙폭</th><th>A 한 번에</th><th>B 나눠서</th><th>B 중 못 산 현금</th></tr>{rows}</table></div>'
+                 f'<div style="margin-top:4px">평균 A {pc(avg("lump"))} · B {pc(avg("stage"))} — B가 더 나은 경우 {win}/{len(ts)}회</div>'
+                 '<div class="muted" style="font-size:11px">표본이 몇 건 안 돼서 결론이 아니에요. 나눠 사기는 더 내려가는 구간에선 평균 단가를 낮추지만, 바로 반등하면 덜 사서 손해예요. 현금 부족이 자주 생기는 점도 보세요.</div></div>')
+    else:
+        split = '<div class="card"><b>3. 낙폭 단계로 나눠 사는 규칙</b><div class="muted">코스피 지수 자료가 3년치 이상 필요해요 (지금 수집 → 시장·정책만).</div></div>'
+    check = ('<div class="card"><b>4. 투자 전에 먼저 점검할 것</b><ul style="margin:6px 0 0 18px">'
+             '<li><b>생활비 6~12개월치 현금</b>이 따로 있는지 — 없으면 바닥에서 강제로 팔게 돼요.</li>'
+             '<li><b>빚</b>: 변동금리·단기 만기 대출이 있으면 상환이나 만기 조정이 확실한 수익이에요. 부동산이 같이 내리면 레버리지가 가장 위험해요.</li>'
+             '<li><b>내 한도 줄이기</b>: 시장 화면의 변동성 한도 카드처럼, 변동성이 커지면 투자 한도를 먼저 줄이는 방법이 있어요.</li>'
+             '<li><b>분할 규칙은 미리 적어 두기</b>: 낙폭 구간마다 어느 만큼 살지 정해 두면 공포 속에서 판단하지 않아도 돼요.</li>'
+             '<li><b>하나가 아니라 유형이 다른 자산</b>: 위 2번 표처럼 유형이 바뀌면 방어가 되는 자산도 바뀌어요.</li></ul>'
+             '<div class="muted" style="font-size:12px;margin-top:6px">관련 화면: <a href="/cycle">투자 사이클</a> · <a href="/diag">하락 점검</a> · <a href="/ideas?t=picks">투자처(해외·다자산)</a> · <a href="/world">해외 증시 ETF</a></div></div>')
+    return page("동반 하락 대응", intro + _vol_card(conn) + diag + past + split + check)
+
+
 def view_derivs(conn, q):
     import deriv_bond as dvb
     tab = "learn" if q.get("t") == "learn" else "signals"
@@ -5699,7 +5754,7 @@ def perf_url(**kw):
     return "/ideas?" + urlencode({"t": "perf", **kw})
 
 
-MARKET_HUB = {"/market": "시장 온도", "/cycle": "투자 사이클", "/world": "해외 증시", "/events": "이벤트·테마", "/policy": "정책", "/radar": "대비 레이더", "/diag": "하락 점검", "/bills": "법안·종목", "/news": "속보", "/shorts": "공매도 리포트", "/derivs": "선물·채권", "/calendar": "달력"}
+MARKET_HUB = {"/market": "시장 온도", "/cycle": "투자 사이클", "/world": "해외 증시", "/events": "이벤트·테마", "/policy": "정책", "/radar": "대비 레이더", "/diag": "하락 점검", "/crash": "동반 하락 대응", "/bills": "법안·종목", "/news": "속보", "/shorts": "공매도 리포트", "/derivs": "선물·채권", "/calendar": "달력"}
 
 
 REPORT_HUB = {"/": "보고서", "/new": "새 공시", "/reports": "증권사 리포트"}
@@ -7649,6 +7704,8 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     body = view_cycle(conn, q)
                 elif url.path == "/world":
                     body = view_world(conn, q)
+                elif url.path == "/crash":
+                    body = view_crash(conn, q)
                 elif url.path == "/dispute":          # 지분분쟁은 아이디어 탭으로 옮겼어요 (예전 주소 호환)
                     return self._redirect("/ideas?" + urlencode({"t": "dispute", **{k: v for k, v in q.items() if not k.startswith("_")}}))
                 elif url.path == "/ideas":
