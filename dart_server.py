@@ -705,6 +705,22 @@ def run_market_policy(log=print):
         except Exception as e:
             out["concentration"] = f"실패: {e}"
             log(f"코스피 쏠림 받기 실패: {e}")
+    if env("DART_MKT_ALERT", "1") != "0":       # 코스피 낙폭·변동성 단계가 바뀌면 푸시 알림 (상태가 바뀔 때만)
+        try:
+            import market_alert
+            c_ = sqlite3.connect(results_db())
+            try:
+                ms = market_alert.check(c_)
+            finally:
+                c_.close()
+            if ms:
+                url = env("DASHBOARD_URL")
+                notify("시장 경보: " + " · ".join(t for t, _ in ms), "\n".join(b for _, b in ms),
+                       click=(url.rstrip("/") + "/crash") if url else "", tags=("warning",))
+            out["market_alert"] = f"{len(ms)}건"
+        except Exception as e:
+            out["market_alert"] = f"실패: {e}"
+            log(f"시장 경보 실패: {e}")
     if env("DART_PICKS", "1") != "0":           # 투자처 탭: 오늘의 단기·중기·장기 선정을 기록해 두고 나중에 성과를 보여 줌
         try:
             ok_, why_ = picks_snapshot()

@@ -1106,6 +1106,11 @@ def _vol_card(conn):
             f'<div>하루 폭 약 <b>±{r["day"]:.1%}</b> · 한 달 폭 약 <b>±{r["month"]:.1%}</b> <span class="muted" style="font-size:12px">(연 변동성 ÷ √250, ÷ √12 — “하루 폭 ≈ 변동성 ÷ 16”)</span></div>'
             f'<div style="margin-top:6px">변동성 타깃팅(손실한도 ÷ 변동성)으로 보면, 평상시({vl.BASE:.0%})에 담던 금액의 <b>{mult:.0%}</b>만 담을 수 있어요'
             + (f' — 변동성이 {vl.BASE:.0%}대로 돌아오면 한도가 약 {mult ** -1:.1f}배로 열려요' if mult < 1 else "") + '.</div>'
+            f'<div style="margin-top:8px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;font-size:13px"><b>내 한도 계산</b> · 감당할 손실 한도 '
+            f'<input id="vl_loss" type="number" min="0" step="100" value="1000" style="width:90px"> 만원 → 투자 한도 <b id="vl_out"></b>'
+            f'<span class="muted" style="font-size:11px"> (손실한도 ÷ 변동성 {v:.0%}, 평상시 {vl.BASE:.0%}이면 <span id="vl_base"></span>)</span>'
+            f'<script>(function(){{var v={v:.4f},b={vl.BASE},i=document.getElementById("vl_loss");function f(n){{return n>=10000?(n/10000).toFixed(1)+"억원":Math.round(n).toLocaleString()+"만원"}}'
+            f'function u(){{var l=+i.value||0;document.getElementById("vl_out").textContent=f(l/v);document.getElementById("vl_base").textContent=f(l/b)}}i.oninput=u;u()}})()</script></div>'
             f'<div class="muted" style="font-size:12px">최근 1년 하루 5% 넘게 움직인 날 {r["big5"]}거래일 (자료 전체 {r["n"]}거래일 중 {r["big5_all"]}일)</div>'
             + corr + bar
             + '<div class="muted" style="font-size:11px;margin-top:6px">거래소 공식 VKOSPI는 옵션 가격으로 계산한 ‘앞으로의 예상치’라서 이 값(지난 20일 실제 움직임)과 달라요. 아래 내재변동성이 비슷한 예상치예요 (VKOSPI는 investing.com 등에서 확인). '
