@@ -1147,7 +1147,7 @@ def view_derivs(conn, q):
             f'<span class="muted">(신호 {n}개 합 {tot:+d})</span></div>'
             '<div class="muted" style="margin-top:6px"><b>주의:</b> 신호는 \'가설\'이에요. 선물·채권 숫자가 주식의 앞날을 보장하지 않고, 기준값은 제가 정한 단순한 값이에요. 투자 추천이 아니에요. '
             '용어가 낯설면 위쪽 <a href="/derivs?t=learn">배우기</a>를 먼저 보세요.</div></div>')
-    return page("선물·채권", tabs + head + _vol_card(conn) + cards + curve_card + stock_card + exp + pending)
+    return page("선물·채권", tabs + head + cards + curve_card + stock_card + exp + pending)
 
 
 def view_stock(conn, code, q=None):
@@ -1609,7 +1609,7 @@ def view_market(conn):
             + f'<div class="muted">{escape(i.reason)}</div>'
             + sparkline(i.points)
             + (f'<div class="muted" style="font-size:12px">{escape(i.note)}</div>' if i.note else "") + "</div>")
-    return page("시장", hero + cycle_brief_card(conn) + events_brief_card(conn) + "".join(cards) + presidents_card(conn))
+    return page("시장", hero + cycle_brief_card(conn) + _vol_card(conn) + events_brief_card(conn) + "".join(cards) + presidents_card(conn))
 
 
 def cycle_brief_card(conn):
