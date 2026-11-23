@@ -4191,10 +4191,10 @@ def _etf_table(conn):
         for r in sorted([r for r in rows if wm.CLASS_GROUP[r["cls"]] == grp], key=lambda r: (r["cls"], -(r["m"]["r12"] or -9))):
             m = r["m"]
             trs += (f'<tr><td><b>{escape(r["name"])}</b><br><span class="muted" style="font-size:11px">{escape(r["code"])} · {escape(wm.CLASS_NAME[r["cls"]])}</span></td>'
-                    f'<td>{pc(m["r1m"])}</td><td>{pc(m["r3m"])}</td><td>{pc(m["r12"])}</td><td>{pc(m["cagr5"])}</td><td>{m["vol"]:.0%}</td><td>{m["dd"]:+.0%}</td><td>{stg[m["stage"]]}</td></tr>')
+                    f'<td>{pc(m["r1m"])}</td><td>{pc(m["r3m"])}</td><td>{pc(m["r12"])}</td><td>{pc((r.get("krw") or {}).get("r12"))}</td><td>{pc(m["cagr5"])}</td><td>{m["vol"]:.0%}</td><td>{m["dd"]:+.0%}</td><td>{stg[m["stage"]]}</td></tr>')
         if trs:
-            out += (f'<details style="margin-top:6px"><summary><b>{escape(grp)} ETF</b></summary><div class="scroll"><table><tr><th>ETF</th><th>1개월</th><th>3개월</th><th>12개월</th><th>연 5년</th><th>변동성</th><th>고점 대비</th><th>추세</th></tr>{trs}</table></div></details>')
-    return ('<div class="card"><b>해외 ETF — 주식·채권·원자재·대체</b><div class="muted" style="font-size:12px">미국 상장 ETF 가격 기록 기준이에요. 관점별 추천은 아이디어 → 투자처에 있어요.</div>' + out + '</div>')
+            out += (f'<details style="margin-top:6px"><summary><b>{escape(grp)} ETF</b></summary><div class="scroll"><table><tr><th>ETF</th><th>1개월</th><th>3개월</th><th>12개월</th><th>12개월<br>(원화)</th><th>연 5년</th><th>변동성</th><th>고점 대비</th><th>추세</th></tr>{trs}</table></div></details>')
+    return ('<div class="card"><b>해외 ETF — 주식·채권·원자재·대체</b><div class="muted" style="font-size:12px">미국 상장 ETF 가격 기록 기준이에요 (달러 기준 + 원/달러 환율을 곱한 원화 기준 12개월). 관점별 추천은 아이디어 → 투자처에 있어요.</div>' + out + '</div>')
 
 
 def view_world(conn, q):
@@ -4746,6 +4746,7 @@ def asset_analysis(conn):
     cl = [v for _, v in spy]
     spy_rets = [cl[i] / cl[i - 1] - 1 for i in range(1, len(cl))] if len(cl) > 300 else None
     rows = []
+    fx = wm.fx_series(conn)
     for code, name, cls, desc in wm.ASSETS:
         ser = wm.asset_series(conn, code)
         m = wm.asset_metrics(ser, spy_rets) if ser else None
@@ -4753,7 +4754,8 @@ def asset_analysis(conn):
             continue
         sc = wm.asset_scores(m, cls, phase)
         ss = wm.stage_stats([v for _, v in ser]) if len(ser) >= 500 else None
-        rows.append(dict(code=code, name=name, cls=cls, desc=desc, m=m, sc=sc, vd=wm.verdict_stats(ss) if ss else None))
+        rows.append(dict(code=code, name=name, cls=cls, desc=desc, m=m, sc=sc, vd=wm.verdict_stats(ss) if ss else None,
+                         krw=wm.krw_returns(ser, fx) if fx else None))
     out = dict(rows=rows, phase=phase, stamp=stamp)
     if rows:
         _ACACHE.update(t=time.time(), v=out, stamp=stamp)
@@ -4783,8 +4785,8 @@ def _asset_card(conn):
         f = fit.get(cls)
         arrow = "" if f is None else ('<span class="up">▲ 잘 맞음</span>' if f >= 0.65 else '<span class="down">▼ 안 맞음</span>' if f <= 0.4 else "━ 보통")
         trs += (f'<tr><td><b>{escape(cname)}</b><br><span class="muted" style="font-size:11px">{escape(wm.CLASS_GROUP[cls])}</span></td><td>{arrow}</td><td>{escape(best["name"])}<br><span class="muted" style="font-size:11px">{escape(best["code"])}</span></td>'
-                f'<td>{pc(best["m"]["r3m"])}</td><td>{pc(best["m"]["r12"])}</td><td>{stg[best["m"]["stage"]]}</td></tr>')
-    overview = f'<div class="scroll"><table><tr><th>자산군</th><th>지금 국면 궁합</th><th>대표 (점수 높은 ETF)</th><th>3개월</th><th>12개월</th><th>추세</th></tr>{trs}</table></div>'
+                f'<td>{pc(best["m"]["r3m"])}</td><td>{pc(best["m"]["r12"])}</td><td>{pc((best.get("krw") or {}).get("r12"))}</td><td>{stg[best["m"]["stage"]]}</td></tr>')
+    overview = f'<div class="scroll"><table><tr><th>자산군</th><th>지금 국면 궁합</th><th>대표 (점수 높은 ETF)</th><th>3개월</th><th>12개월</th><th>12개월<br>(원화)</th><th>추세</th></tr>{trs}</table></div>'
     # 관점별 상위
     cols = ""
     for h, (nm, per) in pk.HORIZONS.items():
@@ -4796,7 +4798,7 @@ def _asset_card(conn):
             vt = "" if not vd or vd[0] is None else f' <span class="muted" style="font-size:10px">200일선 규칙 검증: {"통함" if vd[0] >= 0.03 else "약함" if vd[0] >= 0.01 else "의미 없음" if vd[0] > -0.01 else "거꾸로"}</span>'
             li += (f'<div style="border-top:1px solid var(--line);padding:5px 0;font-size:13px"><b>{escape(r["name"])}</b> <span class="muted" style="font-size:11px">{escape(wm.CLASS_NAME[r["cls"]])} · {escape(r["code"])}</span> '
                    f'<span class="chip {"up" if r["sc"][h]["score"] >= 70 else ""}" style="font-weight:700">{r["sc"][h]["score"]:.0f}</span>{vt}<div class="muted" style="font-size:12px">{rs_}</div>'
-                   f'<div style="font-size:11px" class="muted">1개월 {pc(r["m"]["r1m"])} · 3개월 {pc(r["m"]["r3m"])} · 12개월 {pc(r["m"]["r12"])} · 연 변동성 {r["m"]["vol"]:.0%} · 고점 대비 {r["m"]["dd"]:+.0%}</div></div>')
+                   f'<div style="font-size:11px" class="muted">1개월 {pc(r["m"]["r1m"])} · 3개월 {pc(r["m"]["r3m"])} · 12개월 {pc(r["m"]["r12"])} ({"원화 " + pc(r["krw"]["r12"]) if r.get("krw") and r["krw"].get("r12") is not None else "원화 -"}) · 연 변동성 {r["m"]["vol"]:.0%} · 고점 대비 {r["m"]["dd"]:+.0%}</div></div>')
         cols += f'<details open style="margin-top:8px"><summary><b>{nm} ({per})</b></summary>{li}</details>'
     # 섞어 담는 후보
     mix = ""

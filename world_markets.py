@@ -459,7 +459,93 @@ def sync_assets(conn, log=print, session=None, sleep=0.3):
         time.sleep(sleep)
     conn.commit()
     log(f"[해외 자산] {n}개 받음")
+    try:
+        sync_fx(conn, log=log, session=session)
+    except Exception as e:
+        log(f"  ✖ 환율: {type(e).__name__}")
     return n
+
+
+FX_URL = API + "/marketindex/exchange/FX_USDKRW/prices"
+
+
+def sync_fx(conn, log=print, session=None, sleep=0.25, max_pages=120):
+    """원/달러 환율 일별 (하나은행 매매기준율, 네이버). 이미 받은 날짜까지만 새로 받음 → series 'fx:usdkrw'"""
+    import stock_market
+    have = stock_market.series(conn, "fx:usdkrw")
+    last = have[-1][0] if have else ""
+    first = have[0][0] if have else ""
+    full = bool(have) and first <= "2010-06-30"      # 과거까지 이미 받았으면 새 날짜만, 아니면 끝까지 이어서
+    s_ = session or requests
+    pts = {}
+    stop = False
+    n_saved = 0
+    for pg in range(1, max_pages + 1):
+        j = None
+        for _ in range(5):
+            try:
+                j = s_.get(FX_URL, params=dict(page=pg, pageSize=60), headers=HEADERS, timeout=12).json()
+                break
+            except (requests.RequestException, ValueError):
+                time.sleep(3)
+        if not j:
+            break
+        for x in j:
+            d, c = str(x.get("localTradedAt", "")), str(x.get("closePrice", "")).replace(",", "")
+            if len(d) != 10 or not c:
+                continue
+            if first <= d <= last:
+                stop = full
+                continue
+            try:
+                pts[d] = float(c)
+            except ValueError:
+                pass
+        if stop or min((str(x.get("localTradedAt", "9")) for x in j), default="9") < "2010-01-01":
+            break
+        if pg % 10 == 0 and pts:               # 중간에 끊겨도 받은 만큼은 남게 10쪽마다 저장
+            stock_market.save_series(conn, "fx:usdkrw", pts)
+            conn.commit()
+            pts = {}
+            n_saved += 10 * 60
+        time.sleep(sleep)
+    if pts:
+        stock_market.save_series(conn, "fx:usdkrw", pts)
+        conn.commit()
+    log(f"[환율] 새로 받음 (마지막 쪽 {pg})")
+    return len(pts) + n_saved
+
+
+def fx_series(conn):
+    import stock_market
+    return list(stock_market.series(conn, "fx:usdkrw"))
+
+
+def krw_returns(ser, fx):
+    """USD 가격 ser × 환율 fx → 원화 기준 (r1m, r3m, r12). 환율은 같은 날 이전 가장 가까운 값"""
+    import bisect
+    if not ser or not fx:
+        return None
+    fd = [d for d, _ in fx]
+    fv = [v for _, v in fx]
+
+    def at(date):
+        i = bisect.bisect_right(fd, date) - 1
+        return fv[i] if i >= 0 else None
+
+    def kr(i):
+        f = at(ser[i][0])
+        return ser[i][1] * f if f else None
+    n = len(ser)
+    cur = kr(n - 1)
+    out = {}
+    for k, off in (("r1m", 21), ("r3m", 63), ("r12", 252)):
+        if n > off and cur:
+            b = kr(n - 1 - off)
+            out[k] = cur / b - 1 if b else None
+        else:
+            out[k] = None
+    return out
 
 
 def asset_series(conn, code):
