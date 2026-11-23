@@ -698,6 +698,13 @@ def run_market_policy(log=print):
         except Exception as e:
             out["earnings"] = f"실패: {e}"
             log(f"실적 받기 실패: {e}")
+    if env("DART_CONC", "1") != "0":            # 시장 화면 '코스피 쏠림': 시총 상위 종목 비중·변동성 (네이버, 하루 1회)
+        try:
+            import concentration
+            out["concentration"] = concentration.sync(results_db(), log=log)
+        except Exception as e:
+            out["concentration"] = f"실패: {e}"
+            log(f"코스피 쏠림 받기 실패: {e}")
     if env("DART_PICKS", "1") != "0":           # 투자처 탭: 오늘의 단기·중기·장기 선정을 기록해 두고 나중에 성과를 보여 줌
         try:
             ok_, why_ = picks_snapshot()
