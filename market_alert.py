@@ -32,7 +32,26 @@ def vol_state(conn):
     return k, v, r["limit_mult"]
 
 
+import os
+
 NPS = dict(fund=1684.0, dom=419.0, tgt=0.208, saa=0.06, base_date="20260731")
+
+
+def _env_nps():
+    """DART_NPS='기금조,국내주식조,목표%,허용%p,기준일' 로 기본값을 바꿀 수 있다 (예: 1700,430,20.8,6,20261031)"""
+    raw = os.environ.get("DART_NPS", "").strip()
+    if not raw:
+        return
+    try:
+        a = [x.strip() for x in raw.split(",")]
+        NPS.update(fund=float(a[0]), dom=float(a[1]), tgt=float(a[2]) / 100, saa=float(a[3]) / 100)
+        if len(a) > 4 and a[4]:
+            NPS["base_date"] = a[4]
+    except (ValueError, IndexError):
+        pass
+
+
+_env_nps()
 
 
 def nps_levels(base):
@@ -85,3 +104,26 @@ def check(conn):
         step("nps", k, ("국민연금 리밸런싱 구간 진입", txt), ("국민연금 리밸런싱 구간 이탈", txt))
     conn.commit()
     return msgs
+
+
+def brief(conn):
+    """하루 한 번 보낼 시장 요약 (줄 목록). 자료가 없는 항목은 뺀다."""
+    out = []
+    d = dd_state(conn)
+    if d:
+        out.append(f"코스피 1년 고점 대비 {d[1]:+.1%} (기준 {d[2]})")
+    v = vol_state(conn)
+    if v:
+        out.append(f"변동성 {v[1]:.0%} ({VOL_LEVELS[v[0]][1]}) · 평상시 한도의 {v[2]:.0%}")
+    n = nps_state(conn)
+    if n:
+        k, cur, lv = n
+        out.append(f"국민연금 목표 경계 {lv['target']:,.0f} · 하단 경계 {lv['lower']:,.0f} (코스피 {cur:,.0f})")
+    try:
+        import crash_response
+        dg = crash_response.diagnose(conn)
+        if dg:
+            out.append("하락 유형: " + dg["text"].split("’")[0].split("‘")[-1] if "‘" in dg["text"] else "하락 유형: " + dg["text"][:30])
+    except Exception:
+        pass
+    return out

@@ -721,6 +721,27 @@ def run_market_policy(log=print):
         except Exception as e:
             out["market_alert"] = f"실패: {e}"
             log(f"시장 경보 실패: {e}")
+    if env("DART_BRIEF", "0") == "1":           # (선택) 하루 한 번 시장 요약 푸시 — 코스피 낙폭·변동성·국민연금 경계
+        try:
+            import market_alert
+            c_ = sqlite3.connect(results_db())
+            try:
+                c_.execute("CREATE TABLE IF NOT EXISTS mkt_alert_state (key TEXT PRIMARY KEY, state INTEGER, text TEXT, updated TEXT)")
+                last = c_.execute("SELECT updated FROM mkt_alert_state WHERE key='brief'").fetchone()
+                today_ = dt.date.today().isoformat()
+                if not last or last[0] != today_:
+                    lines = market_alert.brief(c_)
+                    if lines:
+                        url = env("DASHBOARD_URL")
+                        notify("오늘의 시장 요약", "\n".join(lines), click=(url.rstrip("/") + "/crash") if url else "", tags=("chart_with_downwards_trend",))
+                    c_.execute("INSERT OR REPLACE INTO mkt_alert_state VALUES ('brief',0,'',?)", (today_,))
+                    c_.commit()
+                    out["brief"] = f"{len(lines)}줄"
+            finally:
+                c_.close()
+        except Exception as e:
+            out["brief"] = f"실패: {e}"
+            log(f"시장 요약 실패: {e}")
     if env("DART_PICKS", "1") != "0":           # 투자처 탭: 오늘의 단기·중기·장기 선정을 기록해 두고 나중에 성과를 보여 줌
         try:
             ok_, why_ = picks_snapshot()
