@@ -1159,6 +1159,42 @@ def _vol_card(conn):
             '</details></div>')
 
 
+def _fresh_card(conn):
+    """자료 기준일: 이 탭의 숫자가 어느 날짜까지의 자료인지 (오래되면 표시)"""
+    import vol_limit as vl
+    import world_markets as wm
+    fmt = lambda d: f"{d[:4]}-{d[4:6]}-{d[6:8]}" if d and len(d) == 8 and d.isdigit() else (d or "")
+    items = []
+    k = vl.kospi(conn)
+    items.append(("코스피 지수", k[-1][0] if k else ""))
+    try:
+        r = conn.execute("SELECT MAX(fetched) FROM world_asset").fetchone()
+        items.append(("해외 ETF", r[0] or ""))
+    except sqlite3.Error:
+        items.append(("해외 ETF", ""))
+    fx = wm.fx_series(conn)
+    items.append(("원/달러 환율", fx[-1][0] if fx else ""))
+    try:
+        r = conn.execute("SELECT value FROM conc_meta WHERE key='synced'").fetchone()
+        items.append(("시총 상위 종목", r[0] if r else ""))
+    except sqlite3.Error:
+        items.append(("시총 상위 종목", ""))
+    today = dt.date.today()
+    out = ""
+    for nm, d in items:
+        d2 = fmt(d)
+        try:
+            age = (today - dt.date.fromisoformat(d2)).days if d2 else None
+        except ValueError:
+            age = None
+        if age is None:
+            out += f'<span class="chip warn">{escape(nm)}: 자료 없음</span> '
+        else:
+            out += f'<span class="chip {"warn" if age > 5 else ""}">{escape(nm)}: {escape(d2)}{" (" + str(age) + "일 전)" if age > 1 else ""}</span> '
+    return ('<div class="card"><b>자료 기준일</b><div style="margin:4px 0">' + out + '</div>'
+            '<div class="muted" style="font-size:11px">5일 넘게 지났거나 없으면 시장 → 해외 증시에서 받기, 또는 지금 수집 → 시장·정책만을 돌려 주세요.</div></div>')
+
+
 def view_crash(conn, q):
     """시장 → 동반 하락 대응: 하락 유형 진단 · 과거 하락에서 자산별 성적 · 분할 매수 규칙 비교 · 먼저 점검할 것"""
     import crash_response as cr
@@ -1233,7 +1269,7 @@ def view_crash(conn, q):
              '<li><b>분할 규칙은 미리 적어 두기</b>: 낙폭 구간마다 어느 만큼 살지 정해 두면 공포 속에서 판단하지 않아도 돼요.</li>'
              '<li><b>하나가 아니라 유형이 다른 자산</b>: 위 2번 표처럼 유형이 바뀌면 방어가 되는 자산도 바뀌어요.</li></ul>'
              '<div class="muted" style="font-size:12px;margin-top:6px">관련 화면: <a href="/cycle">투자 사이클</a> · <a href="/diag">하락 점검</a> · <a href="/ideas?t=picks">투자처(해외·다자산)</a> · <a href="/world">해외 증시 ETF</a></div></div>')
-    return page("동반 하락 대응", intro + _vol_card(conn) + _conc_card(conn) + _nps_card(conn) + diag + past + split + alloc + check)
+    return page("동반 하락 대응", intro + _fresh_card(conn) + _vol_card(conn) + _conc_card(conn) + _nps_card(conn) + diag + past + split + alloc + check)
 
 
 def view_derivs(conn, q):
