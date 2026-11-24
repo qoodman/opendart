@@ -1056,6 +1056,47 @@ def deriv_spark(points):
     return sparkline(points[-120:]) if points and len(points) >= 2 else ""
 
 
+def _nps_card(conn):
+    """시장: 국민연금 국내주식 리밸런싱 구간 계산기 (코스피 수준별 비중, 매수 가능·의무매수 지점, 하루 한도)"""
+    import vol_limit as vl
+    ser = vl.kospi(conn)
+    base = next((v for d, v in reversed(ser) if d <= "20260731"), None)
+    cur = ser[-1][1] if ser else None
+    ym = ser[-1][0][:6] if ser else ""
+    mm = [v for d, v in ser if d[:6] == ym]
+    avg = sum(mm) / len(mm) if mm else None
+    f = lambda x, n=0: "" if x is None else f"{x:.{n}f}"
+    return ('<div class="card"><details><summary><b>국민연금 국내주식 리밸런싱 구간 — 코스피가 얼마면 살 수 있나</b></summary>'
+            '<div class="muted" style="font-size:12px;margin:4px 0">다른 자산 가격은 그대로라고 가정하고 코스피만 움직일 때의 단순 계산이에요. 기본값은 2026년 7월 말 국감 자료를 인용한 블로그 글의 숫자예요 (칸을 고치면 바로 다시 계산해요).</div>'
+            '<div id="nps" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px;font-size:12px">'
+            '<label>기금적립금(조원)<input id="n_fund" type="number" value="1684" style="width:100%"></label>'
+            '<label>국내주식 평가액(조원)<input id="n_dom" type="number" value="419" style="width:100%"></label>'
+            f'<label>그때 코스피(7월 말)<input id="n_base" type="number" value="{f(base) or 6595}" style="width:100%"></label>'
+            '<label>목표비중(%)<input id="n_tgt" type="number" step="0.1" value="20.8" style="width:100%"></label>'
+            '<label>허용범위 SAA(±%p)<input id="n_saa" type="number" step="0.1" value="6" style="width:100%"></label>'
+            '<label>전술범위 TAA(%p)<input id="n_taa" type="number" step="0.1" value="2" style="width:100%"></label>'
+            '<label>하루 한도(bp)<input id="n_bp" type="number" step="0.05" value="1.25" style="width:100%"></label>'
+            f'<label>지금 코스피<input id="n_cur" type="number" value="{f(cur, 0) or 5000}" style="width:100%"></label>'
+            f'<label>이번 달 평균 코스피<input id="n_avg" type="number" value="{f(avg, 0) or 5000}" style="width:100%"></label></div>'
+            '<div id="n_out" style="margin-top:8px;font-size:13px"></div>'
+            '<div class="muted" style="font-size:11px;margin-top:6px">읽는 법: 목표비중 밑에서는 부담 없이 살 수 있는 구간이고, <b>의무매수는 허용범위 하단(목표−SAA)</b> 밑에서 비중의 <b>한 달 평균</b>이 내려갈 때 시작해요. 그 사이는 재량 매수(일반운용)라서 "증시를 받치려고"라는 이유로는 사기 어려워요. '
+            '하루 한도는 기금 × bp로 어림한 값이에요. 숫자는 기사·블로그 추정이고 국민연금 공식 기준이 아니며, 7월 이후 해외주식·환율 변화는 반영하지 않았어요. 투자 권유가 아니에요.</div>'
+            '<script>(function(){var g=function(i){return +document.getElementById(i).value||0};'
+            'function lv(w){var oth=g("n_fund")-g("n_dom");var V=w/(1-w)*oth;return g("n_base")*V/g("n_dom")}'
+            'function wt(k){var V=g("n_dom")*k/g("n_base");return V/(g("n_fund")-g("n_dom")+V)}'
+            'function u(){var t=g("n_tgt")/100,s=g("n_saa")/100,a=g("n_taa")/100,N=function(x){return Math.round(x).toLocaleString()};'
+            'var rows=[["목표비중 "+(t*100).toFixed(1)+"% 아래로 내려가는 코스피 (부담 없이 매수 가능)",lv(t)],["허용범위 상단 "+((t+s)*100).toFixed(1)+"% (이 위면 리밸런싱 매도 대상)",lv(t+s)],["상단+전술 "+((t+s+a)*100).toFixed(1)+"%",lv(t+s+a)],["허용범위 하단 "+((t-s)*100).toFixed(1)+"% (이 아래 월평균이면 의무매수)",lv(t-s)]];'
+            'var h="<table><tr><th>구간</th><th>코스피</th></tr>"+rows.map(function(r){return "<tr><td>"+r[0]+"</td><td><b>"+N(r[1])+"</b></td></tr>"}).join("")+"</table>";'
+            'var wc=wt(g("n_cur")),wa=wt(g("n_avg"));'
+            'var need=(t*(g("n_fund")-g("n_dom")+g("n_dom")*g("n_cur")/g("n_base"))-g("n_dom")*g("n_cur")/g("n_base"))/(1-t);'
+            'var day=g("n_fund")*g("n_bp")/10000;'
+            'h+="<div style=margin-top:6px>지금 코스피 "+N(g("n_cur"))+" 기준 국내주식 비중 <b>"+(wc*100).toFixed(1)+"%</b> · 이번 달 평균 기준 <b>"+(wa*100).toFixed(1)+"%</b> → "+(wa<t-s?"의무매수 구간":wc<t?"목표 밑 (재량 매수 가능, 의무 아님)":wc<=t+s?"허용범위 안 (리밸런싱 없음)":"허용범위 위 (매도 대상)")+"</div>";'
+            'if(wc<t){h+="<div>목표비중까지 채우려면 약 <b>"+Math.max(0,need).toFixed(0)+"조원</b> · 하루 한도 약 <b>"+(day*10000).toFixed(0)+"억원</b>이면 <b>"+Math.ceil(Math.max(0,need)/day)+"거래일</b> 걸려요 (한도만 보면)</div>"}'
+            'document.getElementById("n_out").innerHTML=h}'
+            'document.getElementById("nps").addEventListener("input",u);u()})()</script>'
+            '</details></div>')
+
+
 def _conc_card(conn):
     """시장: 코스피 쏠림 — 상위 종목 비중과 변동성 (두 종목이 지수의 절반이면 분산이 안 돼요)"""
     import concentration as cc
@@ -1192,7 +1233,7 @@ def view_crash(conn, q):
              '<li><b>분할 규칙은 미리 적어 두기</b>: 낙폭 구간마다 어느 만큼 살지 정해 두면 공포 속에서 판단하지 않아도 돼요.</li>'
              '<li><b>하나가 아니라 유형이 다른 자산</b>: 위 2번 표처럼 유형이 바뀌면 방어가 되는 자산도 바뀌어요.</li></ul>'
              '<div class="muted" style="font-size:12px;margin-top:6px">관련 화면: <a href="/cycle">투자 사이클</a> · <a href="/diag">하락 점검</a> · <a href="/ideas?t=picks">투자처(해외·다자산)</a> · <a href="/world">해외 증시 ETF</a></div></div>')
-    return page("동반 하락 대응", intro + _vol_card(conn) + _conc_card(conn) + diag + past + split + alloc + check)
+    return page("동반 하락 대응", intro + _vol_card(conn) + _conc_card(conn) + _nps_card(conn) + diag + past + split + alloc + check)
 
 
 def view_derivs(conn, q):
@@ -1714,7 +1755,7 @@ def view_market(conn):
             + f'<div class="muted">{escape(i.reason)}</div>'
             + sparkline(i.points)
             + (f'<div class="muted" style="font-size:12px">{escape(i.note)}</div>' if i.note else "") + "</div>")
-    return page("시장", hero + cycle_brief_card(conn) + _vol_card(conn) + _conc_card(conn) + events_brief_card(conn) + "".join(cards) + presidents_card(conn))
+    return page("시장", hero + cycle_brief_card(conn) + _vol_card(conn) + _conc_card(conn) + _nps_card(conn) + events_brief_card(conn) + "".join(cards) + presidents_card(conn))
 
 
 def cycle_brief_card(conn):
