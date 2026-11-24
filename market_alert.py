@@ -32,6 +32,27 @@ def vol_state(conn):
     return k, v, r["limit_mult"]
 
 
+NPS = dict(fund=1684.0, dom=419.0, tgt=0.208, saa=0.06, base_date="20260731")
+
+
+def nps_levels(base):
+    """코스피 수준 → 국민연금 국내주식 비중 구간 경계 (다른 자산은 그대로라는 단순 가정)"""
+    oth = NPS["fund"] - NPS["dom"]
+    lv = lambda w: base * (w / (1 - w) * oth) / NPS["dom"]
+    return dict(target=lv(NPS["tgt"]), upper=lv(NPS["tgt"] + NPS["saa"]), lower=lv(NPS["tgt"] - NPS["saa"]))
+
+
+def nps_state(conn):
+    ser = vol_limit.kospi(conn)
+    base = next((v for d, v in reversed(ser) if d <= NPS["base_date"]), None)
+    if not ser or not base:
+        return None
+    lv = nps_levels(base)
+    cur = ser[-1][1]
+    k = (1 if cur < lv["target"] else 0) + (1 if cur < lv["lower"] else 0)
+    return k, cur, lv
+
+
 def check(conn):
     """바뀐 항목의 (제목, 본문) 목록. 처음 보는 상태는 기록만 하고 알리지 않는다 (설치 직후 알림 방지)."""
     ensure(conn)
@@ -56,5 +77,11 @@ def check(conn):
         nm = VOL_LEVELS[k][1]
         txt = f"최근 20거래일 변동성 {vol:.0%} ({nm}) · 평상시 한도의 {mult:.0%}"
         step("vol", k, ("코스피 변동성 단계 상승", txt), ("코스피 변동성 단계 하락", txt))
+    n = nps_state(conn)
+    if n:
+        k, cur, lv = n
+        names = ("목표비중 위", "목표비중 아래 (재량 매수 가능)", "허용범위 하단 아래 (의무매수 구간 후보)")
+        txt = f"코스피 {cur:,.0f} · 국민연금 국내주식 비중 {names[k]} (목표 경계 {lv['target']:,.0f} · 하단 경계 {lv['lower']:,.0f}, 단순 추정)"
+        step("nps", k, ("국민연금 리밸런싱 구간 진입", txt), ("국민연금 리밸런싱 구간 이탈", txt))
     conn.commit()
     return msgs
