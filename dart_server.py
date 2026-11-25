@@ -1047,6 +1047,37 @@ def picks_snapshot():
         conn.close()
 
 
+def foreign_run():
+    """시장 화면의 '외국인 지분 받기': 종목마다 외국인 보유율을 받아 시총 가중으로 시장 전체 외국인 지분을 계산. 별도 프로세스(낮은 우선순위). (성공 여부, 안내)"""
+    import subprocess
+    import legis
+    status = data_dir() / "foreign_status.json"
+    st = legis.read_status(str(status))
+    if st and st.get("running"):
+        return False, "이미 진행 중이에요."
+
+    def lower_priority():
+        try:
+            os.nice(10)
+        except OSError:
+            pass
+    try:
+        logf = open(data_dir() / "foreign.log", "ab")
+        proc = subprocess.Popen([sys.executable, str(ROOT / "dart_server.py"), "foreign-sync"], cwd=str(ROOT), stdout=logf, stderr=subprocess.STDOUT,
+                                start_new_session=True, preexec_fn=lower_priority)
+    except Exception as e:
+        return False, f"시작하지 못했어요: {type(e).__name__}: {str(e)[:100]}"
+    threading.Thread(target=proc.wait, daemon=True).start()
+    return True, "외국인 지분 계산을 시작했어요. 종목이 많아 10분쯤 걸려요."
+
+
+def cmd_foreign_sync(args):
+    """(서버 내부용) foreign_run()이 띄우는 별도 프로세스"""
+    import foreign_total
+    foreign_total.run_job(str(results_db()), str(data_dir() / "foreign_status.json"), log=lambda m: print(m, flush=True))
+    return 0
+
+
 def float_run():
     """품절주 탭의 '유통주식 계산하기': 종목 목록(네이버)과 최대주주 지분·자기주식·5% 보유자(DART)를 별도 프로세스로 받아 계산. (성공 여부, 안내)"""
     import subprocess
@@ -2379,7 +2410,7 @@ def cmd_web(args):
                     update_info=update_info, check_update=check_update, start_update=start_update,
                     backup_list=backup_list, backup_busy=backup_busy, backup_start=backup_start,
                     backup_file=backup_file, krx_key=krx_key_now, save_krx_key=save_krx_key,
-                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, event_action=event_action, legstudy_run=legstudy_run, fin_run=fin_run, world_run=world_run, picks_snapshot=picks_snapshot, dispute_run=dispute_run, float_run=float_run, fin_clue_run=fin_clue_run, fin_action=fin_action, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
+                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, event_action=event_action, legstudy_run=legstudy_run, fin_run=fin_run, world_run=world_run, picks_snapshot=picks_snapshot, dispute_run=dispute_run, float_run=float_run, foreign_run=foreign_run, fin_clue_run=fin_clue_run, fin_action=fin_action, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
     serve(results_db(), host=args.host, port=args.port, child_env=child_env,
           get_key=lambda: read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", ""),
           save_key=save_key, settings_api=settings_api)
@@ -2408,6 +2439,7 @@ def main(argv=None):
     sub.add_parser("dispute-sync", help="(내부용) 지분분쟁 공시 훑기 작업")
     sub.add_parser("fin-clues", help="(내부용) 공시 단서 받기 작업")
     sub.add_parser("float-sync", help="(내부용) 품절주 유통주식 계산 작업")
+    sub.add_parser("foreign-sync", help="(내부용) 시장 전체 외국인 지분 계산 작업")
     sub.add_parser("update", help="최신 코드 받아 설치")
     sub.add_parser("net-check")
     sub.add_parser("notify-test")
@@ -2424,7 +2456,7 @@ def main(argv=None):
     _enable_wal()
     return {"run": cmd_run, "web": cmd_web, "net-check": cmd_net_check, "notify-test": cmd_notify_test,
             "status": cmd_status, "set-env": cmd_set_env, "hk-check": cmd_hk_check, "reports-check": cmd_hk_check, "market-check": cmd_market_check, "parse-check": cmd_parse_check,
-            "tick": cmd_tick, "update": cmd_update, "legis-prepare": cmd_legis_prepare, "legis-study": cmd_legis_study, "fin-analyze": cmd_fin_analyze, "world-sync": cmd_world_sync, "dispute-sync": cmd_dispute_sync, "float-sync": cmd_float_sync, "fin-clues": cmd_fin_clues}[a.cmd](a)
+            "tick": cmd_tick, "update": cmd_update, "legis-prepare": cmd_legis_prepare, "legis-study": cmd_legis_study, "fin-analyze": cmd_fin_analyze, "world-sync": cmd_world_sync, "dispute-sync": cmd_dispute_sync, "float-sync": cmd_float_sync, "foreign-sync": cmd_foreign_sync, "fin-clues": cmd_fin_clues}[a.cmd](a)
 
 
 if __name__ == "__main__":

@@ -1104,6 +1104,40 @@ def _nps_card(conn):
             '</details></div>')
 
 
+def _foreign_card(conn, q=None):
+    """시장: 한국 시장 전체 외국인 지분 (종목별 외국인 보유율을 시가총액으로 가중)"""
+    import foreign_total as ft
+    import legis as lg
+    d = Path(_DATA_DIR["path"] or ".")
+    st = lg.read_status(str(d / "foreign_status.json"))
+    running = bool(st and st.get("running"))
+    msg = (q or {}).get("fmsg", "")
+    flash = f'<div class="muted" style="font-size:12px;margin:4px 0">{escape(msg)}</div>' if msg else ""
+    data = ft.load(conn)
+    btn = ('<form method="post" action="/foreign/run" class="filters" style="margin:6px 0 0">'
+           f'<button{" disabled" if running else ""}>{"진행 중…" if running else ("외국인 지분 새로 받기" if data else "외국인 지분 받기")}</button>'
+           '<span class="muted" style="font-size:12px">종목 2천여 개를 하나씩 받아 10분쯤 걸려요(별도 프로세스·키 불필요). 받은 날마다 스냅샷이 쌓여 추이를 볼 수 있어요.</span></form>' + status_steps_html(st, running))
+    if not data:
+        return ('<div class="card"><b>한국 시장 전체 외국인 지분</b><div class="muted" style="font-size:13px">아직 자료가 없어요. 아래 버튼으로 받아 주세요.</div>' + flash + btn + '</div>')
+    allh = data["hist"].get("ALL") or []
+    cur = allh[-1]
+    prev = allh[-2] if len(allh) >= 2 else None
+    chg = lambda key: (lambda h: None if len(h) < 2 or h[-1]["ratio"] is None or h[-2]["ratio"] is None else h[-1]["ratio"] - h[-2]["ratio"])(data["hist"].get(key) or [])
+    fmt = lambda key, lab: (lambda h: f'<span class="chip" style="font-size:12px">{lab} <b>{h[-1]["ratio"]:.2f}%</b>' + (f' ({chg(key):+.2f}%p)' if chg(key) is not None else "") + '</span>' if h and h[-1]["ratio"] is not None else "")(data["hist"].get(key) or [])
+    trs = "".join(f'<tr><td>{escape(n)}<br><span class="muted" style="font-size:11px">{escape(c)} · {escape(m)}</span></td><td>{mc / 10000:,.1f}조</td><td><b>{r:.1f}%</b></td><td>{mc * r / 100 / 10000:,.1f}조</td></tr>' for c, n, m, mc, r in data["top"])
+    graph = ""
+    if len(allh) >= 2:
+        graph = line_chart([dict(name="전체 외국인 지분(%)", pts=[(h["date"], round(h["ratio"], 2)) for h in allh if h["ratio"] is not None], color="s1")], yfmt="{:.1f}%")
+    return ('<div class="card"><details open><summary><b>한국 시장 전체 외국인 지분</b></summary>'
+            f'<div style="margin:6px 0"><span class="big" style="font-size:26px;font-weight:700">{cur["ratio"]:.2f}%</span> <span class="muted">코스피+코스닥 보통주 시가총액 가중 · 기준 {escape(cur["date"])}</span>'
+            + (f' <span class="chip {"down" if cur["ratio"] < prev["ratio"] else "up"}">전 스냅샷({escape(prev["date"])}) 대비 {cur["ratio"] - prev["ratio"]:+.2f}%p</span>' if prev and prev["ratio"] is not None else "") + '</div>'
+            f'<div>{fmt("KOSPI", "코스피")} {fmt("KOSDAQ", "코스닥")} <span class="chip" style="font-size:12px">외국인 보유 시총 <b>{cur["fvalue"] / 10000:,.0f}조</b> / 전체 {cur["mcap"] / 10000:,.0f}조</span></div>'
+            + graph
+            + f'<div class="scroll"><table><tr><th>외국인 보유 시총 상위</th><th>시총</th><th>외국인 보유율</th><th>외국인 보유 시총</th></tr>{trs}</table></div>'
+            f'<div class="muted" style="font-size:11px;margin-top:4px">종목 {cur["n"]:,}개 · 전체 시총의 {cur["cov"]:.0%} 커버. 네이버 증권 외국인 보유율을 시가총액으로 가중해 계산한 값이라 금융감독원·거래소가 발표하는 공식 통계(우선주·ETF 포함 여부 등)와 조금 달라요. '
+            '스냅샷은 받은 날 기준이고, 보유율은 직전 거래일 값일 수 있어요.</div>' + flash + btn + '</details></div>')
+
+
 def _conc_card(conn):
     """시장: 코스피 쏠림 — 상위 종목 비중과 변동성 (두 종목이 지수의 절반이면 분산이 안 돼요)"""
     import concentration as cc
@@ -1360,7 +1394,7 @@ def view_crash(conn, q):
              '<li><b>분할 규칙은 미리 적어 두기</b>: 낙폭 구간마다 어느 만큼 살지 정해 두면 공포 속에서 판단하지 않아도 돼요.</li>'
              '<li><b>하나가 아니라 유형이 다른 자산</b>: 위 2번 표처럼 유형이 바뀌면 방어가 되는 자산도 바뀌어요.</li></ul>'
              '<div class="muted" style="font-size:12px;margin-top:6px">관련 화면: <a href="/cycle">투자 사이클</a> · <a href="/diag">하락 점검</a> · <a href="/ideas?t=picks">투자처(해외·다자산)</a> · <a href="/world">해외 증시 ETF</a></div></div>')
-    return page("동반 하락 대응", intro + _fresh_card(conn) + _vol_card(conn) + _conc_card(conn) + _nps_card(conn) + diag + past + _stress_card(conn) + split + _plan_card(conn) + alloc + check)
+    return page("동반 하락 대응", intro + _fresh_card(conn) + _vol_card(conn) + _foreign_card(conn, q) + _conc_card(conn) + _nps_card(conn) + diag + past + _stress_card(conn) + split + _plan_card(conn) + alloc + check)
 
 
 def view_derivs(conn, q):
@@ -1855,7 +1889,7 @@ def view_check(conn, st):
 SIGNAL_TXT = {1: ("+1 우호", "up"), 0: ("0 중립", ""), -1: ("−1 부담", "down")}
 
 
-def view_market(conn):
+def view_market(conn, q_=None):
     import stock_market
     inds = stock_market.indicators(conn)
     name, score, n = stock_market.regime(inds)
@@ -1882,7 +1916,7 @@ def view_market(conn):
             + f'<div class="muted">{escape(i.reason)}</div>'
             + sparkline(i.points)
             + (f'<div class="muted" style="font-size:12px">{escape(i.note)}</div>' if i.note else "") + "</div>")
-    return page("시장", hero + cycle_brief_card(conn) + _vol_card(conn) + _conc_card(conn) + _nps_card(conn) + events_brief_card(conn) + "".join(cards) + presidents_card(conn))
+    return page("시장", hero + cycle_brief_card(conn) + _vol_card(conn) + _foreign_card(conn, q_) + _conc_card(conn) + _nps_card(conn) + events_brief_card(conn) + "".join(cards) + presidents_card(conn))
 
 
 def cycle_brief_card(conn):
@@ -8066,7 +8100,7 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 elif url.path == "/calendar":
                     body = view_calendar(conn, q)
                 elif url.path == "/market":
-                    body = view_market(conn)
+                    body = view_market(conn, q)
                 elif url.path == "/policy":
                     body = view_policy(conn, q)
                 elif url.path == "/reports":
@@ -8313,6 +8347,12 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 S = settings()
                 ok, why = S["picks_snapshot"]() if "picks_snapshot" in S else (False, "이 서버 버전은 지원하지 않아요")
                 return self._redirect("/ideas?" + urlencode({"t": "picks", "msg": ("✔ " if ok else "✖ ") + why}))
+            if path == "/foreign/run" and settings_api:
+                n = min(int(self.headers.get("Content-Length") or 0), 4096)
+                self.rfile.read(n)
+                S = settings()
+                ok, why = S["foreign_run"]() if "foreign_run" in S else (False, "이 서버 버전은 지원하지 않아요")
+                return self._redirect("/market?" + urlencode({"fmsg": ("✔ " if ok else "✖ ") + why}))
             if path == "/float/run" and settings_api:
                 n = min(int(self.headers.get("Content-Length") or 0), 4096)
                 self.rfile.read(n)
