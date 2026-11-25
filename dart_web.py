@@ -4741,7 +4741,10 @@ def _dsp_detail(conn, s_, code):
             rows += f'<tr style="background:var(--chip)"><td><b>최대주주 및 특수관계인 합계</b></td><td><b>{sc["holder_pct"]:.2f}%</b></td><td>-</td><td class="muted">연말 사업보고서 기준</td><td></td></tr>'
         for h in sorted(sc["ext"], key=lambda h: -h["pct"]):
             chg_t = "" if h.get("chg") is None else format(h["chg"], "+.2f") + "%p"
-            rows += (f'<tr><td>{escape(h["name"])}{" 🎯" if h.get("activist") else ""}</td><td>{h["pct"]:.2f}%</td><td>{escape(h.get("tp") or "")}</td><td class="muted" style="font-size:12px">{escape(h.get("date") or "")} {escape(h.get("resn") or "")}</td>'
+            sh_ = h.get("shift") or ""
+            sh_t = (f' <span class="chip down" style="font-size:10px" title="약식(단순투자) 보고 뒤 일반(경영참여) 보고를 낸 이력">단순투자→경영참여 {escape(sh_[:4])}-{escape(sh_[4:6])}-{escape(sh_[6:])}</span>' if len(sh_) == 8 else
+                    (f' <span class="chip" style="font-size:10px" title="약식(단순투자) 보고로 지분을 늘려 가는 중">단순투자로 {h.get("first_pct") or 0:.1f}%→{h["pct"]:.1f}%</span>' if h.get("tp") == "약식" and (h.get("grow") or 0) >= 2.0 else ""))
+            rows += (f'<tr><td>{escape(h["name"])}{" 🎯" if h.get("activist") else ""}{sh_t}</td><td>{h["pct"]:.2f}%</td><td>{escape(h.get("tp") or "")}</td><td class="muted" style="font-size:12px">{escape(h.get("date") or "")} {escape(h.get("resn") or "")}</td>'
                      f'<td>{chg_t}</td></tr>')
         why = "".join(f'<li>{escape(r)}</li>' for r in sc.get("reasons") or [])
         hold_card = ('<div class="card"><b>지분 구조</b>' + (f'<div class="scroll"><table><tr><th>보유자</th><th>지분율</th><th>보고 종류</th><th>마지막 보고</th><th>직전 대비</th></tr>{rows}</table></div>' if rows else "")
@@ -4757,7 +4760,7 @@ def _dsp_detail(conn, s_, code):
              '<li><b>🗳 주주측 위임장 권유</b>: 주총에서 표를 모으려는 준비예요. 보통 주총 몇 주 전에 나오고, 안건(이사 선임·정관 변경)을 참고서류에서 확인하세요.</li>'
              '<li><b>⚖ 가처분·소송</b>: 신주발행·의결권 행사·주총 개최를 법원에서 막거나 허용받으려는 싸움이에요. 결정 날짜가 분수령이 되는 경우가 많아요.</li>'
              '<li><b>👑 최대주주 변경 / 📈 지분 변동</b>: 지분 격차가 작으면 몇 %p 차로 주도권이 바뀌어요. 시간외 대량 매수, 우호 지분(자사주·제3자 배정·백기사)이 이어지는지 보세요.</li>'
-             '<li><b>🎯 경영참여 5% 보유</b>: 단순 투자가 아니라 경영에 영향을 주려는 목적으로 신고한 보유자예요. 보유 목적이 바뀌는 보고는 분쟁의 신호탄인 경우가 많아요.</li>'
+             '<li><b>🎯 경영참여 5% 보유</b>: 단순 투자가 아니라 경영에 영향을 주려는 목적으로 신고한 보유자예요. 보유 목적이 바뀌는 보고는 분쟁의 신호탄인 경우가 많아요.</li><li><b>단순투자 → 경영참여 전환</b>: 분쟁 초기에는 단순투자(약식 보고)로 지분을 모으다가 어느 시점에 경영참여(일반 보고)로 목적을 바꾸는 경우가 많아요. 같은 보유자가 약식 뒤에 일반 보고를 낸 이력이 있으면 점수를 더하고, 약식 상태로 지분을 늘려 가는 보유자는 따로 표시해요.</li>'
              '<li><b>캐스팅보트</b>: 산업은행·국민연금 같은 큰 기관의 지분과 입장이 승패를 가르기도 해요 (국민연금은 단순투자 보고로 이 화면의 5% 목록에 보여요).</li></ul></div>')
     return head + meet_card + _dsp_price_card(conn, code, pl.get("events") or []) + prox_card + tl_card + hold_card + guide
 

@@ -257,6 +257,23 @@ def structure_score(holder_pct, ext_holders, pbr=None):
     if act:
         score += 2
         reasons.append("행동주의 성향 보유자: " + ", ".join(h["name"] for h in act[:3]))
+    today_ = dt.date.today()
+    sh = []
+    for h in ext:
+        d = h.get("shift") or ""
+        if len(d) == 8 and d.isdigit():
+            try:
+                if (today_ - dt.date(int(d[:4]), int(d[4:6]), int(d[6:]))).days <= 365:
+                    sh.append((h, d))
+            except ValueError:
+                pass
+    if sh:
+        score += 3
+        reasons.append("단순투자(약식)로 지분을 모으다 경영참여(일반)로 목적을 바꾼 보유자: " + ", ".join(f"{h['name']} {h['pct']:.1f}% ({d[:4]}-{d[4:6]}-{d[6:]})" for h, d in sh[:3]))
+    sim = [h for h in ext if h.get("tp") == "약식" and (h.get("grow") or 0) >= 2.0 and ((h.get("activist")) or h["pct"] >= 7)]
+    if sim:
+        score += 1
+        reasons.append("단순투자(약식)로 지분을 늘려 가는 보유자 — 나중에 경영참여로 바꿀 수 있어요: " + ", ".join(f"{h['name']} {h.get('first_pct') or 0:.1f}%→{h['pct']:.1f}%" for h in sim[:3]))
     inc = [h for h in ext if (h.get("chg") or 0) >= 0.5]
     if inc:
         score += 1
@@ -442,6 +459,12 @@ def fetch_structure(code, corp, key, today=None, session=None):
         holder_pct = sum(_num(r.get("trmend_posesn_stock_qota_rt")) or 0 for r in hy) or None
     ms = call("majorstock.json")
     latest = {}
+    hist = {}
+    for r in sorted(ms, key=lambda r: r.get("rcept_dt") or ""):
+        who = (r.get("repror") or "").strip()
+        if who and not is_insider(who, names):
+            tp0 = "일반" if "일반" in (r.get("report_tp") or "") else "약식" if "약식" in (r.get("report_tp") or "") else ""
+            hist.setdefault(who, []).append((r.get("rcept_dt") or "", tp0, _num(r.get("stkrt")), (r.get("report_resn") or "")))
     for r in ms:
         who = (r.get("repror") or "").strip()
         d = r.get("rcept_dt") or ""
@@ -451,7 +474,29 @@ def fetch_structure(code, corp, key, today=None, session=None):
             latest[who] = dict(name=who, pct=_num(r.get("stkrt")), chg=_num(r.get("stkrt_irds")), tp=("일반" if "일반" in (r.get("report_tp") or "") else "약식" if "약식" in (r.get("report_tp") or "") else ""),
                                date=d, resn=(r.get("report_resn") or "")[:40], activist=_is_activist(who))
     ext = [h for h in latest.values() if h["pct"] and h["pct"] >= 5]
+    for h in ext:
+        h.update(purpose_shift(hist.get(h["name"], [])))
     return holder_pct, ext, sorted(names)
+
+
+def purpose_shift(rows):
+    """한 보고자의 보고 이력 [(날짜, 일반/약식, 지분율, 사유)] → dict(shift=단순투자→경영참여 전환 날짜 또는 '', first_pct, grow(%p))
+    처음엔 단순투자(약식)로 지분을 모으다 나중에 경영참여(일반)로 바꾸는 흐름을 잡는다."""
+    rows = sorted(rows, key=lambda r: r[0])
+    shift, seen_simple = "", False
+    for d, tp, pct, resn in rows:
+        if tp == "약식":
+            seen_simple = True
+        elif tp == "일반" and seen_simple:
+            shift = d                      # 약식 보고 뒤에 처음 나온 일반 보고 = 보유 목적을 경영참여로 바꾼 때
+            break
+    if not shift:                          # 사유에 '보유목적' 변경이 적힌 일반 보고
+        for d, tp, pct, resn in rows:
+            if tp == "일반" and "목적" in (resn or ""):
+                shift = d
+                break
+    pcts = [r[2] for r in rows if r[2]]
+    return dict(shift=shift, first_pct=pcts[0] if pcts else None, grow=(pcts[-1] - pcts[0]) if len(pcts) >= 2 else 0.0, n_rep=len(rows))
 
 
 def _num(v):
