@@ -1078,6 +1078,30 @@ def cmd_foreign_sync(args):
     return 0
 
 
+def dispute_tag(form):
+    """지분분쟁 종목 상세에서 보유자의 역할(우호·중립·도전자)을 직접 정하기. role이 비어 있으면 해제. (성공 여부, 안내)"""
+    import dispute
+    code = (form.get("code") or "").strip()
+    name = (form.get("name") or "").strip()[:80]
+    role = (form.get("role") or "").strip()
+    if not re.fullmatch(r"\d{6}", code) or not name:
+        return False, "종목이나 보유자를 알 수 없어요."
+    if role not in ("", "ally", "neutral", "challenger"):
+        return False, "알 수 없는 역할이에요."
+    conn = sqlite3.connect(results_db())
+    try:
+        dispute.ensure(conn)
+        if role:
+            conn.execute("INSERT OR REPLACE INTO dispute_tag VALUES (?,?,?,?)", (code, name, role, dt.date.today().isoformat()))
+        else:
+            conn.execute("DELETE FROM dispute_tag WHERE code=? AND name=?", (code, name))
+        conn.commit()
+    finally:
+        conn.close()
+    lab = {"ally": "우호", "neutral": "중립(캐스팅보트)", "challenger": "도전자", "": "자동 판단"}[role]
+    return True, f"{name}을(를) {lab}(으)로 정했어요. 다음 '지분분쟁 분석'부터 반영돼요."
+
+
 def float_run():
     """품절주 탭의 '유통주식 계산하기': 종목 목록(네이버)과 최대주주 지분·자기주식·5% 보유자(DART)를 별도 프로세스로 받아 계산. (성공 여부, 안내)"""
     import subprocess
@@ -2410,7 +2434,7 @@ def cmd_web(args):
                     update_info=update_info, check_update=check_update, start_update=start_update,
                     backup_list=backup_list, backup_busy=backup_busy, backup_start=backup_start,
                     backup_file=backup_file, krx_key=krx_key_now, save_krx_key=save_krx_key,
-                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, event_action=event_action, legstudy_run=legstudy_run, fin_run=fin_run, world_run=world_run, picks_snapshot=picks_snapshot, dispute_run=dispute_run, float_run=float_run, foreign_run=foreign_run, fin_clue_run=fin_clue_run, fin_action=fin_action, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
+                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, event_action=event_action, legstudy_run=legstudy_run, fin_run=fin_run, world_run=world_run, picks_snapshot=picks_snapshot, dispute_run=dispute_run, dispute_tag=dispute_tag, float_run=float_run, foreign_run=foreign_run, fin_clue_run=fin_clue_run, fin_action=fin_action, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
     serve(results_db(), host=args.host, port=args.port, child_env=child_env,
           get_key=lambda: read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", ""),
           save_key=save_key, settings_api=settings_api)

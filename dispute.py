@@ -45,6 +45,7 @@ def ensure(conn):
     CREATE TABLE IF NOT EXISTS dispute_state (code TEXT PRIMARY KEY, name TEXT, level TEXT, score REAL, payload TEXT, updated TEXT, prev_level TEXT, alerted TEXT);
     CREATE TABLE IF NOT EXISTS dispute_holder (code TEXT, reporter TEXT, pct REAL, tp TEXT, date TEXT, resn TEXT, PRIMARY KEY (code, reporter));
     CREATE TABLE IF NOT EXISTS dispute_meta (key TEXT PRIMARY KEY, value TEXT);
+    CREATE TABLE IF NOT EXISTS dispute_tag (code TEXT, name TEXT, role TEXT, updated TEXT, PRIMARY KEY (code, name));
     CREATE TABLE IF NOT EXISTS dispute_struct (code TEXT PRIMARY KEY, fetched TEXT, hp REAL, ext TEXT, insiders TEXT);
     """)
     try:
@@ -276,12 +277,22 @@ def is_neutral_inst(name):
     return any(f.upper() in u for f in FOREIGN_PASSIVE)
 
 
+def _neutral(h):
+    """보유자 한 명이 중립(캐스팅보트)인가: 내가 정한 역할이 있으면 그것을 따르고, 없으면 이름으로 판단"""
+    role = h.get("role")
+    if role == "challenger":
+        return False
+    if role == "neutral":
+        return True
+    return is_neutral_inst(h.get("name"))
+
+
 def contestable(holder_pct, ext_holders):
     """외부 보유자가 최대주주 측(우호 지분 포함)의 경영권을 실제로 흔들 만한가. 5% 이상 가졌다는 것만으로는 분쟁이 아니라서,
     최대주주 측 지분이 충분히 적고 도전자 지분이 그에 견줄 만할 때만 True:
     ① 격차 10%p 이내  ② 도전자 지분이 최대주주 측의 절반 이상  ③ 경영참여·행동주의 도전자가 격차 15%p 이내이거나 최대주주 측의 35% 이상
     ④ 도전자들을 합치면 최대주주 측의 70% 이상 (둘 이상일 때)"""
-    ch = sorted([h for h in ext_holders if h.get("pct") and not is_neutral_inst(h.get("name"))], key=lambda h: -h["pct"])
+    ch = sorted([h for h in ext_holders if h.get("pct") and not _neutral(h)], key=lambda h: -h["pct"])
     if holder_pct is None or not ch or holder_pct <= 0:
         return False
     top = ch[0]
@@ -301,7 +312,7 @@ def structure_score(holder_pct, ext_holders, pbr=None):
     reasons, score = [], 0
     gap = None
     # 맞서는 쪽(도전자)은 공적 기관(국민연금·산업은행 등)을 뺀 5% 보유자. 공적 기관은 분쟁 당사자가 아니라 캐스팅보트로만 봄
-    ext = sorted([h for h in ext_holders if h.get("pct") and not is_neutral_inst(h.get("name"))], key=lambda h: -h["pct"])
+    ext = sorted([h for h in ext_holders if h.get("pct") and not _neutral(h)], key=lambda h: -h["pct"])
     if not ext:                # 맞서는 쪽(공적 기관 제외 5% 보유자)이 없으면 분쟁 구조가 아님 — 지분율이 낮다는 이유만으로 가능성을 매기지 않음
         return dict(score=0, reasons=[], gap=None)
     if not contestable(holder_pct, ext):      # 5% 이상 보유자가 있어도 최대주주 측과 격차가 크면 경영권 분쟁으로 보지 않음 (예: 행동주의 펀드 6% vs 최대주주 측 45%)
@@ -369,7 +380,7 @@ def swing_holders(holder_pct, ext):
     격차가 작을수록 제3자의 한 표가 승패를 가르므로, 격차보다 지분이 큰 보유자를 캐스팅보트로 봐요."""
     if holder_pct is None or not ext:
         return []
-    ch = [h for h in ext if not is_neutral_inst(h.get("name"))]
+    ch = [h for h in ext if not _neutral(h)]
     if not ch:                 # 맞서는 쪽이 없으면 캐스팅보트도 없음
         return []
     gen = sorted([h for h in ch if h.get("tp") == "일반" and h.get("pct")], key=lambda h: -h["pct"])
@@ -379,7 +390,7 @@ def swing_holders(holder_pct, ext):
     for h in ext:
         if h["name"] == top["name"] or not h.get("pct"):
             continue
-        neutral = is_neutral_inst(h["name"])
+        neutral = _neutral(h)
         decisive = h["pct"] >= max(gap, 3.0)
         if decisive or (neutral and h["pct"] >= 5):          # 공적 기관은 지분이 격차보다 작아도 표를 쥔 캐스팅보트 후보로 보여 줌
             out.append(dict(name=h["name"], pct=h["pct"], inst=neutral, gap=gap, tp=h.get("tp"), decisive=decisive))
@@ -675,6 +686,9 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
         pass
     if key:
         cached = {r[0]: r for r in conn.execute("SELECT code, fetched, hp, ext, insiders, ally FROM dispute_struct")}
+        tags = {}
+        for tc, tn, tr in conn.execute("SELECT code, name, role FROM dispute_tag"):
+            tags.setdefault(tc, {})[norm_name(tn)] = tr
         ttl = (today - dt.timedelta(days=STRUCT_TTL_DAYS)).isoformat()
         n_fetch = 0
         for i, code in enumerate(cand):
@@ -697,13 +711,27 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
                     continue
                 conn.execute("INSERT OR REPLACE INTO dispute_struct (code, fetched, hp, ext, insiders, ally) VALUES (?,?,?,?,?,?)", (code, today.isoformat(), hp, json.dumps(ext, ensure_ascii=False), json.dumps(insiders, ensure_ascii=False), ally))
                 time.sleep(0.15)
+            # 내가 정한 역할(우호·중립·도전자)을 반영: 우호는 우호 지분에 더하고, 중립은 캐스팅보트로만, 도전자는 공적 기관이라도 도전자로 봄
+            mine = tags.get(code) or {}
+            if mine:
+                ext2, ally2 = [], ally or 0.0
+                for h in ext:
+                    role = mine.get(norm_name(h["name"]))
+                    if role == "ally":
+                        ally2 += h.get("pct") or 0.0
+                        continue
+                    if role:
+                        h = dict(h, role=role)
+                    ext2.append(h)
+                ext, ally = ext2, ally2
             hp_eff = (hp + ally) if (hp is not None and ally) else hp          # 최대주주 측 + 계열·우호 회사 5% 보유분 = 우호 지분
             st_ = structure_score(hp_eff, ext, pbr.get(code))
             states[code]["struct"] = dict(holder_pct=hp, ally_pct=ally or 0.0, friendly_pct=hp_eff, ext=ext, swing=swing_holders(hp_eff, ext), insiders=insiders[:12], **st_)
             # 공시한 쪽이 최대주주 측이면(지주사·계열사 포함) 분쟁 신호에서 뺌: 일반 5% 보고·외부 권유·주주제안·공개매수
             keep, dropped = [], []
             for e in by[code]:
-                if e["kind"] in ("blk_gen", "proxy_ext", "proposal", "tender") and (is_insider(e.get("flr"), insiders) or is_group_affiliate(e.get("flr"), names.get(code, ""), insiders)):
+                if e["kind"] in ("blk_gen", "proxy_ext", "proposal", "tender") and (is_insider(e.get("flr"), insiders) or is_group_affiliate(e.get("flr"), names.get(code, ""), insiders)
+                                                                                   or (mine.get(norm_name(e.get("flr"))) in ("ally", "neutral"))):
                     dropped.append(e)
                 else:
                     keep.append(e)

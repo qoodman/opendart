@@ -4926,15 +4926,22 @@ def _dsp_detail(conn, s_, code):
             rows += f'<tr style="background:var(--chip)"><td><b>최대주주 및 특수관계인 합계</b></td><td><b>{sc["holder_pct"]:.2f}%</b></td><td>-</td><td class="muted">연말 사업보고서 기준</td><td></td></tr>'
             if sc.get("ally_pct"):
                 rows += f'<tr style="background:var(--chip)"><td><b>+ 계열·우호 회사 5% 보유분</b></td><td><b>+{sc["ally_pct"]:.2f}%</b></td><td>-</td><td class="muted">우호 지분 합계 {sc.get("friendly_pct", 0):.2f}%</td><td></td></tr>'
+        try:
+            my_tags = {r[0]: r[1] for r in conn.execute("SELECT name, role FROM dispute_tag WHERE code=?", (code,))}
+        except sqlite3.Error:
+            my_tags = {}
+        role_form = lambda nm: ('<form method="post" action="/dispute/tag" style="margin:0"><input type="hidden" name="code" value="%s"><input type="hidden" name="name" value="%s">'
+                                '<select name="role" onchange="this.form.submit()" style="font-size:11px">%s</select></form>') % (
+            escape(code), escape(nm), "".join(f'<option value="{v}"{" selected" if my_tags.get(nm, "") == v else ""}>{lab}</option>' for v, lab in (("", "자동"), ("ally", "우호"), ("neutral", "중립"), ("challenger", "도전자"))))
         for h in sorted(sc["ext"], key=lambda h: -h["pct"]):
             chg_t = "" if h.get("chg") is None else format(h["chg"], "+.2f") + "%p"
             sh_ = h.get("shift") or ""
             sh_t = (f' <span class="chip down" style="font-size:10px" title="약식(단순투자) 보고 뒤 일반(경영참여) 보고를 낸 이력">단순투자→경영참여 {escape(sh_[:4])}-{escape(sh_[4:6])}-{escape(sh_[6:])}</span>' if len(sh_) == 8 else
                     (f' <span class="chip" style="font-size:10px" title="약식(단순투자) 보고로 지분을 늘려 가는 중">단순투자로 {h.get("first_pct") or 0:.1f}%→{h["pct"]:.1f}%</span>' if h.get("tp") == "약식" and (h.get("grow") or 0) >= 2.0 else ""))
             rows += (f'<tr><td>{escape(h["name"])}{" 🎯" if h.get("activist") else ""}{sh_t}</td><td>{h["pct"]:.2f}%</td><td>{escape(h.get("tp") or "")}</td><td class="muted" style="font-size:12px">{escape(h.get("date") or "")} {escape(h.get("resn") or "")}</td>'
-                     f'<td>{chg_t}</td></tr>')
+                     f'<td>{chg_t}</td><td>{role_form(h["name"])}</td></tr>')
         why = "".join(f'<li>{escape(r)}</li>' for r in sc.get("reasons") or [])
-        hold_card = ('<div class="card"><b>지분 구조</b>' + (f'<div class="scroll"><table><tr><th>보유자</th><th>지분율</th><th>보고 종류</th><th>마지막 보고</th><th>직전 대비</th></tr>{rows}</table></div>' if rows else "")
+        hold_card = ('<div class="card"><b>지분 구조</b>' + (f'<div class="scroll"><table><tr><th>보유자</th><th>지분율</th><th>보고 종류</th><th>마지막 보고</th><th>직전 대비</th><th>내 판단</th></tr>{rows}</table></div>' if rows else "")
                      + (f'<div style="margin-top:6px;font-size:13px"><b>분쟁 가능성 근거</b> (구조 점수 {sc.get("score", 0)})<ul style="padding-left:18px;margin:4px 0">{why}</ul></div>' if why else "")
                      + ('<div style="margin-top:6px;font-size:13px"><b>🎚 캐스팅보트</b> — 두 쪽의 격차(' + f'{sc["swing"][0]["gap"]:.1f}%p' + ')보다 지분이 커서 표가 갈리면 승패를 가를 수 있는 보유자<ul style="padding-left:18px;margin:4px 0">'
                         + "".join(f'<li><b>{escape(x["name"])}</b> {x["pct"]:.1f}%' + (" (공적 기관 — 분쟁 당사자가 아니라 표를 쥔 쪽이에요. 의결권 행사 입장은 공개되거나 보도되는 경우가 많아요)" if x.get("inst") else "") + ("" if x.get("decisive", True) else " · 지분이 격차보다 작아 단독으론 승패를 못 가르지만 표를 보태요") + '</li>' for x in sc["swing"][:5]) + '</ul></div>' if sc.get("swing") else "")
@@ -4948,7 +4955,14 @@ def _dsp_detail(conn, s_, code):
              '<li><b>👑 최대주주 변경 / 📈 지분 변동</b>: 지분 격차가 작으면 몇 %p 차로 주도권이 바뀌어요. 시간외 대량 매수, 우호 지분(자사주·제3자 배정·백기사)이 이어지는지 보세요.</li>'
              '<li><b>🎯 경영참여 5% 보유</b>: 단순 투자가 아니라 경영에 영향을 주려는 목적으로 신고한 보유자예요. 보유 목적이 바뀌는 보고는 분쟁의 신호탄인 경우가 많아요.</li><li><b>단순투자 → 경영참여 전환</b>: 분쟁 초기에는 단순투자(약식 보고)로 지분을 모으다가 어느 시점에 경영참여(일반 보고)로 목적을 바꾸는 경우가 많아요. 같은 보유자가 약식 뒤에 일반 보고를 낸 이력이 있으면 점수를 더하고, 약식 상태로 지분을 늘려 가는 보유자는 따로 표시해요.</li>'
              '<li><b>캐스팅보트</b>: 산업은행·국민연금 같은 큰 기관의 지분과 입장이 승패를 가르기도 해요 (국민연금은 단순투자 보고로 이 화면의 5% 목록에 보여요).</li></ul></div>')
-    return head + meet_card + _dsp_price_card(conn, code, pl.get("events") or []) + prox_card + tl_card + hold_card + guide
+    today_ = dt.date.today()
+    rec = dt.date(today_.year, 12, 31)
+    if rec < today_:
+        rec = dt.date(today_.year + 1, 12, 31)
+    rec_card = ('<div class="card"><b>⏳ 의결권 기준일 (12월 결산 기준)</b><div style="margin:4px 0">정기주총 의결권 기준일 <b>%s</b> · <b>D-%d</b></div>'
+                '<div class="muted" style="font-size:12px">정기주총에서 이사 선임 등으로 승부를 보려면 보통 결산일(12월 결산이면 12월 31일) 주주명부에 올라 있어야 의결권을 가져요. 그래서 분쟁 당사자들은 이 날짜 전에 지분을 확보하려고 해요 '
+                '(결산월이 다르거나 임시주총이면 기준일이 달라요 — 주주총회 소집 공고·기준일 공고로 확인하세요). 신주 발행·자기주식의 복지기금 출연처럼 의결권이 되살아나는 방어책도 이 일정을 보고 나와요.</div></div>') % (rec.isoformat(), (rec - today_).days)
+    return head + meet_card + rec_card + _dsp_price_card(conn, code, pl.get("events") or []) + prox_card + tl_card + hold_card + guide
 
 
 _PICKS = {"t": 0.0, "v": None}
@@ -8361,6 +8375,12 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 S = settings()
                 ok, why = S["float_run"]() if "float_run" in S else (False, "이 서버 버전은 지원하지 않아요")
                 return self._redirect("/ideas?" + urlencode({"t": "float", "msg": ("✔ " if ok else "✖ ") + why}))
+            if path == "/dispute/tag" and settings_api:
+                n = min(int(self.headers.get("Content-Length") or 0), 4096)
+                form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore"), keep_blank_values=True).items()}
+                S = settings()
+                ok, why = S["dispute_tag"](form) if "dispute_tag" in S else (False, "이 서버 버전은 지원하지 않아요")
+                return self._redirect("/ideas?" + urlencode({"t": "dispute", "code": form.get("code", ""), "msg": ("✔ " if ok else "✖ ") + why}))
             if path == "/dispute/run" and settings_api:
                 n = min(int(self.headers.get("Content-Length") or 0), 4096)
                 self.rfile.read(n)
