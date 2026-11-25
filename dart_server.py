@@ -1863,6 +1863,30 @@ def news_tick(now):
         print("뉴스 검색이 전부 실패했어요 (네트워크 확인)", flush=True)
 
 
+def stuck_tick():
+    """수집이 멈춘 것 같으면(잠금은 잡혀 있고 진행이 15분 넘게 없음) 한 번만 푸시하고, 진단용으로 상태를 파일에 남김"""
+    stuck, why = run_stuck()
+    if not stuck:
+        return False
+    try:
+        st = json.loads(status_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        st = {}
+    key = str(st.get("updated", ""))
+    mark = data_dir() / "stuck_notified.txt"
+    if mark.exists() and mark.read_text().strip() == key:
+        return False
+    mark.write_text(key)
+    try:
+        (data_dir() / "stuck_last.json").write_text(json.dumps(dict(found=dt.datetime.now().isoformat(timespec="seconds"), why=why, status=st), ensure_ascii=False, indent=1), encoding="utf-8")
+    except OSError:
+        pass
+    url = env("DASHBOARD_URL")
+    notify("수집이 멈춘 것 같아요", f"{why}\n서버에서 `sudo systemctl stop dart-daily` 로 정리하세요. 상태는 data/stuck_last.json에 남겼어요.",
+           click=url.rstrip("/") if url else "", tags=("warning",))
+    return True
+
+
 def cmd_tick(args):
     """10분마다 타이머가 부름: 설정한 자동 수집 시각이 지났고 아직 안 돌았으면 수집."""
     now = dt.datetime.now()
@@ -1874,6 +1898,10 @@ def cmd_tick(args):
         news_tick(now)
     except Exception as e:
         print(f"뉴스 속보 확인 실패: {e}", flush=True)
+    try:
+        stuck_tick()
+    except Exception as e:
+        print(f"멈춤 확인 실패: {e}", flush=True)
     try:
         auto_update_tick(now)
     except Exception as e:
