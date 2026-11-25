@@ -4547,6 +4547,74 @@ def _dsp_events_html(evs, n=3):
     return out
 
 
+_TBG = {"t": 0.0, "v": None}
+
+
+def tenbagger_list(conn):
+    """텐배거 체질 점수 목록 (5분 재사용)"""
+    if _TBG["v"] is not None and time.time() - _TBG["t"] < 300:
+        return _TBG["v"]
+    import tenbagger as tb
+
+    def trend(code):
+        try:
+            px = [c for _, c in price_map(conn, code)]
+        except Exception:
+            return None
+        if len(px) < 60:
+            return None
+        ma = sum(px[-200:]) / len(px[-200:]) if len(px) >= 120 else None
+        return dict(above_ma=(px[-1] > ma) if ma else None, r3m=(px[-1] / px[-64] - 1) if len(px) >= 64 else None)
+    out = tb.rank(conn, trend_fn=trend)
+    _TBG.update(t=time.time(), v=out)
+    return out
+
+
+def view_tenbagger(conn, q):
+    """아이디어 → 텐배거 후보: 작고, 빠르게 크고, 이익이 돌아서고, 재무가 튼튼한 종목 (과거 텐배거의 흔한 특징으로 점수화)"""
+    rows = tenbagger_list(conn)
+    intro = ('<div class="card"><b>텐배거(주가 10배) 후보</b><div class="muted" style="font-size:13px">과거에 크게 오른 종목들에서 자주 보이던 특징 — <b>시가총액이 작고, 매출이 빠르게 늘고, 이익이 흑자 전환하거나 마진이 개선되고, 부채가 적고, 주가가 상승 추세</b> — 을 재무제표 분석 결과로 점수 매겨 모았어요. '
+             '<b>10배가 될 종목을 맞히는 화면이 아니에요.</b> 이 조건을 갖춘 종목 대부분은 10배에 못 가고, 10배 간 종목 중에는 이 조건과 다른 경우도 많아요(특히 이미 오른 뒤에 점수가 높아지는 쏠림).</div></div>')
+    how = ('<div class="card"><details><summary><b>점수는 어떻게 매기나요? (한계)</b></summary><ul class="muted" style="font-size:13px;padding-left:18px">'
+           '<li><b>성장 30</b>: 매출 증가율(30%·50%·100% 구간) + 최근 분기 가속</li><li><b>이익 25</b>: 영업이익 흑자 전환, 이익 증가율, 영업이익률 10% 이상·개선</li>'
+           '<li><b>안정 15</b>: 부채비율·이자보상배율·이익의 현금화 (적자이면서 현금도 빠지면 감점)</li><li><b>크기 15</b>: 시총 300~3,000억이 가장 높고, 1조 이상은 0 (10배가 되려면 시총도 10배라서)</li>'
+           '<li><b>추세 10</b>: 200일선 위·최근 3개월 상승·PER 25 이하</li></ul>'
+           '<ul class="muted" style="font-size:12px;padding-left:18px"><li>점수는 제가 정한 규칙이고 <b>과거 수익률로 검증하지 않았어요.</b> 살아남은 승자만 보는 편향과 이미 오른 뒤 점수가 높아지는 쏠림이 있어요.</li>'
+           '<li>재무제표 분석을 돌린 종목만 나와요 (아이디어 → 재무제표 분석, 시총 순위는 품절주 계산에서 받아와요). 시총이 없으면 크기 점수가 0이에요.</li>'
+           '<li>작은 종목은 거래가 적고 급락·상장폐지·작전 위험이 커요. 후보를 좁히는 용도이고 투자 권유가 아니에요.</li></ul></details></div>')
+    if not rows:
+        return page("텐배거 후보", intro + how + '<div class="card muted">아직 재무제표 분석 결과가 없어요. 아이디어 → 재무제표 분석에서 먼저 분석을 돌려 주세요 (시총은 품절주 탭에서 계산하면 채워져요).</div>')
+    size = q.get("size") if q.get("size") in ("s", "m", "l") else ""
+    rng = {"s": (0, 500), "m": (500, 3000), "l": (3000, 10000)}.get(size)
+    try:
+        mn = float(q.get("min") or 40)
+    except ValueError:
+        mn = 40.0
+    kw = (q.get("kw") or "").strip()
+    sel = [r for r in rows if r["score"] >= mn and (not rng or (r["mcap"] and rng[0] <= r["mcap"] < rng[1])) and (not kw or kw in (r["name"] or "") or kw in r["code"])]
+    base = {"t": "tenbagger", "size": size, "min": str(int(mn)), "kw": kw}
+    link = lambda **kw_: "/ideas?" + urlencode({**base, **kw_})
+    chips = " ".join((f'<b class="chip" style="background:var(--accent);color:var(--bg)">{lab}</b>' if size == k else f'<a class="chip" href="{link(size=k)}">{lab}</a>')
+                     for k, lab in (("", "전체"), ("s", "시총 500억 미만"), ("m", "500억~3천억"), ("l", "3천억~1조")))
+    chips2 = " ".join((f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}점 이상</b>' if int(mn) == v else f'<a class="chip" href="{link(min=v)}">{v}점 이상</a>') for v in (30, 40, 50, 60, 70))
+    form = ('<form method="get" action="/ideas" class="filters" style="margin:6px 0"><input type="hidden" name="t" value="tenbagger">'
+            f'<input type="hidden" name="size" value="{size}"><input type="hidden" name="min" value="{int(mn)}"><input type="search" name="kw" value="{escape(kw)}" placeholder="종목 이름·코드"><button>찾기</button></form>')
+    body = ""
+    for r in sel[:60]:
+        pt = " · ".join(f"{k} {v}" for k, v in r["parts"].items())
+        body += (f'<div style="border-top:1px solid var(--line);padding:8px 0"><div><a href="/ideas?{urlencode({"t": "fin", "code": r["code"]})}"><b>{escape(r["name"])}</b></a> '
+                 f'<span class="muted" style="font-size:12px">{escape(r["code"])} · {escape(r["period"])}</span> <span class="chip {"up" if r["score"] >= 70 else ""}" style="font-weight:700">{r["score"]}</span>'
+                 + (f' <span class="chip" style="font-size:11px">시총 {r["mcap"]:,.0f}억</span>' if r.get("mcap") else ' <span class="chip warn" style="font-size:11px">시총 모름</span>')
+                 + (f' <span class="chip" style="font-size:11px">실질 유통 {r["float_real"]:.0f}%</span>' if r.get("float_real") is not None else "")
+                 + f' {dispute_chip(conn, r["code"])}</div><div class="muted" style="font-size:11px">{escape(pt)}</div>'
+                 + (f'<div style="font-size:12px">✔ ' + " · ".join(escape(g) for g in r["good"][:6]) + '</div>' if r["good"] else "")
+                 + (f'<div style="font-size:12px;color:var(--down)">⚠ ' + " · ".join(escape(g) for g in r["risk"][:4]) + '</div>' if r["risk"] else "") + '</div>')
+    card = (f'<div class="card"><div>{chips}</div><div style="margin-top:4px">{chips2}</div>{form}'
+            f'<div class="muted" style="font-size:12px">조건에 맞는 종목 {len(sel):,}개 (분석된 {len(rows):,}개 중)' + (' · 위 60개만' if len(sel) > 60 else '') + '</div>'
+            + (body or '<div class="muted" style="margin-top:6px">조건에 맞는 종목이 없어요. 점수 기준을 낮춰 보세요.</div>') + '</div>')
+    return page("텐배거 후보", intro + card + how)
+
+
 def view_float(conn, q):
     """아이디어 → 품절주: 유통주식이 적은 종목 (최대주주 지분 + 자기주식 + 5% 보유자를 뺀 나머지)"""
     import float_stock as fs
@@ -5634,12 +5702,12 @@ IDEA_TABS = {"overall": "종합", "mine": "내 종목 점수", "cheap": "기관 
              "rank": "종목 순위", "score": "점수표 (오일전문가)", "perf": "운용사 성적표",
              "lynch": "피터 린치", "buffett": "워렌 버핏",
              "graham": "벤저민 그레이엄", "magic": "마법공식", "fscore": "F-스코어", "momentum": "모멘텀",
-             "legis": "입법 영향 기업", "legstudy": "입법 주가 분석", "fin": "재무제표 분석", "dispute": "지분분쟁", "float": "품절주", "picks": "투자처"}
-IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "legis", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf", "legstudy", "fin", "dispute", "float", "picks"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
+             "legis": "입법 영향 기업", "legstudy": "입법 주가 분석", "fin": "재무제표 분석", "dispute": "지분분쟁", "float": "품절주", "tenbagger": "텐배거 후보", "picks": "투자처"}
+IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "legis", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf", "legstudy", "fin", "dispute", "float", "tenbagger", "picks"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
 
 
 IDEA_SECTIONS = [("점수", ["picks", "overall", "mine"]), ("투자 방법", ["lynch", "buffett", "graham", "magic", "fscore", "momentum"]),
-                 ("종목 찾기", ["cheap", "cluster", "super", "legis", "fin", "dispute", "float", "rank"]), ("평가·성적", ["score", "perf", "legstudy"])]
+                 ("종목 찾기", ["cheap", "cluster", "super", "legis", "fin", "dispute", "float", "tenbagger", "rank"]), ("평가·성적", ["score", "perf", "legstudy"])]
 
 
 def idea_tab_html(active, link=None):
@@ -6074,6 +6142,12 @@ def view_ideas(conn, q):
         _CTX.pre = idea_tabs_row("picks")
         try:
             return view_picks(conn, q)
+        finally:
+            _CTX.pre = ""
+    if q.get("t") == "tenbagger":
+        _CTX.pre = idea_tabs_row("tenbagger")
+        try:
+            return view_tenbagger(conn, q)
         finally:
             _CTX.pre = ""
     if q.get("t") == "float":
