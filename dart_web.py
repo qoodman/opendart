@@ -150,19 +150,59 @@ def freshness_html():
     return out
 
 
+_JOB_FILES = [("world_status.json", "해외 증시 받기"), ("dispute_status.json", "지분분쟁 분석"), ("fin_status.json", "재무제표 분석"), ("fin_clue_status.json", "재무 단서 수집"),
+              ("float_status.json", "품절주 계산"), ("foreign_status.json", "외국인 지분 계산"), ("legstudy_status.json", "입법 주가 분석"), ("legis_status.json", "입법 영향 기업 준비")]
+_BUSY = {"t": 0.0, "v": ([], False)}
+
+
+def busy_info():
+    """(수집 말고 돌고 있는 분석 작업 이름들, 업데이트 예약 여부) — 헤더 표시용, 5초 재사용"""
+    if time.time() - _BUSY["t"] < 5:
+        return _BUSY["v"]
+    import legis
+    d = Path(_DATA_DIR["path"] or ".")
+    names = []
+    for f, label in _JOB_FILES:
+        try:
+            st = legis.read_status(str(d / f))
+        except Exception:
+            st = None
+        if st and st.get("running"):
+            names.append(label)
+    queued = False
+    try:
+        q = json.loads((d / "update_queue.json").read_text(encoding="utf-8"))
+        queued = time.time() - float(q.get("since") or 0) < 6 * 3600
+    except (OSError, ValueError, TypeError):
+        pass
+    _BUSY.update(t=time.time(), v=(names, queued))
+    return _BUSY["v"]
+
+
+def busy_chips():
+    """헤더: 수집 말고 돌고 있는 분석 작업과 업데이트 예약 표시"""
+    names, queued = busy_info()
+    out = ""
+    if names:
+        out += f'<span class="runbtn busy" title="{escape(", ".join(names))}">⏳ {escape(names[0])}' + (f' 외 {len(names) - 1}' if len(names) > 1 else "") + ' 중</span>'
+    if queued:
+        out += '<span class="runbtn alt" title="수집·분석이 모두 끝나면 바로 업데이트해요 (업데이트 메뉴에서 취소)">🔄 업데이트 예약됨</span>'
+    return out
+
+
 def run_widget():
     """모든 화면 위쪽 오른쪽: '지금 수집' 버튼, 수집 중이면 진행률"""
     st = _NAV.get("status") or {}
     if st.get("state") == "running" and time.time() - st.get("updated", 0) < 120:
         total, done = st.get("total") or 0, st.get("done") or 0
         pct = f" {done / total:.0%}" if total else ""
-        return (f'<a class="runbtn busy" id="runbusy" href="/">수집 중{pct}</a>'
+        return (f'<a class="runbtn busy" id="runbusy" href="/">수집 중{pct}</a>' + busy_chips() +
                 "<script>(function(){const b=document.getElementById('runbusy');const t=setInterval(()=>{"
                 "fetch('/health').then(r=>r.json()).then(s=>{if(s.state==='running'){"
                 "b.textContent='수집 중'+(s.total?' '+Math.round(s.done/s.total*100)+'%':'');}"
                 "else{clearInterval(t);b.textContent='수집 끝 · 새로고침';b.href=location.href;}}).catch(()=>{});},10000);})();"
                 "</script>")
-    return ('<details class="runmenu"><summary class="runbtn">지금 수집 ▾</summary>'
+    return (busy_chips() + '<details class="runmenu"><summary class="runbtn">지금 수집 ▾</summary>'
             '<form method="post" action="/run" class="menu">'
             + freshness_html() +
             '<button name="what" value="all">전체 <span class="muted">보고서 + 리포트</span></button>'
@@ -207,18 +247,25 @@ def update_widget():
     except (ValueError, TypeError, OverflowError):
         age = 10 ** 9
     ver = _app_version()
-    return (f'<details class="runmenu" id="updmenu" data-age="{age}"><summary class="runbtn alt">업데이트{dot} ▾</summary>'
+    run_busy = (_NAV.get("status") or {}).get("state") == "running" and time.time() - ((_NAV.get("status") or {}).get("updated") or 0) < 120
+    names_, queued_ = busy_info()
+    busy_any = run_busy or bool(names_)
+    if queued_:
+        st = "⏳ 업데이트 예약됨 — 수집·분석이 끝나면 바로 시작해요. " + st
+    run_label = "끝나면 바로 업데이트 (예약)" if busy_any and not queued_ else "지금 업데이트"
+    cancel_btn = '<button type="submit" formaction="/settings/update-cancel" onclick="return dartUpd(\'cancel\')">예약 취소</button>' if queued_ else ""
+    return (f'<details class="runmenu" id="updmenu" data-age="{age}"><summary class="runbtn alt">업데이트{dot}{" ⏳" if queued_ else ""} ▾</summary>'
             '<form method="post" class="menu" onsubmit="return false">'
             f'<div class="muted" style="padding:2px 8px;font-size:12px">지금 앱 v{escape(ver)}</div>'
             f'<div id="upstat" style="padding:2px 8px;font-size:13px">{escape(st)}</div>'
             f'<ul id="upitems" class="muted" style="margin:0;padding:0 8px 0 24px;font-size:12px">{items}</ul>'
             '<button type="submit" formaction="/settings/update-check" onclick="return dartUpd(\'check\')">새 버전 확인</button>'
-            '<button type="submit" formaction="/settings/update-run" onclick="return dartUpd(\'run\')">지금 업데이트</button>'
+            f'<button type="submit" formaction="/settings/update-run" onclick="return dartUpd(\'run\')">{run_label}</button>' + cancel_btn +
             '</form></details>'
             "<script>function dartUpd(k){"
-            "if(k==='run'&&!confirm('지금 업데이트할까요? 1~3분 걸리고 화면이 잠깐 끊길 수 있습니다.'))return false;"
+            "if(k==='run'&&!confirm('업데이트할까요? 수집·분석이 도는 중이면 끝난 뒤 바로 하도록 예약돼요. 시작하면 1~3분 걸리고 화면이 잠깐 끊길 수 있습니다.'))return false;"
             "var s=document.getElementById('upstat'),l=document.getElementById('upitems'),d=document.getElementById('updot');"
-            "if(!s)return true;s.textContent=k==='check'?'확인 중…':'시작하는 중…';"
+            "if(!s)return true;s.textContent=k==='check'?'확인 중…':k==='cancel'?'취소하는 중…':'처리하는 중…';"
             "fetch('/settings/update-'+k+'?ajax=1',{method:'POST'}).then(function(r){return r.json()}).then(function(j){"
             "s.textContent=j.msg;l.innerHTML='';(j.items||[]).slice(0,4).forEach(function(t){var li=document.createElement('li');li.textContent=t;l.appendChild(li)});"
             "if(d)d.style.display=j.behind?'':'none';}).catch(function(){s.textContent='확인하지 못했어요 (연결을 확인해 주세요)'});return false}"
@@ -519,7 +566,8 @@ def update_box(u):
     return (f'<div class="muted">지금 버전: {escape(u.get("current", ""))}</div>{state}'
             '<div class="filters" style="margin-top:8px">'
             '<button class="ghost" formaction="/settings/update-check" formmethod="post">새 버전 확인</button>'
-            '<button formaction="/settings/update-run" formmethod="post">지금 업데이트</button></div>' + log)
+            '<button formaction="/settings/update-run" formmethod="post">업데이트 (수집·분석 중이면 끝나고 바로)</button>'
+            + ('<button class="ghost" formaction="/settings/update-cancel" formmethod="post">예약 취소</button>' if busy_info()[1] else "") + '</div>' + log)
 
 
 def _stamp_text(name):
@@ -8531,13 +8579,16 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 self.rfile.read(n)
                 ok, why = settings()["backup_start"]()
                 return self._redirect("/settings?" + urlencode({"nt": ("✔ " if ok else "✖ ") + why}))
-            if path in ("/settings/update-check", "/settings/update-run") and settings_api:
+            if path in ("/settings/update-check", "/settings/update-run", "/settings/update-cancel") and settings_api:
                 n = min(int(self.headers.get("Content-Length") or 0), 65536)
                 self.rfile.read(n)          # 함께 온 설정 칸 값은 쓰지 않음
                 S = settings()
                 ajax = parse_qs(urlparse(self.path).query).get("ajax") == ["1"]
                 res = {}
-                if path.endswith("check"):
+                if path.endswith("cancel"):
+                    ok, why = S["cancel_update_queue"]() if "cancel_update_queue" in S else (False, "이 서버 버전은 지원하지 않아요")
+                    msg = ("✔ " if ok else "✖ ") + why
+                elif path.endswith("check"):
                     res = S["check_update"]()
                     msg = (f"✖ {res['error']}" if res.get("error") else
                            f"새 버전이 있습니다 ({res['behind']}개 변경)" if res.get("behind") else "✔ 최신 버전입니다")

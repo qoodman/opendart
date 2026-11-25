@@ -2218,12 +2218,85 @@ def check_update():
     return res
 
 
+JOB_FILES = [("world_status.json", "해외 증시 받기"), ("dispute_status.json", "지분분쟁 분석"), ("fin_status.json", "재무제표 분석"), ("fin_clue_status.json", "재무 단서 수집"),
+             ("float_status.json", "품절주 계산"), ("foreign_status.json", "외국인 지분 계산"), ("legstudy_status.json", "입법 주가 분석"), ("legis_status.json", "입법 영향 기업 준비")]
+QUEUE_MAX_SEC = 6 * 3600
+
+
+def busy_jobs():
+    """지금 돌고 있는 수집·분석 이름 목록 (멈춘 수집은 뺌). 업데이트는 이게 모두 끝난 뒤에 해야 서버가 다시 시작돼도 작업이 안 끊겨요"""
+    import legis
+    out = []
+    stuck, _ = run_stuck()
+    if is_running() and not stuck:
+        out.append("수집")
+    for f, label in JOB_FILES:
+        st = legis.read_status(str(data_dir() / f))
+        if st and st.get("running"):
+            out.append(label)
+    return out
+
+
+def _queue_file():
+    return data_dir() / "update_queue.json"
+
+
+def update_queued():
+    try:
+        q = json.loads(_queue_file().read_text(encoding="utf-8"))
+        return time.time() - float(q.get("since") or 0) < QUEUE_MAX_SEC
+    except (OSError, ValueError):
+        return False
+
+
+def cancel_update_queue():
+    try:
+        _queue_file().unlink()
+    except OSError:
+        pass
+    return True, "업데이트 예약을 취소했어요."
+
+
 def start_update():
+    """업데이트 시작. 수집·분석이 도는 중이면 거절하지 않고 끝나는 즉시 시작하도록 예약. (성공 여부, 문구)"""
+    busy = busy_jobs()
+    if busy:
+        if update_queued():
+            return True, f"이미 예약돼 있어요 — {', '.join(busy)} 끝나면 바로 업데이트해요."
+        _queue_file().write_text(json.dumps(dict(since=time.time(), busy=busy), ensure_ascii=False), encoding="utf-8")
+        return True, f"지금 {', '.join(busy)} 중이라 끝나면 바로 업데이트하도록 예약했어요. 화면은 그대로 두셔도 돼요 (취소는 업데이트 메뉴)."
+    return _start_update_now()
+
+
+def _update_tick():
+    """예약된 업데이트 확인 한 번: 수집·분석이 모두 끝났으면 예약을 지우고 바로 시작. → 시작했으면 (성공 여부, 문구), 아니면 None"""
+    if update_queued() and not busy_jobs():
+        cancel_update_queue()
+        ok, msg = _start_update_now()
+        print(f"예약 업데이트: {'시작' if ok else '실패'} — {msg}", flush=True)
+        try:
+            with open(update_log(), "a", encoding="utf-8") as f:
+                f.write(f"▶ {dt.datetime.now():%Y-%m-%d %H:%M} 예약 업데이트 {'시작' if ok else '실패: ' + msg}\n")
+        except OSError:
+            pass
+        return ok, msg
+    return None
+
+
+def _update_watcher():
+    """예약된 업데이트를 15초마다 확인 (대시보드 프로세스 안에서 돎)"""
+    while True:
+        time.sleep(15)
+        try:
+            _update_tick()
+        except Exception as e:
+            print(f"예약 업데이트 확인 실패: {e}", flush=True)
+
+
+def _start_update_now():
     """업데이트를 별도 작업으로 시작 (대시보드가 재시작돼도 끊기지 않게). (성공 여부, 문구)"""
     import subprocess, pwd
     stuck, why = run_stuck()
-    if is_running() and not stuck:
-        return False, "수집 중에는 업데이트하지 않습니다. 끝난 뒤 다시 눌러 주세요."
     if update_running():
         return False, "이미 업데이트 중입니다."
     if subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode != 0:
@@ -2473,6 +2546,7 @@ def ext_check(src):
 
 def cmd_web(args):
     from dart_web import serve
+    threading.Thread(target=_update_watcher, daemon=True).start()          # 예약된 업데이트를 수집·분석이 끝나는 대로 시작
     # 수집을 시작할 때 .env를 새로 읽도록, .env에서 온 값은 빼고 넘김
     child_env = {k: v for k, v in os.environ.items() if k not in DOTENV_KEYS}
 
@@ -2492,7 +2566,7 @@ def cmd_web(args):
                     update_info=update_info, check_update=check_update, start_update=start_update,
                     backup_list=backup_list, backup_busy=backup_busy, backup_start=backup_start,
                     backup_file=backup_file, krx_key=krx_key_now, save_krx_key=save_krx_key,
-                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, event_action=event_action, legstudy_run=legstudy_run, fin_run=fin_run, world_run=world_run, picks_snapshot=picks_snapshot, dispute_run=dispute_run, dispute_tag=dispute_tag, dispute_reset=dispute_reset, dispute_refresh=dispute_refresh, float_run=float_run, foreign_run=foreign_run, fin_clue_run=fin_clue_run, fin_action=fin_action, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
+                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, event_action=event_action, legstudy_run=legstudy_run, fin_run=fin_run, world_run=world_run, picks_snapshot=picks_snapshot, cancel_update_queue=cancel_update_queue, dispute_run=dispute_run, dispute_tag=dispute_tag, dispute_reset=dispute_reset, dispute_refresh=dispute_refresh, float_run=float_run, foreign_run=foreign_run, fin_clue_run=fin_clue_run, fin_action=fin_action, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
     serve(results_db(), host=args.host, port=args.port, child_env=child_env,
           get_key=lambda: read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", ""),
           save_key=save_key, settings_api=settings_api)
