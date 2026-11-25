@@ -4547,6 +4547,82 @@ def _dsp_events_html(evs, n=3):
     return out
 
 
+def view_float(conn, q):
+    """아이디어 → 품절주: 유통주식이 적은 종목 (최대주주 지분 + 자기주식 + 5% 보유자를 뺀 나머지)"""
+    import float_stock as fs
+    import legis as lg
+    d = Path(_DATA_DIR["path"] or ".")
+    st = lg.read_status(str(d / "float_status.json"))
+    running = bool(st and st.get("running"))
+    msg = q.get("msg", "")
+    flash = f'<div class="card {"warn" if msg.startswith("✖") else ""}">{escape(msg)}</div>' if msg else ""
+    try:
+        rows = fs.load(conn)
+        last = (conn.execute("SELECT value FROM float_meta WHERE key='synced'").fetchone() or [""])[0]
+        total = conn.execute("SELECT COUNT(*) FROM float_stock").fetchone()[0]
+    except sqlite3.Error:
+        rows, last, total = [], "", 0
+    prep = ('<div class="card"><b>품절주</b>'
+            '<div class="muted" style="font-size:13px">시장에서 실제로 거래될 수 있는 주식(유통주식)이 적은 종목이에요. 최대주주·특수관계인 지분과 자기주식, 5% 이상 보유자를 빼고 남는 비율로 찾아요 (DART 사업보고서 기준 · 네이버 시세).'
+            f' 계산한 종목 {len(rows):,}개 / 목록 {total:,}개' + (f' · 마지막 계산 {escape(last)}' if last else "") + '</div>'
+            '<form method="post" action="/float/run" class="filters" style="margin:8px 0 0">'
+            f'<button{" disabled" if running else ""}>{"진행 중…" if running else ("유통주식 새로 계산" if rows else "유통주식 계산하기")}</button>'
+            '<span class="muted" style="font-size:12px">종목이 2천 개가 넘어서 처음엔 오래 걸려요(별도 프로세스). 한 달 안에 계산한 종목은 건너뛰어요. DART 키가 설정에 있어야 해요.</span></form>'
+            + status_steps_html(st, running) + '</div>')
+    how = ('<div class="card"><details><summary><b>품절주란? 꼭 알아 둘 위험</b></summary><div style="font-size:13px;margin-top:6px">'
+           '유통주식이 적으면 작은 매수·매도에도 가격이 크게 움직여요. 그래서 급등하기도 하지만 급락도 쉽고, <b>호가가 비어 있어 팔고 싶을 때 못 팔 수 있어요.</b> 작전·세력 개입, 거래정지·관리종목 지정 위험도 큽니다. '
+           '이 화면은 기회를 알려 주는 게 아니라 <b>주의해서 볼 후보</b>를 모은 거예요.</div>'
+           '<ul class="muted" style="font-size:12px;padding-left:18px"><li><b>유통</b> = 100% − 최대주주 및 특수관계인 − 자기주식. <b>실질 유통</b> = 유통 − 5% 이상 보유자(최대주주 측 제외). 실질이 낮을수록 시장에 나올 물량이 적다고 봐요.</li>'
+           '<li>최대주주 지분은 연말 사업보고서 기준이라 최근 변동(블록딜·유상증자)은 늦게 반영돼요. 우리사주·우호 지분·국내외 기관의 장기 보유는 따로 못 걸러요.</li>'
+           '<li>회전율 = 오늘 거래대금 ÷ 시가총액. 낮을수록 거래가 안 되는 종목이에요 (하루치라 들쭉날쭉해요).</li>'
+           '<li>우선주·ETF·스팩은 뺐어요. 코스피·코스닥 일반 종목만 봐요.</li></ul></div>')
+    if not rows:
+        return page("품절주", flash + prep + how + '<div class="card muted">아직 계산한 결과가 없어요. 위 버튼으로 계산해 주세요.</div>')
+    try:
+        mx = float(q.get("max") or 30)
+    except ValueError:
+        mx = 30.0
+    try:
+        minc = float(q.get("minc") or 100)
+    except ValueError:
+        minc = 100.0
+    mk = q.get("mk") if q.get("mk") in ("KOSPI", "KOSDAQ") else ""
+    sort = q.get("sort") if q.get("sort") in ("real", "simple", "turn", "mcap") else "real"
+    kw = (q.get("kw") or "").strip()
+    sel = [r for r in rows if r["float_real"] is not None and r["float_real"] <= mx and (r["mcap"] or 0) >= minc and (not mk or r["market"] == mk)
+           and (not kw or kw in r["name"] or kw in r["code"])]
+    keyf = {"real": lambda r: r["float_real"], "simple": lambda r: r["float_pct"], "turn": lambda r: (r["turnover"] if r["turnover"] is not None else 9e9), "mcap": lambda r: -(r["mcap"] or 0)}[sort]
+    sel.sort(key=keyf)
+    base = {"t": "float", "max": str(int(mx)), "minc": str(int(minc)), "mk": mk, "sort": sort, "kw": kw}
+    link = lambda **kw_: "/ideas?" + urlencode({**base, **kw_})
+    chips = " ".join((f'<b class="chip" style="background:var(--accent);color:var(--bg)">실질 유통 {v}% 이하</b>' if int(mx) == v else f'<a class="chip" href="{link(max=v)}">{v}% 이하</a>') for v in (10, 20, 30, 40))
+    chips2 = " ".join((f'<b class="chip" style="background:var(--accent);color:var(--bg)">{lab}</b>' if sort == k else f'<a class="chip" href="{link(sort=k)}">{lab}</a>') for k, lab in (("real", "실질 유통 적은 순"), ("simple", "유통 적은 순"), ("turn", "회전율 낮은 순"), ("mcap", "시총 큰 순")))
+    chips3 = " ".join((f'<b class="chip" style="background:var(--accent);color:var(--bg)">{lab}</b>' if mk == k else f'<a class="chip" href="{link(mk=k)}">{lab}</a>') for k, lab in (("", "전체"), ("KOSPI", "코스피"), ("KOSDAQ", "코스닥")))
+    form = ('<form method="get" action="/ideas" class="filters" style="margin:6px 0"><input type="hidden" name="t" value="float">'
+            f'<input type="hidden" name="max" value="{int(mx)}"><input type="hidden" name="sort" value="{sort}"><input type="hidden" name="mk" value="{mk}">'
+            f'<input type="search" name="kw" value="{escape(kw)}" placeholder="종목 이름·코드"> 시총 <input type="number" name="minc" value="{int(minc)}" style="width:80px">억 이상 <button>적용</button></form>')
+    body = ""
+    for r in sel[:100]:
+        ext = (r["detail"] or {}).get("ext") or []
+        ext_t = ", ".join(f'{escape(h["name"])} {h["pct"]:.1f}%' for h in ext[:3])
+        flags = []
+        if (r["mcap"] or 0) < 500:
+            flags.append("시총 500억 미만")
+        if r["turnover"] is not None and r["turnover"] < 0.1:
+            flags.append("거래 매우 적음")
+        if r["holder_pct"] and r["holder_pct"] >= 70:
+            flags.append(f'최대주주 측 {r["holder_pct"]:.0f}%')
+        chip = fin_chip(conn, r["code"], long=False) + " " + dispute_chip(conn, r["code"])
+        body += (f'<div style="border-top:1px solid var(--line);padding:8px 0"><div><a href="/stock?code={quote(r["code"])}"><b>{escape(r["name"])}</b></a> <span class="muted" style="font-size:12px">{escape(r["code"])} · {escape(r["market"])}</span> '
+                 f'<span class="chip down" style="font-weight:700">실질 유통 {r["float_real"]:.1f}%</span> <span class="chip">유통 {r["float_pct"]:.1f}%</span> {chip}</div>'
+                 f'<div class="muted" style="font-size:12px">시총 {r["mcap"]:,.0f}억 · 최대주주 측 {r["holder_pct"]:.1f}% · 자기주식 {(r["treasury_pct"] or 0):.1f}%'
+                 + (f' · 5% 보유자 {escape(ext_t)}' if ext_t else "") + (f' · 회전율 {r["turnover"]:.2f}%' if r["turnover"] is not None else "") + '</div>'
+                 + (f'<div style="font-size:11px">' + " ".join(f'<span class="chip warn" style="font-size:10px">{escape(f)}</span>' for f in flags) + '</div>' if flags else "") + '</div>')
+    head = (f'<div class="card"><div>{chips}</div><div style="margin-top:4px">{chips3}</div><div style="margin-top:4px">{chips2}</div>{form}'
+            f'<div class="muted" style="font-size:12px">조건에 맞는 종목 {len(sel):,}개' + (f' (위 100개만)' if len(sel) > 100 else "") + '</div>' + (body or '<div class="muted" style="margin-top:6px">조건에 맞는 종목이 없어요.</div>') + '</div>')
+    return page("품절주", flash + prep + head + how)
+
+
 def view_dispute(conn, q):
     """시장 → 지분분쟁: 분쟁 가능성이 있는 종목, 막 시작한 종목, 치열하게 싸우는 종목"""
     import dispute as dp
@@ -5558,12 +5634,12 @@ IDEA_TABS = {"overall": "종합", "mine": "내 종목 점수", "cheap": "기관 
              "rank": "종목 순위", "score": "점수표 (오일전문가)", "perf": "운용사 성적표",
              "lynch": "피터 린치", "buffett": "워렌 버핏",
              "graham": "벤저민 그레이엄", "magic": "마법공식", "fscore": "F-스코어", "momentum": "모멘텀",
-             "legis": "입법 영향 기업", "legstudy": "입법 주가 분석", "fin": "재무제표 분석", "dispute": "지분분쟁", "picks": "투자처"}
-IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "legis", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf", "legstudy", "fin", "dispute", "picks"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
+             "legis": "입법 영향 기업", "legstudy": "입법 주가 분석", "fin": "재무제표 분석", "dispute": "지분분쟁", "float": "품절주", "picks": "투자처"}
+IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "legis", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf", "legstudy", "fin", "dispute", "float", "picks"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
 
 
 IDEA_SECTIONS = [("점수", ["picks", "overall", "mine"]), ("투자 방법", ["lynch", "buffett", "graham", "magic", "fscore", "momentum"]),
-                 ("종목 찾기", ["cheap", "cluster", "super", "legis", "fin", "dispute", "rank"]), ("평가·성적", ["score", "perf", "legstudy"])]
+                 ("종목 찾기", ["cheap", "cluster", "super", "legis", "fin", "dispute", "float", "rank"]), ("평가·성적", ["score", "perf", "legstudy"])]
 
 
 def idea_tab_html(active, link=None):
@@ -5998,6 +6074,12 @@ def view_ideas(conn, q):
         _CTX.pre = idea_tabs_row("picks")
         try:
             return view_picks(conn, q)
+        finally:
+            _CTX.pre = ""
+    if q.get("t") == "float":
+        _CTX.pre = idea_tabs_row("float")
+        try:
+            return view_float(conn, q)
         finally:
             _CTX.pre = ""
     if q.get("t") == "dispute":
@@ -8150,6 +8232,12 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 S = settings()
                 ok, why = S["picks_snapshot"]() if "picks_snapshot" in S else (False, "이 서버 버전은 지원하지 않아요")
                 return self._redirect("/ideas?" + urlencode({"t": "picks", "msg": ("✔ " if ok else "✖ ") + why}))
+            if path == "/float/run" and settings_api:
+                n = min(int(self.headers.get("Content-Length") or 0), 4096)
+                self.rfile.read(n)
+                S = settings()
+                ok, why = S["float_run"]() if "float_run" in S else (False, "이 서버 버전은 지원하지 않아요")
+                return self._redirect("/ideas?" + urlencode({"t": "float", "msg": ("✔ " if ok else "✖ ") + why}))
             if path == "/dispute/run" and settings_api:
                 n = min(int(self.headers.get("Content-Length") or 0), 4096)
                 self.rfile.read(n)

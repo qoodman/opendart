@@ -1047,6 +1047,40 @@ def picks_snapshot():
         conn.close()
 
 
+def float_run():
+    """품절주 탭의 '유통주식 계산하기': 종목 목록(네이버)과 최대주주 지분·자기주식·5% 보유자(DART)를 별도 프로세스로 받아 계산. (성공 여부, 안내)"""
+    import subprocess
+    import legis
+    status = data_dir() / "float_status.json"
+    st = legis.read_status(str(status))
+    if st and st.get("running"):
+        return False, "이미 진행 중이에요. 아래 진행 상황을 확인하세요."
+    if not (read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", "")):
+        return False, "DART_API_KEY가 없어요. 설정에서 DART 키를 먼저 넣어 주세요."
+
+    def lower_priority():
+        try:
+            os.nice(10)
+        except OSError:
+            pass
+    try:
+        logf = open(data_dir() / "float.log", "ab")
+        proc = subprocess.Popen([sys.executable, str(ROOT / "dart_server.py"), "float-sync"], cwd=str(ROOT), stdout=logf, stderr=subprocess.STDOUT,
+                                start_new_session=True, preexec_fn=lower_priority)
+    except Exception as e:
+        return False, f"시작하지 못했어요: {type(e).__name__}: {str(e)[:100]}"
+    threading.Thread(target=proc.wait, daemon=True).start()
+    return True, "품절주 계산을 시작했어요. 처음엔 종목이 많아 시간이 걸려요(여러 번 나눠 이어서 받아요)."
+
+
+def cmd_float_sync(args):
+    """(서버 내부용) float_run()이 띄우는 별도 프로세스"""
+    import float_stock
+    key = read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", "")
+    float_stock.run_job(str(results_db()), key, str(data_dir() / "float_status.json"), log=lambda m: print(m, flush=True))
+    return 0
+
+
 def dispute_run():
     """지분분쟁 탭의 '공시 훑고 분석하기': DART 공시에서 분쟁 신호를 찾고 종목별 단계를 판정. 별도 프로세스(낮은 우선순위). (성공 여부, 안내)"""
     import subprocess
@@ -2345,7 +2379,7 @@ def cmd_web(args):
                     update_info=update_info, check_update=check_update, start_update=start_update,
                     backup_list=backup_list, backup_busy=backup_busy, backup_start=backup_start,
                     backup_file=backup_file, krx_key=krx_key_now, save_krx_key=save_krx_key,
-                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, event_action=event_action, legstudy_run=legstudy_run, fin_run=fin_run, world_run=world_run, picks_snapshot=picks_snapshot, dispute_run=dispute_run, fin_clue_run=fin_clue_run, fin_action=fin_action, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
+                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, event_action=event_action, legstudy_run=legstudy_run, fin_run=fin_run, world_run=world_run, picks_snapshot=picks_snapshot, dispute_run=dispute_run, float_run=float_run, fin_clue_run=fin_clue_run, fin_action=fin_action, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
     serve(results_db(), host=args.host, port=args.port, child_env=child_env,
           get_key=lambda: read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", ""),
           save_key=save_key, settings_api=settings_api)
@@ -2373,6 +2407,7 @@ def main(argv=None):
     sub.add_parser("world-sync", help="(내부용) 해외 지수·종목 받기 작업")
     sub.add_parser("dispute-sync", help="(내부용) 지분분쟁 공시 훑기 작업")
     sub.add_parser("fin-clues", help="(내부용) 공시 단서 받기 작업")
+    sub.add_parser("float-sync", help="(내부용) 품절주 유통주식 계산 작업")
     sub.add_parser("update", help="최신 코드 받아 설치")
     sub.add_parser("net-check")
     sub.add_parser("notify-test")
@@ -2389,7 +2424,7 @@ def main(argv=None):
     _enable_wal()
     return {"run": cmd_run, "web": cmd_web, "net-check": cmd_net_check, "notify-test": cmd_notify_test,
             "status": cmd_status, "set-env": cmd_set_env, "hk-check": cmd_hk_check, "reports-check": cmd_hk_check, "market-check": cmd_market_check, "parse-check": cmd_parse_check,
-            "tick": cmd_tick, "update": cmd_update, "legis-prepare": cmd_legis_prepare, "legis-study": cmd_legis_study, "fin-analyze": cmd_fin_analyze, "world-sync": cmd_world_sync, "dispute-sync": cmd_dispute_sync, "fin-clues": cmd_fin_clues}[a.cmd](a)
+            "tick": cmd_tick, "update": cmd_update, "legis-prepare": cmd_legis_prepare, "legis-study": cmd_legis_study, "fin-analyze": cmd_fin_analyze, "world-sync": cmd_world_sync, "dispute-sync": cmd_dispute_sync, "float-sync": cmd_float_sync, "fin-clues": cmd_fin_clues}[a.cmd](a)
 
 
 if __name__ == "__main__":
