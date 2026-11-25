@@ -205,6 +205,47 @@ class Reports(unittest.TestCase):
         self.assertTrue(ext[0]["activist"])
         self.assertTrue(D.structure_score(hp, ext, None)["contest"])
 
+    def _fetch_with(self, maj_date, maj_pct, rep_pct):
+        import fin_clues
+
+        class R:
+            def __init__(self, j):
+                self._j, self.status_code = j, 200
+
+            def json(self):
+                return self._j
+
+        class Sess:
+            def get(self, url, params=None, timeout=0):
+                if "hyslrSttus" in url:
+                    return R({"status": "000", "list": [{"nm": "김홍국", "trmend_posesn_stock_qota_rt": "26.0"}, {"nm": "계", "trmend_posesn_stock_qota_rt": "26.0"}]} if params["reprt_code"] == "11012" else {"status": "013"})
+                if "otrCpr" in url:
+                    return R({"status": "000", "list": []})
+                if "list.json" in url:
+                    return R({"status": "000", "list": [{"report_nm": "반기보고서 (2026.06)", "rcept_dt": "20260814", "rcept_no": "9"}]})
+                return R({"status": "000", "list": [{"repror": "Miri Capital Management LLC", "stkrt": str(maj_pct), "stkrt_irds": "0", "stkqy": "1", "stkqy_irds": "0", "ctr_stkrt": "0",
+                                                      "report_tp": "약식", "rcept_dt": maj_date, "report_resn": "", "rcept_no": "1"}]})
+        orig = fin_clues.fetch_document_text
+        fin_clues.fetch_document_text = lambda *a, **k: "가. 5% 이상 주주 현황\n구분\t주주명\t소유주식수\t지분율\nMiri Capital Management LLC\t2,420,000\t" + str(rep_pct) + "\n나. 소액\n"
+        try:
+            return D.fetch_structure("079940", "c", "k", TODAY, Sess(), corp_name="가비아")[1][0]
+        finally:
+            fin_clues.fetch_document_text = orig
+
+    def test_newer_source_wins(self):                          # 정기보고서(6/30 기준)가 5% 보고(3/1)보다 최신이면 정기보고서 값을 표시
+        h = self._fetch_with("20260301", 14.0, 24.2)
+        self.assertEqual((h["pct"], h["asof_src"], h["alt_pct"]), (24.2, "정기보고서", 14.0))
+
+    def test_newer_5pct_report_wins(self):                     # 5% 보고(11/3)가 정기보고서(6/30)보다 최신이면 5% 보고 값을 유지
+        h = self._fetch_with("20261103", 24.17, 18.0)
+        self.assertEqual((h["pct"], h["asof_src"]), (24.17, "5% 보고"))
+        self.assertEqual(h["rep_pct"], 18.0)
+        self.assertEqual(h["asof"], "20261103")
+
+    def test_report_asof(self):
+        self.assertEqual(D.report_asof("반기보고서 (2026.06)", "20260814"), "20260630")
+        self.assertEqual(D.report_asof("사업보고서 (2025.12)", "20260331"), "20251231")
+
     def test_miri_is_activist(self):
         self.assertTrue(D._is_activist("The Miri Strategic Fund"))
         self.assertFalse(D.is_neutral_inst("The Miri Strategic Fund"))

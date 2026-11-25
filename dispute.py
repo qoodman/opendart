@@ -651,6 +651,19 @@ def parse_holder_table(text):
     return res
 
 
+def report_asof(report_nm, rcept_dt=""):
+    """정기보고서가 가리키는 기준일(YYYYMMDD): 이름의 '(2026.06)'이면 그 달 말일, 없으면 접수일. 5% 보고와 최신 여부를 견줄 때 씀"""
+    m = re.search(r"\((\d{4})\.(\d{2})\)", report_nm or "")
+    if m:
+        y, mo = int(m.group(1)), int(m.group(2))
+        try:
+            last = dt.date(y + (mo // 12), mo % 12 + 1, 1) - dt.timedelta(days=1)
+            return last.strftime("%Y%m%d")
+        except ValueError:
+            pass
+    return rcept_dt or ""
+
+
 def report_holders(corp, key, today, session=None):
     """가장 최근 사업·반기보고서의 '5% 이상 주주' 표 → ([dict(name, pct)], (보고서 이름, 접수일, 접수번호)) 못 읽으면 ([], None).
     분기보고서에는 이 표가 없어서 사업·반기보고서만 봄"""
@@ -667,7 +680,7 @@ def report_holders(corp, key, today, session=None):
     top = rows[0]
     from fin_clues import fetch_document_text
     text = fetch_document_text(top.get("rcept_no", ""), key, s)
-    return parse_holder_table(text), (top.get("report_nm", ""), top.get("rcept_dt", ""), top.get("rcept_no", ""))
+    return parse_holder_table(text), (top.get("report_nm", ""), top.get("rcept_dt", ""), top.get("rcept_no", ""), report_asof(top.get("report_nm", ""), top.get("rcept_dt", "")))
 
 
 def fetch_structure(code, corp, key, today=None, session=None, corp_name=""):
@@ -727,7 +740,7 @@ def fetch_structure(code, corp, key, today=None, session=None, corp_name=""):
         if who not in latest or d > latest[who]["date"]:
             latest[who] = dict(name=who, pct=_num(r.get("stkrt")), chg=_num(r.get("stkrt_irds")), tp=("일반" if "일반" in (r.get("report_tp") or "") else "약식" if "약식" in (r.get("report_tp") or "") else ""),
                                date=d, resn=(r.get("report_resn") or "")[:60], activist=_is_activist(who), rcept_no=r.get("rcept_no") or "",
-                               shares=_num(r.get("stkqy")), shares_chg=_num(r.get("stkqy_irds")), ctr_pct=_num(r.get("ctr_stkrt")))
+                               shares=_num(r.get("stkqy")), shares_chg=_num(r.get("stkqy_irds")), ctr_pct=_num(r.get("ctr_stkrt")), asof=d, asof_src="5% 보고")
     ext = [h for h in latest.values() if h["pct"] and h["pct"] >= 5]
     for h in ext:
         h.update(purpose_shift(hist.get(h["name"], []), today))
@@ -738,19 +751,25 @@ def fetch_structure(code, corp, key, today=None, session=None, corp_name=""):
         raise
     except Exception:
         rh, rinfo = [], None
+    asof = (rinfo[3] if rinfo and len(rinfo) > 3 else "") or (rinfo[1] if rinfo else "")
     if rinfo:
         STRUCT_META.setdefault(code, {})["report"] = f"{rinfo[0]} ({rinfo[1][:4]}-{rinfo[1][4:6]}-{rinfo[1][6:]})" if len(rinfo[1]) == 8 else rinfo[0]
+        STRUCT_META[code]["asof"] = asof
     for h in rh:
         nm = h["name"]
         if is_insider(nm, names) or is_insider(nm, aff) or is_group_affiliate(nm, corp_name, names):
             continue
         same = next((e for e in ext if is_insider(nm, [e["name"]]) or is_insider(e["name"], [nm])), None)
         if same is not None:
-            if same.get("pct") is not None and abs(same["pct"] - h["pct"]) >= 3.0:          # 같은 보유자인데 5% 보고와 정기보고서 표의 지분이 3%p 넘게 다름 → 점검 화면에 알림
-                same["rep_pct"] = h["pct"]
+            if same.get("pct") is not None and abs(same["pct"] - h["pct"]) >= 0.5:
+                # 두 자료가 다르면 기준일이 더 최근인 쪽을 표시함 (정기보고서는 그 보고서의 기준일, 5% 보고는 보고일)
+                if asof and (same.get("asof") or "") < asof:
+                    same.update(alt_pct=same["pct"], alt_src=f"5% 보고 {same.get('asof') or same.get('date') or ''}", pct=h["pct"], asof=asof, asof_src="정기보고서", chg=None)
+                elif abs(same["pct"] - h["pct"]) >= 3.0:          # 5% 보고가 더 최신이면 그대로 두고, 3%p 넘게 다르면 점검 화면에 알림
+                    same["rep_pct"] = h["pct"]
             continue
-        ext.append(dict(name=nm, pct=h["pct"], tp="", chg=None, date=(rinfo[1] if rinfo else ""), resn="정기보고서 5% 주주 표", activist=_is_activist(nm), rcept_no=(rinfo[2] if rinfo else ""),
-                        src="report", shift="", grow=0.0, first_pct=h["pct"], track=[], acc_months=0, pct_1y=None, acc_up=0, slow=False))
+        ext.append(dict(name=nm, pct=h["pct"], tp="", chg=None, date=(asof or (rinfo[1] if rinfo else "")), resn="정기보고서 5% 주주 표", activist=_is_activist(nm), rcept_no=(rinfo[2] if rinfo else ""),
+                        src="report", asof=asof, asof_src="정기보고서", shift="", grow=0.0, first_pct=h["pct"], track=[], acc_months=0, pct_1y=None, acc_up=0, slow=False))
     ally_pct = sum(p for _, p in ally.values() if p >= 5)
     return holder_pct, ext, sorted(names) + sorted(aff)[:150], round(ally_pct, 2)
 

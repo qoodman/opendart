@@ -5181,6 +5181,13 @@ def _dsp_detail(conn, s_, code):
                 det_bits.append(f'계약상 {h["ctr_pct"]:.2f}%')
             if h.get("resn"):
                 det_bits.append(f'보고사유 {escape(h["resn"])}')
+            if h.get("asof"):
+                a_ = h["asof"]
+                det_bits.insert(0, f'<b>기준 {a_[:4]}-{a_[4:6]}-{a_[6:]} ({escape(h.get("asof_src") or "")})</b>' if len(a_) == 8 else f'기준 {escape(h.get("asof_src") or "")}')
+            if h.get("alt_pct") is not None:
+                det_bits.append(f'더 오래된 값 {h["alt_pct"]:.1f}% ({escape(h.get("alt_src") or "")})는 쓰지 않았어요')
+            elif h.get("rep_pct") is not None:
+                det_bits.append(f'정기보고서 표는 {h["rep_pct"]:.1f}% (더 오래된 자료라 최신 5% 보고 값을 표시)')
             if det_bits:
                 trk_t += '<br><span class="muted" style="font-size:11px">' + " · ".join(det_bits) + '</span>'
             rows += (f'<tr><td>{escape(h["name"])}{" 🎯" if h.get("activist") else ""}{sh_t}{trk_t}</td><td>{h["pct"]:.2f}%</td><td>{escape(h.get("tp") or "")}</td><td class="muted" style="font-size:12px">{escape(h.get("date") or "")} {escape(h.get("resn") or "")}</td>'
