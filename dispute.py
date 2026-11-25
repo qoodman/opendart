@@ -627,12 +627,37 @@ def fetch_structure(code, corp, key, today=None, session=None, corp_name=""):
             continue
         if who not in latest or d > latest[who]["date"]:
             latest[who] = dict(name=who, pct=_num(r.get("stkrt")), chg=_num(r.get("stkrt_irds")), tp=("일반" if "일반" in (r.get("report_tp") or "") else "약식" if "약식" in (r.get("report_tp") or "") else ""),
-                               date=d, resn=(r.get("report_resn") or "")[:40], activist=_is_activist(who))
+                               date=d, resn=(r.get("report_resn") or "")[:40], activist=_is_activist(who), rcept_no=r.get("rcept_no") or "")
     ext = [h for h in latest.values() if h["pct"] and h["pct"] >= 5]
     for h in ext:
         h.update(purpose_shift(hist.get(h["name"], [])))
     ally_pct = sum(p for _, p in ally.values() if p >= 5)
     return holder_pct, ext, sorted(names) + sorted(aff)[:150], round(ally_pct, 2)
+
+
+def data_warnings(friendly_pct, ext, today=None):
+    """지분 자료가 이상하게 보이는 경우를 알려 줌: ① 5% 보유자가 최대주주 측보다 큼(연말 사업보고서가 옛 자료이거나 최대주주 변경·공개매수·인수 진행, 특별관계자 합산)
+    ② 최대주주 측 + 5% 보유자 합이 100% 초과(보고 지분이 겹치거나 예정분) ③ 1년 넘은 5% 보고"""
+    today = today or dt.date.today()
+    w = []
+    ch = [h for h in ext if h.get("pct") and not _neutral(h)]
+    if friendly_pct is not None and ch:
+        top = max(ch, key=lambda h: h["pct"])
+        if top["pct"] > friendly_pct:
+            w.append(f"{top['name']} {top['pct']:.1f}%가 최대주주 측 {friendly_pct:.1f}%보다 커요 — 최대주주 변경·공개매수·인수가 진행 중이거나 사업보고서(연말) 자료가 옛 것이거나 특별관계자 지분이 합산된 값일 수 있어요")
+        tot = friendly_pct + sum(h["pct"] for h in ext if h.get("pct") and not h.get("manual"))
+        if tot > 100.5:
+            w.append(f"최대주주 측 + 5% 보유자 지분을 합치면 {tot:.0f}%라 100%를 넘어요 — 보고된 지분이 겹치거나 예정분(계약·공개매수)일 수 있어요")
+    for h in ext:
+        d = h.get("date") or ""
+        if len(d) == 8 and d.isdigit():
+            try:
+                if (today - dt.date(int(d[:4]), int(d[4:6]), int(d[6:]))).days > 365 and not h.get("manual"):
+                    w.append(f"{h['name']}의 마지막 5% 보고가 1년이 넘었어요({d[:4]}-{d[4:6]}-{d[6:]}) — 지금 지분이 다를 수 있어요")
+                    break
+            except ValueError:
+                pass
+    return w
 
 
 def purpose_shift(rows):
@@ -749,8 +774,9 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
                 if any(e["kind"] == "tender" and e.get("flr") and is_insider(h["name"], [e["flr"]]) for e in by[code]) or re.search(r"계약|공개매수", h.get("resn") or ""):
                     h["pending"] = True
             hp_eff = (hp + ally) if (hp is not None and ally) else hp          # 최대주주 측 + 계열·우호 회사 5% 보유분 = 우호 지분
+            warn = data_warnings(hp_eff, ext, today)
             st_ = structure_score(hp_eff, ext, pbr.get(code))
-            states[code]["struct"] = dict(holder_pct=hp, ally_pct=ally or 0.0, friendly_pct=hp_eff, ext=ext, swing=swing_holders(hp_eff, ext), insiders=insiders[:12], **st_)
+            states[code]["struct"] = dict(holder_pct=hp, ally_pct=ally or 0.0, friendly_pct=hp_eff, ext=ext, swing=swing_holders(hp_eff, ext), insiders=insiders[:12], warn=warn, **st_)
             # 공시한 쪽이 최대주주 측이면(지주사·계열사 포함) 분쟁 신호에서 뺌: 일반 5% 보고·외부 권유·주주제안·공개매수
             keep, dropped = [], []
             for e in by[code]:

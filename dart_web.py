@@ -4835,6 +4835,8 @@ def view_dispute(conn, q):
                 else:
                     gap = f'<div style="font-size:12px;margin:2px 0">최대주주 측 {fp_:.1f}% vs {escape(top["name"])} {top["pct"]:.1f}% — <b class="{"down" if (fp_ - top["pct"]) <= 5 else ""}">격차 {fp_ - top["pct"]:.1f}%p</b></div>'
             rs_ = "".join(f'<div class="muted" style="font-size:12px">· {escape(r)}</div>' for r in (sc.get("reasons") or [])[:3]) if not ev else ""
+            if sc.get("warn"):
+                gap += '<div style="font-size:11px;color:var(--down)">⚠ 지분 자료 확인 필요 (상세에서 보고서 확인)</div>'
             sw = sc.get("swing") or []
             sw_t = ('<div style="font-size:12px;margin:2px 0">🎚 캐스팅보트: ' + ", ".join(f'<b>{escape(x["name"])}</b> {x["pct"]:.1f}%' + (" (기관)" if x.get("inst") else "") for x in sw[:3]) + '</div>') if sw else ""
             mt = pl.get("meeting")
@@ -5003,9 +5005,12 @@ def _dsp_detail(conn, s_, code):
                 sh_t += ' <span class="chip warn" style="font-size:10px" title="공개매수·인수 계약이 진행 중인 보고자예요. 보고된 지분은 예정분이라 실제 보유가 아닐 수 있어요">공개매수·계약 진행 중</span>'
             if h.get("manual"):
                 sh_t += ' <span class="chip" style="font-size:10px">직접 추가</span>'
+            if h.get("rcept_no"):
+                sh_t += f' <a class="chip" style="font-size:10px" href="{dart_link(h["rcept_no"])}" target="_blank" rel="noopener noreferrer">보고서 ↗</a>'
             rows += (f'<tr><td>{escape(h["name"])}{" 🎯" if h.get("activist") else ""}{sh_t}</td><td>{h["pct"]:.2f}%</td><td>{escape(h.get("tp") or "")}</td><td class="muted" style="font-size:12px">{escape(h.get("date") or "")} {escape(h.get("resn") or "")}</td>'
                      f'<td>{chg_t}</td><td>{role_form(h["name"])}</td></tr>')
         why = "".join(f'<li>{escape(r)}</li>' for r in sc.get("reasons") or [])
+        warn_html = ("<div style=\"margin:6px 0;font-size:12px\"><b class=\"down\">⚠ 지분 자료 확인 필요</b><ul style=\"padding-left:18px;margin:2px 0\">" + "".join(f"<li>{escape(x)}</li>" for x in sc.get("warn") or []) + "</ul></div>") if sc.get("warn") else ""
         add_form_html = ('<form method="post" action="/dispute/tag" class="filters" style="margin:8px 0 0;font-size:12px"><input type="hidden" name="code" value="' + escape(code) + '"><input type="hidden" name="role" value="challenger">'
                          '직접 추가 — 도전자 <input name="name" placeholder="이름 (예: 맥쿼리)" size="12" style="font-size:12px"> 지분 <input name="pct" placeholder="%" size="4" inputmode="decimal" style="font-size:12px">% <button style="font-size:12px">추가</button>'
                          '<span class="muted" style="font-size:11px"> DART 5% 보고에 없는 쪽(예: 인수 목적 회사)을 직접 넣어요. 표의 \'내 판단\'에서 도전자를 \'무시\'로 바꿔 빼도 돼요.</span></form>')
@@ -5016,6 +5021,7 @@ def _dsp_detail(conn, s_, code):
                      + ((f'<div style="margin-top:6px;font-size:12px"><b>최대주주 측으로 보고 뺀 공시</b> (지주사·계열사 포함 — 분쟁 상대가 아니에요): '
                          + ", ".join(f'{escape(d.get("flr") or "")} ({escape(d.get("date", ""))})' for d in (pl.get("dropped") or [])[:5]) + '</div>') if pl.get("dropped") else "")
                      + ((f'<div class="muted" style="font-size:11px;margin-top:4px">최대주주 측으로 본 이름: {escape(", ".join(sc.get("insiders") or []))} · 표기가 달라도(㈜·주식회사) 같은 곳으로 봐요</div>') if sc.get("insiders") else "")
+                     + warn_html
                      + add_form_html
                      + '<div class="muted" style="font-size:11px">일반 = 경영참여 목적 보고, 약식 = 단순·일반투자 보고. 🎯 = 행동주의 성향으로 알려진 이름. 최대주주 측 지분은 연말 기준이라 최근 변동은 반영이 늦을 수 있어요. 최대주주와 특수관계인의 정확한 합계는 최대주주등소유주식변동신고서를 확인하세요. 최대주주 측 구분은 사업보고서의 최대주주·특수관계인 명단과 이름으로 맞추기 때문에 명단에 없는 계열사는 못 거를 수 있어요 — 그런 경우 알려 주세요.</div></div>')
     guide = ('<div class="card"><details><summary><b>이 신호들을 어떻게 읽나요?</b></summary><ul class="muted" style="font-size:13px;padding-left:18px">'
