@@ -1195,6 +1195,41 @@ def _fresh_card(conn):
             '<div class="muted" style="font-size:11px">5일 넘게 지났거나 없으면 시장 → 해외 증시에서 받기, 또는 지금 수집 → 시장·정책만을 돌려 주세요.</div></div>')
 
 
+def _plan_card(conn):
+    """동반 하락 탭: 낙폭 단계별 분할 매수 계획표 (미리 적어 두기). 입력은 이 브라우저에만 저장"""
+    import vol_limit as vl
+    ser = vl.kospi(conn)
+    hi = max((v for _, v in ser[-250:]), default=None)
+    return _plan_html(hi, ser[-1][1] if ser else None)
+
+
+def _plan_html(hi, cur):
+    f = lambda x: "" if x is None else f"{x:.0f}"
+    rows = "".join(
+        f'<tr><td><input class="pl_dd" type="number" value="{dd}" style="width:60px">%</td><td><input class="pl_w" type="number" value="{w}" style="width:60px">%</td><td class="pl_lv"></td><td class="pl_am"></td><td class="pl_st"></td></tr>'
+        for dd, w in ((-20, 33), (-30, 33), (-40, 34)))
+    return ('<div class="card"><details><summary><b>분할 매수 계획표 — 미리 적어 두기</b></summary>'
+            '<div class="muted" style="font-size:12px;margin:4px 0">공포 속에서 판단하지 않도록, 낙폭 단계마다 얼마를 살지 미리 정해 두는 표예요. 기본값은 3등분 예시이고 비중·낙폭은 직접 고치세요. 이 브라우저에만 저장돼요.</div>'
+            '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:6px;font-size:12px">'
+            '<label>투입 예정 금액(만원)<input id="pl_amt" type="number" value="3000" style="width:100%"></label>'
+            f'<label>기준 고점(코스피)<input id="pl_hi" type="number" value="{f(hi)}" style="width:100%"></label>'
+            f'<label>지금 코스피<input id="pl_cur" type="number" value="{f(cur)}" style="width:100%"></label></div>'
+            f'<div class="scroll"><table id="pl_t"><tr><th>고점 대비</th><th>비중</th><th>코스피 수준</th><th>살 금액</th><th>지금</th></tr>{rows}</table></div>'
+            '<div id="pl_sum" class="muted" style="font-size:12px;margin-top:4px"></div>'
+            '<div class="muted" style="font-size:11px;margin-top:4px">코스피 지수를 직접 사기는 어려워서, 지수 수준은 "이 정도 떨어지면 정해 둔 금액을 투입한다"는 기준선으로 쓰세요. 과거엔 나눠 사도 더 내려가는 구간이 있었어요 (위 3번 표). 투자 권유가 아니에요.</div>'
+            '<script>(function(){var K="dart_plan_v1";var $=function(i){return document.getElementById(i)};'
+            'var dd=document.querySelectorAll(".pl_dd"),ww=document.querySelectorAll(".pl_w"),L=document.querySelectorAll(".pl_lv"),A=document.querySelectorAll(".pl_am"),S=document.querySelectorAll(".pl_st");'
+            'function N(x){return Math.round(x).toLocaleString()}'
+            'function save(){try{localStorage.setItem(K,JSON.stringify({a:$("pl_amt").value,h:$("pl_hi").value,d:[].map.call(dd,function(x){return x.value}),w:[].map.call(ww,function(x){return x.value})}))}catch(e){}}'
+            'function load(){try{var j=JSON.parse(localStorage.getItem(K)||"null");if(!j)return;$("pl_amt").value=j.a;if(j.h)$("pl_hi").value=j.h;j.d.forEach(function(v,i){dd[i].value=v});j.w.forEach(function(v,i){ww[i].value=v})}catch(e){}}'
+            'function u(){var amt=+$("pl_amt").value||0,hi=+$("pl_hi").value||0,cur=+$("pl_cur").value||0,sw=0;'
+            'for(var i=0;i<dd.length;i++){var d=(+dd[i].value||0)/100,w=(+ww[i].value||0)/100;sw+=w;var lv=hi*(1+d);L[i].textContent=hi?N(lv):"-";A[i].textContent=N(amt*w)+"만원";'
+            'S[i].textContent=(hi&&cur)?(cur<=lv?"도달 (정한 대로 투입 구간)":"아직 "+N((cur/lv-1)*100)+"% 더 하락 필요"):""}'
+            '$("pl_sum").textContent="비중 합 "+Math.round(sw*100)+"%"+(Math.abs(sw-1)>0.005?" — 100%가 아니에요":"")+(hi&&cur?" · 지금 고점 대비 "+((cur/hi-1)*100).toFixed(1)+"%":"");save()}'
+            'load();document.getElementById("pl_t").parentNode.parentNode.addEventListener("input",u);u()})()</script>'
+            '</details></div>')
+
+
 def _stress_card(conn):
     """동반 하락 탭: 내 자산 스트레스 테스트 — 자산 종류별 금액을 넣으면 과거 하락 구간이 다시 오면 얼마나 줄지 어림"""
     import json as _json
@@ -1318,7 +1353,7 @@ def view_crash(conn, q):
              '<li><b>분할 규칙은 미리 적어 두기</b>: 낙폭 구간마다 어느 만큼 살지 정해 두면 공포 속에서 판단하지 않아도 돼요.</li>'
              '<li><b>하나가 아니라 유형이 다른 자산</b>: 위 2번 표처럼 유형이 바뀌면 방어가 되는 자산도 바뀌어요.</li></ul>'
              '<div class="muted" style="font-size:12px;margin-top:6px">관련 화면: <a href="/cycle">투자 사이클</a> · <a href="/diag">하락 점검</a> · <a href="/ideas?t=picks">투자처(해외·다자산)</a> · <a href="/world">해외 증시 ETF</a></div></div>')
-    return page("동반 하락 대응", intro + _fresh_card(conn) + _vol_card(conn) + _conc_card(conn) + _nps_card(conn) + diag + past + _stress_card(conn) + split + alloc + check)
+    return page("동반 하락 대응", intro + _fresh_card(conn) + _vol_card(conn) + _conc_card(conn) + _nps_card(conn) + diag + past + _stress_card(conn) + split + _plan_card(conn) + alloc + check)
 
 
 def view_derivs(conn, q):
