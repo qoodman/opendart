@@ -120,7 +120,7 @@ def classify(report_nm, flr_nm="", corp_name="", ptype=""):
         if _same_company(flr_nm, corp_name):          # 회사가 자기 주식을 사들이는 공개매수는 분쟁이 아님 (주주환원)
             return "defense", 1.0, 0
         return "tender", 4.0, 0
-    if "의결권대리행사권유" in t or ptype == "D003":
+    if "의결권대리행사권유" in t or "위임장권유" in t:        # 조회 유형 코드(D003)는 믿지 않고 공시 제목으로만 판단 — 코드로 보면 임원·주요주주 소유상황보고서까지 위임장 권유로 잡혔음
         return ("proxy_co", 1.0, 0) if _same_company(flr_nm, corp_name) else ("proxy_ext", 4.0, 1 if _is_activist(flr_nm) else 0)
     if re.search(r"주주제안|소수주주권|주주총회소집(허가|청구)|임시주주총회소집(허가|청구)", t):
         return "proposal", 3.0, 0
@@ -672,7 +672,7 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
     names = {}
     corp = {}
     for code, name, cc, d, nm, flr, kind, w, act, rn in conn.execute("SELECT stock_code, corp_name, corp_code, rcept_dt, report_nm, flr_nm, kind, weight, activist, rcept_no FROM dispute_event WHERE rcept_dt >= ?", (since,)):
-        if kind in ("injunction", "tender", "litig"):            # 분류 규칙이 바뀌었을 수 있어 제목으로 다시 매김 (예전에 잘못 잡힌 가처분·자기주식 공개매수를 걸러냄)
+        if kind in ("injunction", "tender", "litig", "proxy_ext", "proxy_co"):            # 분류 규칙이 바뀌었을 수 있어 제목으로 다시 매김 (예전에 잘못 잡힌 가처분·자기주식 공개매수를 걸러냄)
             re_ = classify(nm, flr or "", name or "")
             if re_ is None:
                 continue
