@@ -4804,7 +4804,46 @@ def view_dispute(conn, q):
     lv_sel = q.get("lv") if q.get("lv") in dp.LEVEL_ORDER else ""
     kw = (q.get("kw") or "").strip()
     hide_h, halt_chip_ = halt_toggle(conn, q, {"t": "dispute", "lv": lv_sel, "kw": kw})
-    hq = {"hh": "1"} if hide_h else {}
+    fq = {k: q.get(k) for k in ("ho", "ac", "mt", "tn", "mc") if q.get(k)}          # 내가 고른 거름 조건 (최대주주 측 지분 상한·행동주의 도전자·주총 임박·공개매수·시총 하한)
+    hq = {**({"hh": "1"} if hide_h else {}), **fq}
+    try:
+        ho_v = float(fq["ho"]) if "ho" in fq else None
+    except ValueError:
+        ho_v = None
+    try:
+        mc_v = float(fq["mc"]) if "mc" in fq else None
+    except ValueError:
+        mc_v = None
+    mcap_map = {}
+    if mc_v:
+        try:
+            mcap_map = {c_: m_ for c_, m_ in conn.execute("SELECT code, mcap FROM float_stock WHERE mcap IS NOT NULL")}
+        except sqlite3.Error:
+            mcap_map = {}
+
+    def _pass(s_):
+        pl_ = s_["payload"] or {}
+        sc_, ev_ = pl_.get("struct") or {}, pl_.get("ev") or {}
+        fp_ = sc_.get("friendly_pct") if sc_.get("friendly_pct") is not None else sc_.get("holder_pct")
+        if ho_v is not None and (fp_ is None or fp_ > ho_v):
+            return False
+        if fq.get("ac") and not any(h.get("activist") and not dp._neutral(h) for h in (sc_.get("ext") or [])):
+            return False
+        if fq.get("mt"):
+            mt_ = pl_.get("meeting")
+            try:
+                dd_ = (dt.date.fromisoformat(mt_["date"]) - dt.date.today()).days if mt_ else None
+            except (ValueError, KeyError, TypeError):
+                dd_ = None
+            if dd_ is None or not (0 <= dd_ <= 90):
+                return False
+        if fq.get("tn") and not ("tender" in (ev_.get("kinds") or []) or sc_.get("pending")):
+            return False
+        if mc_v and (mcap_map.get(s_["code"]) is None or mcap_map[s_["code"]] < mc_v):
+            return False
+        return True
+    if fq:
+        states = [s_ for s_ in states if _pass(s_)]
     if hide_h:
         states = [s_ for s_ in states if s_["code"] not in halt_set(conn)]
     if q.get("slow") == "1":
@@ -4818,7 +4857,13 @@ def view_dispute(conn, q):
         chips += (f' <b class="chip" style="background:var(--accent);color:var(--bg)">🕰 장기 누적 {slow_n}</b>' if slow_only else
                   f' <a class="chip" href="/ideas?{urlencode({"t": "dispute", "slow": "1", **hq})}" title="1년 가까이 천천히 지분을 모아 온 도전자가 있는 종목">🕰 장기 누적 {slow_n}</a>')
     chips += f' <span style="margin-left:6px">{halt_chip_}</span>'
-    form = ('<form method="get" action="/ideas" class="filters" style="margin:6px 0"><input type="hidden" name="t" value="dispute"><input type="hidden" name="hh" value="%s"><input type="search" name="kw" value="%s" placeholder="종목 이름·코드"><button>찾기</button></form>' % (escape(q.get("hh") or ""), escape(kw)))
+    flt = []
+    for lab, k, v in (("최대주주 측 30% 이하", "ho", "30"), ("40% 이하", "ho", "40"), ("🎯 행동주의 도전자", "ac", "1"), ("📅 주총 90일 내", "mt", "1"), ("📢 공개매수·인수 진행", "tn", "1"), ("시총 1천억↑", "mc", "1000"), ("3천억↑", "mc", "3000")):
+        on = fq.get(k) == v
+        nq = {kk: vv for kk, vv in {"t": "dispute", "lv": lv_sel, "kw": kw, **hq, k: ("" if on else v)}.items() if vv not in (None, "")}
+        flt.append(f'<b class="chip" style="background:var(--accent);color:var(--bg)">{lab} ✕</b>' if on else f'<a class="chip" href="/ideas?{urlencode(nq)}">{lab}</a>')
+    chips += '<div style="margin-top:6px;font-size:12px"><span class="muted">거르기</span> ' + " ".join(flt) + ('' if not mc_v else ' <span class="muted">(시총은 품절주 계산을 돌린 종목만 알아요)</span>') + '</div>'
+    form = ('<form method="get" action="/ideas" class="filters" style="margin:6px 0"><input type="hidden" name="t" value="dispute"><input type="hidden" name="hh" value="%s">%s<input type="search" name="kw" value="%s" placeholder="종목 이름·코드"><button>찾기</button></form>' % (escape(q.get("hh") or ""), "".join(f'<input type="hidden" name="{k_}" value="{escape(v_)}">' for k_, v_ in fq.items()), escape(kw)))
     sections = ""
     for lv in dp.LEVEL_ORDER:
         if lv_sel and lv != lv_sel:
@@ -5024,6 +5069,8 @@ def _dsp_detail(conn, s_, code):
                 sh_t += ' <span class="chip warn" style="font-size:10px" title="공개매수·인수 계약이 진행 중인 보고자예요. 보고된 지분은 예정분이라 실제 보유가 아닐 수 있어요">공개매수·계약 진행 중</span>'
             if h.get("slow"):
                 sh_t += f' <span class="chip down" style="font-size:10px" title="첫 보고 이후 {h.get("acc_months", 0)}개월 동안 천천히 지분을 늘려 왔어요">🕰 {h.get("acc_months", 0)}개월째 누적</span>'
+            if h.get("src") == "report":
+                sh_t += ' <span class="chip" style="font-size:10px" title="대량보유 보고(DART 5% 보고) 목록에는 없고 사업·반기보고서의 5% 이상 주주 표에서 읽었어요">정기보고서 표</span>'
             if h.get("manual"):
                 sh_t += ' <span class="chip" style="font-size:10px">직접 추가</span>'
             if h.get("rcept_no"):
@@ -5049,6 +5096,7 @@ def _dsp_detail(conn, s_, code):
                      + ((f'<div style="margin-top:6px;font-size:12px"><b>최대주주 측으로 보고 뺀 공시</b> (지주사·계열사 포함 — 분쟁 상대가 아니에요): '
                          + ", ".join(f'{escape(d.get("flr") or "")} ({escape(d.get("date", ""))})' for d in (pl.get("dropped") or [])[:5]) + '</div>') if pl.get("dropped") else "")
                      + ((f'<div class="muted" style="font-size:11px;margin-top:4px">최대주주 측으로 본 이름: {escape(", ".join(sc.get("insiders") or []))} · 표기가 달라도(㈜·주식회사) 같은 곳으로 봐요</div>') if sc.get("insiders") else "")
+                     + ((f'<div class="muted" style="font-size:11px;margin-top:4px">지분 자료 기준 — 최대주주 현황: {escape(sc["meta"].get("hy", "") or "?")}' + (f' · 5% 주주 표: {escape(sc["meta"]["report"])}' if sc["meta"].get("report") else "") + '</div>') if sc.get("meta") else "")
                      + pend_html
                      + warn_html
                      + add_form_html

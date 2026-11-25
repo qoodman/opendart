@@ -33,9 +33,9 @@ KIND_LABEL = {
 KIND_ICON = {"litig": "⚖", "injunction": "⚖", "tender": "📢", "proxy_ext": "🗳", "proxy_co": "🗳", "proposal": "📝", "owner_chg": "👑", "blk_gen": "🎯", "owner_buy": "📈",
              "defense": "🛡", "clarify": "❓", "legal": "🚨", "egm": "📅", "agm": "📅"}
 # 행동주의 성향으로 알려진 투자자·펀드 이름의 일부 (제출인 이름에 들어 있으면 표시). 직접 고칠 수 있게 상수로 둠
-ACTIVISTS = ["얼라인", "KCGI", "강성부", "플래시라이트", "차파트너스", "트러스톤", "라이프", "머스트", "FCP", "팰리서", "엘리엇", "ELLIOTT", "행동주의", "주주가치", "미리캐피탈", "Miri Capital", "스팍스", "SPARX", "Starboard", "Third Point", "Cevian", "Oasis Management",
+ACTIVISTS = ["얼라인", "KCGI", "강성부", "플래시라이트", "차파트너스", "트러스톤", "라이프", "머스트", "FCP", "팰리서", "엘리엇", "ELLIOTT", "행동주의", "주주가치", "미리캐피탈", "Miri Capital", "Miri Strategic", "스팍스", "SPARX", "Starboard", "Third Point", "Cevian", "Oasis Management",
              "안다", "밸류파트너스", "서울마린", "파인밸류", "VIP", "에이치플러스", "아이온", "비케이", "KB자산"]
-ACTIVIST_STRICT = ["얼라인", "KCGI", "강성부", "플래시라이트", "차파트너스", "트러스톤", "팰리서", "엘리엇", "ELLIOTT", "행동주의", "주주가치", "머스트", "FCP", "미리캐피탈", "MIRI CAPITAL", "스팍스", "SPARX", "STARBOARD", "THIRD POINT", "CEVIAN", "OASIS MANAGEMENT"]
+ACTIVIST_STRICT = ["얼라인", "KCGI", "강성부", "플래시라이트", "차파트너스", "트러스톤", "팰리서", "엘리엇", "ELLIOTT", "행동주의", "주주가치", "머스트", "FCP", "미리캐피탈", "MIRI CAPITAL", "MIRI STRATEGIC", "THE MIRI", "스팍스", "SPARX", "STARBOARD", "THIRD POINT", "CEVIAN", "OASIS MANAGEMENT"]
 
 
 def ensure(conn):
@@ -48,7 +48,7 @@ def ensure(conn):
     CREATE TABLE IF NOT EXISTS dispute_tag (code TEXT, name TEXT, role TEXT, updated TEXT, PRIMARY KEY (code, name));
     CREATE TABLE IF NOT EXISTS dispute_struct (code TEXT PRIMARY KEY, fetched TEXT, hp REAL, ext TEXT, insiders TEXT);
     """)
-    for stmt in ("ALTER TABLE dispute_struct ADD COLUMN ally REAL", "ALTER TABLE dispute_tag ADD COLUMN pct REAL"):
+    for stmt in ("ALTER TABLE dispute_struct ADD COLUMN ally REAL", "ALTER TABLE dispute_tag ADD COLUMN pct REAL", "ALTER TABLE dispute_struct ADD COLUMN meta TEXT"):
         try:
             conn.execute(stmt)
         except sqlite3.OperationalError:
@@ -584,6 +584,86 @@ def affiliate_names(corp, corp_name, hy_names, key, today, session=None):
     return {n for n in out if len(norm_name(n)) >= 3 and norm_name(n) != norm_name(corp_name)}
 
 
+STRUCT_META = {}          # 종목코드 → 마지막으로 받은 지분 자료의 기준 (최대주주 현황 기간, 5% 주주 표를 읽은 보고서)
+PERIOD_LABEL = {"11011": "사업보고서", "11012": "반기보고서", "11013": "1분기보고서", "11014": "3분기보고서"}
+
+
+def hy_periods(today):
+    """최대주주 현황을 받을 (연도, 보고서코드) 후보를 최신순으로: 3분기 → 반기 → 1분기 → 직전 사업보고서.
+    연말 사업보고서만 쓰면 최대주주 지분이 길게는 1년 가까이 묵은 값이라, 그 뒤 분기·반기 보고서가 나왔으면 그걸 먼저 씀"""
+    y = today.year
+    out = []
+    if today >= dt.date(y, 11, 20):
+        out.append((y, "11014"))
+    if today >= dt.date(y, 8, 20):
+        out.append((y, "11012"))
+    if today >= dt.date(y, 5, 20):
+        out.append((y, "11013"))
+    out.append((y - 1 if today.month >= 4 else y - 2, "11011"))
+    return out
+
+
+_HDR_WORDS = {"구분", "주주명", "성명", "성명(법인명)", "법인명", "소유주식수", "지분율", "비고", "주식수", "소유 주식수", "5%이상주주", "합계", "계", "최대주주", "우리사주조합", "소액주주", "-", "주식"}
+
+
+def parse_holder_table(text):
+    """정기보고서(사업·반기) 본문 줄 텍스트(표 칸은 탭) → [dict(name, pct, shares)] 5% 이상 주주 표.
+    '5% 이상 주주' 또는 '주식의 분포/소유현황' 아래의 표에서 이름 칸과 지분율(%) 칸을 읽음"""
+    lines = text.split("\n") if isinstance(text, str) else list(text)
+    out = []
+    for i, ln in enumerate(lines):
+        flat = re.sub(r"\s+", "", ln)
+        if not (("5%이상" in flat and "주주" in flat) or "주식의분포" in flat):
+            continue
+        for j in range(i + 1, min(i + 28, len(lines))):
+            row = lines[j]
+            rf = re.sub(r"\s+", "", row)
+            if re.match(r"^(나|다|라|마|3|4|5)\.", rf) and j > i + 1 and "5%" not in rf:
+                break
+            cells = [c.strip() for c in row.split("\t") if c.strip()]
+            if len(cells) < 2:
+                continue
+            pct, shares, name = None, None, None
+            for c in cells:
+                cn = c.replace(",", "").replace("%", "").strip()
+                if re.fullmatch(r"-?\d+(\.\d+)?", cn):
+                    v = float(cn)
+                    if 0 < v <= 100 and "." in cn or (c.endswith("%") and 0 < v <= 100):
+                        pct = v
+                    elif v > 100:
+                        shares = v
+                elif name is None and re.search(r"[A-Za-z가-힣]", c) and re.sub(r"\s+", "", c) not in _HDR_WORDS and not re.fullmatch(r"\(?[가-힣]\)?\.?", c.strip()):
+                    name = c
+            if name and pct is not None and pct >= 5:
+                out.append(dict(name=name, pct=pct, shares=shares))
+    seen, res = set(), []
+    for h in out:
+        k = norm_name(h["name"])
+        if k and k not in seen:
+            seen.add(k)
+            res.append(h)
+    return res
+
+
+def report_holders(corp, key, today, session=None):
+    """가장 최근 사업·반기보고서의 '5% 이상 주주' 표 → ([dict(name, pct)], (보고서 이름, 접수일, 접수번호)) 못 읽으면 ([], None).
+    분기보고서에는 이 표가 없어서 사업·반기보고서만 봄"""
+    s = session or requests
+    r = s.get(f"{DART_BASE}/list.json", params=dict(crtfc_key=key, corp_code=corp, bgn_de=(today - dt.timedelta(days=430)).strftime("%Y%m%d"), end_de=today.strftime("%Y%m%d"),
+                                                      pblntf_ty="A", page_count="20"), timeout=30)
+    j = r.json() if r.status_code == 200 else {}
+    if str(j.get("status")) == "020":
+        raise DisputeError("DART 하루 호출 한도를 넘었어요")
+    rows = [x for x in (j.get("list") or []) if re.search(r"사업보고서|반기보고서", x.get("report_nm") or "")]
+    rows.sort(key=lambda x: (x.get("rcept_dt") or "", "정정" not in (x.get("report_nm") or "")), reverse=True)
+    if not rows:
+        return [], None
+    top = rows[0]
+    from fin_clues import fetch_document_text
+    text = fetch_document_text(top.get("rcept_no", ""), key, s)
+    return parse_holder_table(text), (top.get("report_nm", ""), top.get("rcept_dt", ""), top.get("rcept_no", ""))
+
+
 def fetch_structure(code, corp, key, today=None, session=None, corp_name=""):
     """한 종목의 최대주주 측 지분율과 외부 5% 보유자 → (holder_pct, [ext...]) (못 받으면 (None, []))"""
     today = today or dt.date.today()
@@ -596,7 +676,13 @@ def fetch_structure(code, corp, key, today=None, session=None, corp_name=""):
         if str(j.get("status")) == "020":
             raise DisputeError("DART 하루 호출 한도를 넘었어요")
         return j.get("list") or [] if str(j.get("status")) == "000" else []
-    hy = call("hyslrSttus.json", bsns_year=str(year), reprt_code="11011")
+    hy, hy_label = [], ""
+    for y_, rc_ in hy_periods(today):
+        hy = call("hyslrSttus.json", bsns_year=str(y_), reprt_code=rc_)
+        if hy:
+            hy_label = f"{y_} {PERIOD_LABEL.get(rc_, rc_)}"
+            break
+    STRUCT_META[code] = dict(hy=hy_label)
     holder_pct, names = None, set()
     for r in hy:
         nm = (r.get("nm") or "").strip()
@@ -638,6 +724,23 @@ def fetch_structure(code, corp, key, today=None, session=None, corp_name=""):
     ext = [h for h in latest.values() if h["pct"] and h["pct"] >= 5]
     for h in ext:
         h.update(purpose_shift(hist.get(h["name"], []), today))
+    # 사업·반기보고서의 '5% 이상 주주' 표에만 있는 보유자(대량보유 보고 API에 안 잡히는 외국계 펀드 등)를 더함
+    try:
+        rh, rinfo = report_holders(corp, key, today, s)
+    except DisputeError:
+        raise
+    except Exception:
+        rh, rinfo = [], None
+    if rinfo:
+        STRUCT_META.setdefault(code, {})["report"] = f"{rinfo[0]} ({rinfo[1][:4]}-{rinfo[1][4:6]}-{rinfo[1][6:]})" if len(rinfo[1]) == 8 else rinfo[0]
+    for h in rh:
+        nm = h["name"]
+        if is_insider(nm, names) or is_insider(nm, aff) or is_group_affiliate(nm, corp_name, names):
+            continue
+        if any(is_insider(nm, [e["name"]]) or is_insider(e["name"], [nm]) for e in ext):
+            continue
+        ext.append(dict(name=nm, pct=h["pct"], tp="", chg=None, date=(rinfo[1] if rinfo else ""), resn="정기보고서 5% 주주 표", activist=_is_activist(nm), rcept_no=(rinfo[2] if rinfo else ""),
+                        src="report", shift="", grow=0.0, first_pct=h["pct"], track=[], acc_months=0, pct_1y=None, acc_up=0, slow=False))
     ally_pct = sum(p for _, p in ally.values() if p >= 5)
     return holder_pct, ext, sorted(names) + sorted(aff)[:150], round(ally_pct, 2)
 
@@ -762,7 +865,7 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
     except sqlite3.Error:
         pass
     if key:
-        cached = {r[0]: r for r in conn.execute("SELECT code, fetched, hp, ext, insiders, ally FROM dispute_struct")}
+        cached = {r[0]: r for r in conn.execute("SELECT code, fetched, hp, ext, insiders, ally, meta FROM dispute_struct")}
         tags, manual = {}, {}
         for tc, tn, tr, tp_ in conn.execute("SELECT code, name, role, pct FROM dispute_tag"):
             if tn != "*":
@@ -777,6 +880,7 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
             c_ = cached.get(code)
             if c_ and c_[1] >= ttl:                       # 며칠 안에 받은 지분 구조는 다시 받지 않음 (그만큼 더 많은 종목을 훑게 됨)
                 hp, ext, insiders, ally = c_[2], json.loads(c_[3] or "[]"), json.loads(c_[4] or "[]"), (c_[5] or 0.0)
+                STRUCT_META[code] = json.loads(c_[6] or "{}") if c_[6] else {}
             else:
                 if n_fetch >= enrich_limit:
                     continue
@@ -789,7 +893,8 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
                     if "한도" in str(e):
                         break
                     continue
-                conn.execute("INSERT OR REPLACE INTO dispute_struct (code, fetched, hp, ext, insiders, ally) VALUES (?,?,?,?,?,?)", (code, today.isoformat(), hp, json.dumps(ext, ensure_ascii=False), json.dumps(insiders, ensure_ascii=False), ally))
+                conn.execute("INSERT OR REPLACE INTO dispute_struct (code, fetched, hp, ext, insiders, ally, meta) VALUES (?,?,?,?,?,?,?)",
+                             (code, today.isoformat(), hp, json.dumps(ext, ensure_ascii=False), json.dumps(insiders, ensure_ascii=False), ally, json.dumps(STRUCT_META.get(code) or {}, ensure_ascii=False)))
                 time.sleep(0.15)
             # 내가 정한 역할(우호·중립·도전자)을 반영: 우호는 우호 지분에 더하고, 중립은 캐스팅보트로만, 도전자는 공적 기관이라도 도전자로 봄
             mine = tags.get(code) or {}
@@ -821,7 +926,7 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
             hp_eff = (hp + ally) if (hp is not None and ally) else hp          # 최대주주 측 + 계열·우호 회사 5% 보유분 = 우호 지분
             warn = data_warnings(hp_eff, ext, today)
             st_ = structure_score(hp_eff, ext, pbr.get(code))
-            states[code]["struct"] = dict(holder_pct=hp, ally_pct=ally or 0.0, friendly_pct=hp_eff, ext=ext, swing=swing_holders(hp_eff, ext), insiders=insiders[:12], warn=warn, pending=pending, **st_)
+            states[code]["struct"] = dict(holder_pct=hp, ally_pct=ally or 0.0, friendly_pct=hp_eff, ext=ext, swing=swing_holders(hp_eff, ext), insiders=insiders[:12], warn=warn, pending=pending, meta=STRUCT_META.get(code) or {}, **st_)
             # 공시한 쪽이 최대주주 측이면(지주사·계열사 포함) 분쟁 신호에서 뺌: 일반 5% 보고·외부 권유·주주제안·공개매수
             keep, dropped = [], []
             for e in by[code]:

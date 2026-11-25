@@ -150,5 +150,54 @@ class Analyze(unittest.TestCase):
         self.assertEqual([h["name"] for h in out["333333"][1]["struct"]["ext"]], ["맥쿼리"])
 
 
+class Reports(unittest.TestCase):
+    """사업·반기보고서의 '5% 이상 주주' 표와 기간 선택 (가비아: The Miri Strategic Fund 24.2%는 반기보고서에만 나옴)"""
+
+    def test_period_order(self):
+        self.assertEqual(D.hy_periods(dt.date(2026, 11, 26))[0], (2026, "11014"))
+        self.assertEqual(D.hy_periods(dt.date(2026, 9, 1))[0], (2026, "11012"))
+        self.assertEqual(D.hy_periods(dt.date(2026, 6, 1))[0], (2026, "11013"))
+        self.assertEqual(D.hy_periods(dt.date(2026, 3, 10)), [(2024, "11011")])
+
+    def test_holder_table(self):
+        txt = ("3. 주식의 분포\n가. 5% 이상 주주 현황\n구분\t주주명\t소유주식수\t지분율\t비고\n5% 이상 주주\tThe Miri Strategic Fund\t2,420,000\t24.2\t-\n"
+               "\t국민연금공단\t600,000\t6.0\t-\n우리사주조합\t-\t-\t-\t-\n나. 소액주주현황\n소액주주\t10,000\t95,000,000\t80.0\n")
+        got = {h["name"]: h["pct"] for h in D.parse_holder_table(txt)}
+        self.assertEqual(got, {"The Miri Strategic Fund": 24.2, "국민연금공단": 6.0})
+
+    def test_miri_is_activist(self):
+        self.assertTrue(D._is_activist("The Miri Strategic Fund"))
+        self.assertFalse(D.is_neutral_inst("The Miri Strategic Fund"))
+
+    def test_report_only_holder_is_added(self):
+        import fin_clues
+
+        class R:
+            def __init__(self, j):
+                self._j, self.status_code, self.content = j, 200, b""
+
+            def json(self):
+                return self._j
+
+        class Sess:
+            def get(self, url, params=None, timeout=0):
+                if "hyslrSttus" in url:
+                    ok = params["reprt_code"] == "11012"
+                    return R({"status": "000", "list": [{"nm": "김홍국", "trmend_posesn_stock_qota_rt": "26.0"}, {"nm": "계", "trmend_posesn_stock_qota_rt": "26.0"}]} if ok else {"status": "013"})
+                if "list.json" in url:
+                    return R({"status": "000", "list": [{"report_nm": "반기보고서 (2026.06)", "rcept_dt": "20260814", "rcept_no": "1"}]})
+                return R({"status": "000", "list": []})
+        orig = fin_clues.fetch_document_text
+        fin_clues.fetch_document_text = lambda *a, **k: "가. 5% 이상 주주 현황\n구분\t주주명\t소유주식수\t지분율\n5% 이상 주주\tThe Miri Strategic Fund\t2,420,000\t24.2\n나. 소액주주\n"
+        try:
+            hp, ext, _, _ = D.fetch_structure("079940", "c", "k", TODAY, Sess(), corp_name="가비아")
+        finally:
+            fin_clues.fetch_document_text = orig
+        self.assertEqual(hp, 26.0)
+        self.assertEqual([h["name"] for h in ext], ["The Miri Strategic Fund"])
+        self.assertEqual(D.STRUCT_META["079940"]["hy"], "2026 반기보고서")
+        self.assertTrue(D.structure_score(hp, ext, None)["contest"])
+
+
 if __name__ == "__main__":
     unittest.main()
