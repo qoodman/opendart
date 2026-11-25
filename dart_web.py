@@ -4748,7 +4748,10 @@ def _dsp_detail(conn, s_, code):
                      + (f'<div style="margin-top:6px;font-size:13px"><b>분쟁 가능성 근거</b> (구조 점수 {sc.get("score", 0)})<ul style="padding-left:18px;margin:4px 0">{why}</ul></div>' if why else "")
                      + ('<div style="margin-top:6px;font-size:13px"><b>🎚 캐스팅보트</b> — 두 쪽의 격차(' + f'{sc["swing"][0]["gap"]:.1f}%p' + ')보다 지분이 커서 표가 갈리면 승패를 가를 수 있는 보유자<ul style="padding-left:18px;margin:4px 0">'
                         + "".join(f'<li><b>{escape(x["name"])}</b> {x["pct"]:.1f}%' + (" (기관 — 의결권 행사 입장은 공개되거나 보도되는 경우가 많아요)" if x.get("inst") else "") + '</li>' for x in sc["swing"][:5]) + '</ul></div>' if sc.get("swing") else "")
-                     + '<div class="muted" style="font-size:11px">일반 = 경영참여 목적 보고, 약식 = 단순·일반투자 보고. 🎯 = 행동주의 성향으로 알려진 이름. 최대주주 측 지분은 연말 기준이라 최근 변동은 반영이 늦을 수 있어요. 최대주주와 특수관계인의 정확한 합계는 최대주주등소유주식변동신고서를 확인하세요.</div></div>')
+                     + ((f'<div style="margin-top:6px;font-size:12px"><b>최대주주 측으로 보고 뺀 공시</b> (지주사·계열사 포함 — 분쟁 상대가 아니에요): '
+                         + ", ".join(f'{escape(d.get("flr") or "")} ({escape(d.get("date", ""))})' for d in (pl.get("dropped") or [])[:5]) + '</div>') if pl.get("dropped") else "")
+                     + ((f'<div class="muted" style="font-size:11px;margin-top:4px">최대주주 측으로 본 이름: {escape(", ".join(sc.get("insiders") or []))} · 표기가 달라도(㈜·주식회사) 같은 곳으로 봐요</div>') if sc.get("insiders") else "")
+                     + '<div class="muted" style="font-size:11px">일반 = 경영참여 목적 보고, 약식 = 단순·일반투자 보고. 🎯 = 행동주의 성향으로 알려진 이름. 최대주주 측 지분은 연말 기준이라 최근 변동은 반영이 늦을 수 있어요. 최대주주와 특수관계인의 정확한 합계는 최대주주등소유주식변동신고서를 확인하세요. 최대주주 측 구분은 사업보고서의 최대주주·특수관계인 명단과 이름으로 맞추기 때문에 명단에 없는 계열사는 못 거를 수 있어요 — 그런 경우 알려 주세요.</div></div>')
     guide = ('<div class="card"><details><summary><b>이 신호들을 어떻게 읽나요?</b></summary><ul class="muted" style="font-size:13px;padding-left:18px">'
              '<li><b>🗳 주주측 위임장 권유</b>: 주총에서 표를 모으려는 준비예요. 보통 주총 몇 주 전에 나오고, 안건(이사 선임·정관 변경)을 참고서류에서 확인하세요.</li>'
              '<li><b>⚖ 가처분·소송</b>: 신주발행·의결권 행사·주총 개최를 법원에서 막거나 허용받으려는 싸움이에요. 결정 날짜가 분수령이 되는 경우가 많아요.</li>'

@@ -53,6 +53,27 @@ def _is_activist(name, strict=False):
     return any(a.lower() in (name or "").lower() for a in (ACTIVIST_STRICT if strict else ACTIVISTS))
 
 
+def norm_name(t):
+    """회사·사람 이름 비교용: 주식회사/㈜/(주)/유한회사, 공백·괄호·점 제거, 소문자"""
+    t = re.sub(r"주식회사|유한회사|유한책임회사|㈜|\(주\)|\(유\)", "", t or "")
+    return re.sub(r"[\s\(\)\[\]·\.,\-_&]", "", t).lower()
+
+
+def is_insider(name, insiders):
+    """최대주주 측(최대주주·특수관계인·계열회사)인지. 이름 표기가 달라도(㈜한진칼 / 주식회사 한진칼) 같은 곳으로 봄.
+    insiders: 최대주주 및 특수관계인 이름 집합(정규화 전)"""
+    n = norm_name(name)
+    if not n:
+        return False
+    for i in insiders:
+        m = norm_name(i)
+        if not m:
+            continue
+        if n == m or (len(m) >= 3 and (m in n or n in m) and min(len(m), len(n)) >= 3):
+            return True
+    return False
+
+
 def _same_company(flr, corp):
     n = lambda t: re.sub(r"[\s\(\)㈜]|주식회사", "", t or "")
     return bool(n(flr)) and (n(flr) == n(corp) or n(corp) in n(flr) or n(flr) in n(corp))
@@ -421,13 +442,13 @@ def fetch_structure(code, corp, key, today=None, session=None):
     for r in ms:
         who = (r.get("repror") or "").strip()
         d = r.get("rcept_dt") or ""
-        if not who or who in names:
+        if not who or is_insider(who, names):          # 최대주주 본인·특수관계인·계열사(지주사 포함)는 맞서는 쪽이 아님
             continue
         if who not in latest or d > latest[who]["date"]:
             latest[who] = dict(name=who, pct=_num(r.get("stkrt")), chg=_num(r.get("stkrt_irds")), tp=("일반" if "일반" in (r.get("report_tp") or "") else "약식" if "약식" in (r.get("report_tp") or "") else ""),
                                date=d, resn=(r.get("report_resn") or "")[:40], activist=_is_activist(who))
     ext = [h for h in latest.values() if h["pct"] and h["pct"] >= 5]
-    return holder_pct, ext
+    return holder_pct, ext, sorted(names)
 
 
 def _num(v):
@@ -469,14 +490,25 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
                 progress(f"지분 구조 {i}/{min(len(cand), enrich_limit)}")
             try:
                 cc = corp.get(code)
-                hp, ext = fetch_structure(code, cc, key, today, session)
+                hp, ext, insiders = fetch_structure(code, cc, key, today, session)
             except (DisputeError, requests.RequestException) as e:
                 log(f"  ✖ {code}: {e}")
                 if "한도" in str(e):
                     break
                 continue
             st_ = structure_score(hp, ext, pbr.get(code))
-            states[code]["struct"] = dict(holder_pct=hp, ext=ext, swing=swing_holders(hp, ext), **st_)
+            states[code]["struct"] = dict(holder_pct=hp, ext=ext, swing=swing_holders(hp, ext), insiders=insiders[:12], **st_)
+            # 공시한 쪽이 최대주주 측이면(지주사·계열사 포함) 분쟁 신호에서 뺌: 일반 5% 보고·외부 권유·주주제안·공개매수
+            keep, dropped = [], []
+            for e in by[code]:
+                if e["kind"] in ("blk_gen", "proxy_ext", "proposal", "tender") and is_insider(e.get("flr"), insiders):
+                    dropped.append(e)
+                else:
+                    keep.append(e)
+            if dropped:
+                by[code] = keep
+                states[code]["ev"] = assess_events(keep, today)
+                states[code]["dropped"] = [dict(date=e["date"], kind=e["kind"], flr=e.get("flr"), title=e["title"]) for e in dropped][:10]
             conn.execute("DELETE FROM dispute_holder WHERE code=?", (code,))
             conn.executemany("INSERT OR REPLACE INTO dispute_holder VALUES (?,?,?,?,?,?)", [(code, h["name"], h["pct"], h["tp"], h["date"], h["resn"]) for h in ext])
             time.sleep(0.15)
@@ -507,7 +539,7 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
         if level is None:
             continue
         prev = conn.execute("SELECT level, alerted FROM dispute_state WHERE code=?", (code,)).fetchone()
-        payload = dict(ev=s_["ev"], struct=s_["struct"], meeting=s_.get("meeting"), proxies=s_.get("proxies") or [], events=[e for e in sorted(by[code], key=lambda e: e["date"], reverse=True) if e["kind"] != "agm"][:30])
+        payload = dict(ev=s_["ev"], struct=s_["struct"], dropped=s_.get("dropped") or [], meeting=s_.get("meeting"), proxies=s_.get("proxies") or [], events=[e for e in sorted(by[code], key=lambda e: e["date"], reverse=True) if e["kind"] != "agm"][:30])
         conn.execute("INSERT OR REPLACE INTO dispute_state VALUES (?,?,?,?,?,?,?,?)",
                      (code, s_["name"], level, sc, json.dumps(payload, ensure_ascii=False), today.isoformat(), prev[0] if prev else None, prev[1] if prev else None))
         out += 1
