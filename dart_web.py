@@ -4760,7 +4760,7 @@ def view_dispute(conn, q):
            '🛡 자기주식 취득·처분/제3자 배정, ❓ 풍문 해명, 🚨 횡령·배임은 분쟁 중에 자주 나와서 <b>다른 신호와 함께일 때만</b> 점수에 반영해요.</div>'
            '<ul class="muted" style="font-size:13px;padding-left:18px"><li><b>치열</b>: 서로 다른 신호가 3가지 이상이거나, 위임장 권유+소송·가처분, 공개매수+위임장·가처분처럼 양쪽이 맞붙는 조합이 최근 90일 안에 있음 (최근 공시일수록 크게 셈)</li>'
            '<li><b>시작</b>: 위 신호가 최근 90일 안에 나왔고 아직 맞붙는 조합은 아님</li><li><b>징후</b>: 경영참여 목적 5% 보유자(특히 행동주의)가 새로 나타남</li>'
-           '<li><b>가능성</b>: 분쟁 공시는 없지만 구조가 위험함 — 최대주주 측과 가장 큰 외부 5% 보유자의 <b>지분 격차</b>가 작고, 경영참여·행동주의 보유자가 있거나, 외부 보유자가 지분을 늘리는 중 (저PBR이면 가산)</li></ul>'
+           '<li><b>가능성·징후의 조건</b>: 5% 이상을 가졌다는 것만으로는 분쟁이 아니에요. <b>최대주주 측 우호 지분(최대주주·특수관계인·계열·우호 회사)이 적고</b> 도전자 지분이 그에 견줄 때(격차 10%p 이내, 또는 도전자가 최대주주 측의 절반 이상 등)만 인정해요. 예를 들어 행동주의 펀드가 6%여도 최대주주 측이 35%면 분쟁으로 보지 않아요.</li><li><b>가능성</b>: 분쟁 공시는 없지만 구조가 위험함 — 최대주주 측과 가장 큰 외부 5% 보유자의 <b>지분 격차</b>가 작고, 경영참여·행동주의 보유자가 있거나, 외부 보유자가 지분을 늘리는 중 (저PBR이면 가산)</li></ul>'
            '<ul class="muted" style="font-size:12px;padding-left:18px"><li>제목으로 읽기 때문에 놓치거나 과하게 잡을 수 있어요(예: 회사 자체 위임장 권유는 약하게만 셈). 지분 격차는 최대주주 측 연말 지분과 최근 5% 보고를 견준 값이라 실제와 다를 수 있어요.</li>'
            '<li>공시는 사실이지만 <b>누가 이길지, 주가가 어떻게 될지는 알려 주지 않아요.</b> 분쟁 기대로 주가가 이미 크게 움직였을 수 있고, 합의로 끝나면 빠르게 식기도 해요. 투자 추천이 아니에요.</li></ul></details></div>')
     code = (q.get("code") or "").strip()
@@ -4924,6 +4924,8 @@ def _dsp_detail(conn, s_, code):
         rows = ""
         if sc.get("holder_pct") is not None:
             rows += f'<tr style="background:var(--chip)"><td><b>최대주주 및 특수관계인 합계</b></td><td><b>{sc["holder_pct"]:.2f}%</b></td><td>-</td><td class="muted">연말 사업보고서 기준</td><td></td></tr>'
+            if sc.get("ally_pct"):
+                rows += f'<tr style="background:var(--chip)"><td><b>+ 계열·우호 회사 5% 보유분</b></td><td><b>+{sc["ally_pct"]:.2f}%</b></td><td>-</td><td class="muted">우호 지분 합계 {sc.get("friendly_pct", 0):.2f}%</td><td></td></tr>'
         for h in sorted(sc["ext"], key=lambda h: -h["pct"]):
             chg_t = "" if h.get("chg") is None else format(h["chg"], "+.2f") + "%p"
             sh_ = h.get("shift") or ""

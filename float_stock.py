@@ -121,9 +121,10 @@ def run(conn, key, log=print, limit=2500, progress=None, session=None, today=Non
             corp = corp_code_for(code, cache, key, session=session)
             if not corp:
                 continue
-            hp, ext, insiders = dispute.fetch_structure(code, corp, key, today, session)
+            hp, ext, insiders, ally = dispute.fetch_structure(code, corp, key, today, session)
             if hp is None:
                 continue
+            hp = hp + (ally or 0.0)          # 계열·우호 회사 5% 보유분도 시장에 안 나오는 지분
             iss, trp = fetch_treasury(corp, key, today, session)
             simple, real, big = compute(hp, trp, ext)
             detail = dict(ext=[dict(name=h["name"], pct=h["pct"], tp=h.get("tp")) for h in ext][:6])

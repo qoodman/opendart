@@ -47,6 +47,10 @@ def ensure(conn):
     CREATE TABLE IF NOT EXISTS dispute_meta (key TEXT PRIMARY KEY, value TEXT);
     CREATE TABLE IF NOT EXISTS dispute_struct (code TEXT PRIMARY KEY, fetched TEXT, hp REAL, ext TEXT, insiders TEXT);
     """)
+    try:
+        conn.execute("ALTER TABLE dispute_struct ADD COLUMN ally REAL")
+    except sqlite3.OperationalError:
+        pass
 
 
 # ---------------- 분류 ----------------
@@ -272,6 +276,25 @@ def is_neutral_inst(name):
     return any(f.upper() in u for f in FOREIGN_PASSIVE)
 
 
+def contestable(holder_pct, ext_holders):
+    """외부 보유자가 최대주주 측(우호 지분 포함)의 경영권을 실제로 흔들 만한가. 5% 이상 가졌다는 것만으로는 분쟁이 아니라서,
+    최대주주 측 지분이 충분히 적고 도전자 지분이 그에 견줄 만할 때만 True:
+    ① 격차 10%p 이내  ② 도전자 지분이 최대주주 측의 절반 이상  ③ 경영참여·행동주의 도전자가 격차 15%p 이내이거나 최대주주 측의 35% 이상
+    ④ 도전자들을 합치면 최대주주 측의 70% 이상 (둘 이상일 때)"""
+    ch = sorted([h for h in ext_holders if h.get("pct") and not is_neutral_inst(h.get("name"))], key=lambda h: -h["pct"])
+    if holder_pct is None or not ch or holder_pct <= 0:
+        return False
+    top = ch[0]
+    gap, ratio = holder_pct - top["pct"], top["pct"] / holder_pct
+    if gap <= 10 or ratio >= 0.5:
+        return True
+    if (top.get("tp") == "일반" or top.get("activist")) and (gap <= 15 or ratio >= 0.35):
+        return True
+    if len(ch) >= 2 and sum(h["pct"] for h in ch) >= 0.7 * holder_pct:
+        return True
+    return False
+
+
 def structure_score(holder_pct, ext_holders, pbr=None):
     """최대주주 측 지분과 외부 5% 보유자들 → dict(score, reasons[], gap)
     ext_holders: [dict(name, pct, tp('일반'/'약식'), activist(bool), chg(최근 증감 %p), date)] (최대주주 측 제외)"""
@@ -281,6 +304,10 @@ def structure_score(holder_pct, ext_holders, pbr=None):
     ext = sorted([h for h in ext_holders if h.get("pct") and not is_neutral_inst(h.get("name"))], key=lambda h: -h["pct"])
     if not ext:                # 맞서는 쪽(공적 기관 제외 5% 보유자)이 없으면 분쟁 구조가 아님 — 지분율이 낮다는 이유만으로 가능성을 매기지 않음
         return dict(score=0, reasons=[], gap=None)
+    if not contestable(holder_pct, ext):      # 5% 이상 보유자가 있어도 최대주주 측과 격차가 크면 경영권 분쟁으로 보지 않음 (예: 행동주의 펀드 6% vs 최대주주 측 45%)
+        top = ext[0]
+        return dict(score=0, gap=(holder_pct - top["pct"]) if holder_pct is not None else None, contest=False,
+                    reasons=[f"외부 5% 보유자({top['name']} {top['pct']:.1f}%)가 있지만 최대주주 측" + (f" {holder_pct:.1f}%" if holder_pct is not None else "") + "에 견줄 지분이 아니라 경영권을 흔들기 어려워요 — 분쟁으로 보지 않아요"])
     if holder_pct is not None and ext:
         gap = holder_pct - ext[0]["pct"]
         if gap <= 5:
@@ -289,7 +316,7 @@ def structure_score(holder_pct, ext_holders, pbr=None):
         elif gap <= 10:
             score += 2
             reasons.append(f"최대주주 측 {holder_pct:.1f}% vs 최대 외부 보유자 {ext[0]['pct']:.1f}% — 격차 {gap:.1f}%p")
-        elif gap <= 20:
+        elif gap <= 15:
             score += 1
             reasons.append(f"최대주주 측과 최대 외부 보유자 격차 {gap:.1f}%p")
     if holder_pct is not None and holder_pct < 30:
@@ -328,7 +355,7 @@ def structure_score(holder_pct, ext_holders, pbr=None):
     if pbr is not None and 0 < pbr < 0.7 and score:
         score += 1
         reasons.append(f"PBR {pbr:.2f} — 자산 대비 저평가라 지분 확보 유인이 있어요")
-    return dict(score=score, reasons=reasons, gap=gap)
+    return dict(score=score, reasons=reasons, gap=gap, contest=True)
 
 
 STRUCT_TTL_DAYS = 7          # 지분 구조(최대주주 지분·5% 보유자)를 이 기간 안에는 다시 받지 않음
@@ -483,7 +510,7 @@ def find_meeting(events, key, today=None, session=None):
 
 
 def potential_level(sc):
-    return "가능성 높음" if sc >= 5 else "가능성" if sc >= 3 else None
+    return "가능성 높음" if sc >= 6 else "가능성" if sc >= 4 else None
 
 
 COMPANY_WORDS = ["㈜", "(주)", "주식회사", "홀딩스", "그룹", "물산", "생명", "화재", "전자", "증권", "은행", "건설", "재단", "투자", "자산운용", "파트너스", "펀드", "회사", "지주", "산업", "제약", "화학", "에너지", "금융", "보험", "카드", "캐피탈", "개발"]
@@ -571,9 +598,14 @@ def fetch_structure(code, corp, key, today=None, session=None, corp_name=""):
         if who and not is_insider(who, names) and not is_insider(who, aff) and not is_group_affiliate(who, corp_name, names):
             tp0 = "일반" if "일반" in (r.get("report_tp") or "") else "약식" if "약식" in (r.get("report_tp") or "") else ""
             hist.setdefault(who, []).append((r.get("rcept_dt") or "", tp0, _num(r.get("stkrt")), (r.get("report_resn") or "")))
+    ally = {}
     for r in ms:
         who = (r.get("repror") or "").strip()
         d = r.get("rcept_dt") or ""
+        if who and not is_insider(who, names) and (is_insider(who, aff) or is_group_affiliate(who, corp_name, names)):
+            pc_ = _num(r.get("stkrt"))             # 최대주주 명단에는 없지만 계열·우호 회사로 본 5% 보유자: 우호 지분으로 더함
+            if pc_ is not None and (who not in ally or d > ally[who][0]):
+                ally[who] = (d, pc_)
         if not who or is_insider(who, names) or is_insider(who, aff) or is_group_affiliate(who, corp_name, names):          # 최대주주 본인·특수관계인·타법인 출자 공시로 본 계열·우호 회사·같은 그룹 계열사는 맞서는 쪽이 아님
             continue
         if who not in latest or d > latest[who]["date"]:
@@ -582,7 +614,8 @@ def fetch_structure(code, corp, key, today=None, session=None, corp_name=""):
     ext = [h for h in latest.values() if h["pct"] and h["pct"] >= 5]
     for h in ext:
         h.update(purpose_shift(hist.get(h["name"], [])))
-    return holder_pct, ext, sorted(names) + sorted(aff)[:150]
+    ally_pct = sum(p for _, p in ally.values() if p >= 5)
+    return holder_pct, ext, sorted(names) + sorted(aff)[:150], round(ally_pct, 2)
 
 
 def purpose_shift(rows):
@@ -641,7 +674,7 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
     except sqlite3.Error:
         pass
     if key:
-        cached = {r[0]: r for r in conn.execute("SELECT code, fetched, hp, ext, insiders FROM dispute_struct")}
+        cached = {r[0]: r for r in conn.execute("SELECT code, fetched, hp, ext, insiders, ally FROM dispute_struct")}
         ttl = (today - dt.timedelta(days=STRUCT_TTL_DAYS)).isoformat()
         n_fetch = 0
         for i, code in enumerate(cand):
@@ -649,23 +682,24 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
                 progress(f"지분 구조 {i}/{len(cand)}")
             c_ = cached.get(code)
             if c_ and c_[1] >= ttl:                       # 며칠 안에 받은 지분 구조는 다시 받지 않음 (그만큼 더 많은 종목을 훑게 됨)
-                hp, ext, insiders = c_[2], json.loads(c_[3] or "[]"), json.loads(c_[4] or "[]")
+                hp, ext, insiders, ally = c_[2], json.loads(c_[3] or "[]"), json.loads(c_[4] or "[]"), (c_[5] or 0.0)
             else:
                 if n_fetch >= enrich_limit:
                     continue
                 try:
                     cc = corp.get(code)
-                    hp, ext, insiders = fetch_structure(code, cc, key, today, session, corp_name=names.get(code, ""))
+                    hp, ext, insiders, ally = fetch_structure(code, cc, key, today, session, corp_name=names.get(code, ""))
                     n_fetch += 1
                 except (DisputeError, requests.RequestException) as e:
                     log(f"  ✖ {code}: {e}")
                     if "한도" in str(e):
                         break
                     continue
-                conn.execute("INSERT OR REPLACE INTO dispute_struct VALUES (?,?,?,?,?)", (code, today.isoformat(), hp, json.dumps(ext, ensure_ascii=False), json.dumps(insiders, ensure_ascii=False)))
+                conn.execute("INSERT OR REPLACE INTO dispute_struct (code, fetched, hp, ext, insiders, ally) VALUES (?,?,?,?,?,?)", (code, today.isoformat(), hp, json.dumps(ext, ensure_ascii=False), json.dumps(insiders, ensure_ascii=False), ally))
                 time.sleep(0.15)
-            st_ = structure_score(hp, ext, pbr.get(code))
-            states[code]["struct"] = dict(holder_pct=hp, ext=ext, swing=swing_holders(hp, ext), insiders=insiders[:12], **st_)
+            hp_eff = (hp + ally) if (hp is not None and ally) else hp          # 최대주주 측 + 계열·우호 회사 5% 보유분 = 우호 지분
+            st_ = structure_score(hp_eff, ext, pbr.get(code))
+            states[code]["struct"] = dict(holder_pct=hp, ally_pct=ally or 0.0, friendly_pct=hp_eff, ext=ext, swing=swing_holders(hp_eff, ext), insiders=insiders[:12], **st_)
             # 공시한 쪽이 최대주주 측이면(지주사·계열사 포함) 분쟁 신호에서 뺌: 일반 5% 보고·외부 권유·주주제안·공개매수
             keep, dropped = [], []
             for e in by[code]:
@@ -678,8 +712,8 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
                 states[code]["ev"] = assess_events(keep, today)
                 states[code]["dropped"] = [dict(date=e["date"], kind=e["kind"], flr=e.get("flr"), title=e["title"]) for e in dropped][:10]
             # 최대주주 측 지분이 50% 이상이면 분쟁이 생길 수 없다고 보고 이 종목은 판정에서 통째로 뺌
-            if hp is not None and hp >= MAJORITY:
-                states[code]["majority"] = hp
+            if hp_eff is not None and hp_eff >= MAJORITY:
+                states[code]["majority"] = hp_eff
             conn.execute("DELETE FROM dispute_holder WHERE code=?", (code,))
             conn.executemany("INSERT OR REPLACE INTO dispute_holder VALUES (?,?,?,?,?,?)", [(code, h["name"], h["pct"], h["tp"], h["date"], h["resn"]) for h in ext])
     if key:
@@ -700,7 +734,7 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
         except Exception:
             pass
     out = 0
-    skipped = 0
+    skipped = weak = 0
     for code, s_ in states.items():
         if s_.get("majority") is not None:          # 최대주주 측 50% 이상 → 분쟁 판정 대상 아님
             skipped += 1
@@ -712,6 +746,17 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
             level, sc = pot, float(s_["struct"]["score"])
         if level is None:
             continue
+        stc = s_["struct"]
+        ev_ = s_["ev"] or {}
+        hard = set(ev_.get("hot") or []) - {"proposal", "owner_chg"}          # 소송·가처분·공개매수·외부 위임장 권유는 그 자체가 분쟁 신호
+        if ev_ and not hard:
+            # 5% 일반 보고·행동주의 이름·주주제안·최대주주 변경만으로는 분쟁이 아님: 최대주주 측 우호 지분이 적어 실제로 흔들 수 있을 때만 인정
+            if level == "징후" and not (stc and stc.get("contest")):
+                weak += 1
+                continue
+            if level in ("시작", "치열") and stc and stc.get("contest") is False:
+                weak += 1
+                continue
         prev = conn.execute("SELECT level, alerted FROM dispute_state WHERE code=?", (code,)).fetchone()
         payload = dict(ev=s_["ev"], struct=s_["struct"], dropped=s_.get("dropped") or [], majority=s_.get("majority"), meeting=s_.get("meeting"), proxies=s_.get("proxies") or [], events=[e for e in sorted(by[code], key=lambda e: e["date"], reverse=True) if e["kind"] != "agm"][:30])
         conn.execute("INSERT OR REPLACE INTO dispute_state VALUES (?,?,?,?,?,?,?,?)",
@@ -720,7 +765,7 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
     # 더는 해당 없는 종목은 지움
     conn.execute("DELETE FROM dispute_state WHERE updated < ?", (today.isoformat(),))
     conn.commit()
-    log(f"[지분분쟁] 판정 종목 {out}개" + (f" (최대주주 측 {MAJORITY:.0f}% 이상이라 뺀 종목 {skipped}개)" if skipped else ""))
+    log(f"[지분분쟁] 판정 종목 {out}개" + (f" (최대주주 측 {MAJORITY:.0f}% 이상이라 뺀 종목 {skipped}개)" if skipped else "") + (f" (경영권을 흔들 만한 구조가 아니라 뺀 약한 신호 {weak}개)" if weak else ""))
     return out
 
 
