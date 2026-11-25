@@ -4753,6 +4753,9 @@ def view_dispute(conn, q):
             '<form method="post" action="/dispute/run" class="filters" style="margin:8px 0 0">'
             f'<button{" disabled" if running else ""}>{"진행 중…" if running else ("공시 새로 훑기" if states else "공시 훑고 분석하기")}</button>'
             '<span class="muted" style="font-size:12px">처음엔 최근 120일 공시를 훑어 몇 분 걸리고(별도 프로세스), 다음부터는 새 공시만 봐요. 새로 시작·치열이 되면 푸시로 알려요.</span></form>'
+            + ('<form method="post" action="/dispute/reset" class="filters" style="margin:6px 0 0" onsubmit="return confirm(\'지분분쟁 결과를 모두 지우고 처음부터 다시 분석할까요? (내가 정한 역할·제외는 남아요, 몇 분 걸려요)\')">'
+               f'<button{" disabled" if running else ""}>모두 지우고 새로 분석</button>'
+               '<span class="muted" style="font-size:12px">엉뚱한 종목이 남아 있을 때: 예전 판정·공시 신호·지분 구조 저장분을 모두 지우고 새 규칙으로 다시 만들어요.</span></form>')
             + status_steps_html(st, running) + '</div>')
     how = ('<div class="card"><details><summary><b>어떻게 찾고 판단하나요? (꼭 알아 둘 한계)</b></summary>'
            '<div style="font-size:13px;margin-top:6px"><b>벌어지고 있다는 신호</b>(공시 제목으로 잡아요): ⚖ 경영권 분쟁 소송·가처분(신주발행금지·의결권행사금지·주총금지) · 🗳 <b>주주측 위임장 권유</b>(회사가 아닌 쪽이 의결권을 모으는 표 대결) · '
@@ -8392,6 +8395,12 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 S = settings()
                 ok, why = S["float_run"]() if "float_run" in S else (False, "이 서버 버전은 지원하지 않아요")
                 return self._redirect("/ideas?" + urlencode({"t": "float", "msg": ("✔ " if ok else "✖ ") + why}))
+            if path == "/dispute/reset" and settings_api:
+                n = min(int(self.headers.get("Content-Length") or 0), 4096)
+                self.rfile.read(n)
+                S = settings()
+                ok, why = S["dispute_reset"]() if "dispute_reset" in S else (False, "이 서버 버전은 지원하지 않아요")
+                return self._redirect("/ideas?" + urlencode({"t": "dispute", "msg": ("✔ " if ok else "✖ ") + why}))
             if path == "/dispute/tag" and settings_api:
                 n = min(int(self.headers.get("Content-Length") or 0), 4096)
                 form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore"), keep_blank_values=True).items()}
