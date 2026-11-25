@@ -7209,7 +7209,7 @@ def fin_chip(conn, code, long=True):
     if not f:
         return ""
     cls = {"A": "up", "D": "down"}.get(f["grade"], "")
-    parts = " · ".join(f'{k[:2]} {int(f["parts"].get(k, 0))}' for k in ("성장", "수익성", "현금", "안정성")) if long else ""
+    parts = " · ".join(f'{k[:2]} {int(f["parts"].get(k) or 0)}' for k in ("성장", "수익성", "현금", "안정성")) if long else ""
     return (f'<a class="chip {cls}" style="text-decoration:none;font-weight:700" href="/ideas?{urlencode({"t": "fin", "code": code})}" title="재무제표 분석 점수 ({escape(f["label"])})">재무 {f["grade"]} {int(f["score"])}</a>'
             + (f' <span class="muted" style="font-size:11px">{parts}</span>' if long else ""))
 
@@ -7945,6 +7945,14 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     body = view_stock(conn, q.get("code", ""), q)
                 else:
                     body = None
+            except Exception as e:      # 화면 계산 중 오류가 나도 연결이 끊기지 않게 오류 화면을 보여 줌 (서버 로그에는 전체 내용)
+                import traceback
+                traceback.print_exc()
+                tb = "".join(traceback.format_exception(type(e), e, e.__traceback__)[-4:])
+                body = page("오류", '<div class="card warn"><b>이 화면을 만드는 중 오류가 났어요</b>'
+                                    f'<div style="margin-top:6px">{escape(type(e).__name__)}: {escape(str(e)[:300])}</div>'
+                                    f'<pre style="white-space:pre-wrap;font-size:11px;overflow:auto">{escape(tb[-900:])}</pre>'
+                                    '<div class="muted" style="font-size:12px">이 내용을 알려 주시면 고칠 수 있어요. 다른 탭은 그대로 열려요.</div></div>')
             finally:
                 _CTX.pre = ""
                 conn.close()
