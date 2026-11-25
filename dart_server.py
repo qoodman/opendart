@@ -1648,6 +1648,23 @@ def is_running():
         return True
 
 
+STUCK_SEC = 900
+
+
+def run_stuck():
+    """수집 잠금은 잡혀 있는데 진행 상태가 15분 넘게 갱신이 없으면 멈춘 수집으로 본다. (멈춤 여부, 마지막 단계 문구)"""
+    if not is_running():
+        return False, ""
+    try:
+        st = json.loads(status_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True, "진행 상태 파일이 없어요"
+    age = time.time() - float(st.get("updated") or 0)
+    if age > STUCK_SEC:
+        return True, f"{st.get('stage', '')} 단계에서 {age / 60:.0f}분째 진행이 없어요"
+    return False, ""
+
+
 def write_status(eng, state, extra=None):
     s = eng.status() if eng else {}
     s.update(state=state, updated=time.time(), heartbeat=eng.heartbeat_line() if eng else "")
@@ -1991,7 +2008,8 @@ def check_update():
 def start_update():
     """업데이트를 별도 작업으로 시작 (대시보드가 재시작돼도 끊기지 않게). (성공 여부, 문구)"""
     import subprocess, pwd
-    if is_running():
+    stuck, why = run_stuck()
+    if is_running() and not stuck:
         return False, "수집 중에는 업데이트하지 않습니다. 끝난 뒤 다시 눌러 주세요."
     if update_running():
         return False, "이미 업데이트 중입니다."
@@ -2005,7 +2023,9 @@ def start_update():
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         return False, f"업데이트를 시작하지 못했습니다: {(r.stderr or r.stdout)[-200:]}"
-    return True, "업데이트를 시작했습니다. 1~3분 뒤 이 화면을 새로고침하세요. 중간에 화면이 잠깐 끊길 수 있습니다."
+    extra = (f" (수집이 멈춘 것으로 보여({why}) 그대로 진행했어요. 멈춘 수집은 자동으로 끊지 않으니 서버에서 "
+             "`sudo systemctl stop dart-daily` 또는 `pkill -f \"dart_server.py run\"`로 정리해 주세요)") if stuck else ""
+    return True, "업데이트를 시작했습니다. 1~3분 뒤 이 화면을 새로고침하세요. 중간에 화면이 잠깐 끊길 수 있습니다." + extra
 
 
 def auto_update_tick(now):
