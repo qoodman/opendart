@@ -562,8 +562,22 @@ def record_reports(result):
         pass
 
 
+def touch_progress():
+    """수집이 실제로 진행 중이라는 흔적 (멈춤 감지용). 로그 한 줄이 나올 때마다 갱신"""
+    try:
+        (data_dir() / "run_progress.txt").write_text(str(time.time()), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def run_market_policy(log=print):
     """시장 지표와 정책 소식 받기 (켜진 것만). 새 정책 소식이 있으면 알림."""
+    _log = log
+
+    def log(m=""):
+        touch_progress()
+        _log(m)
+    touch_progress()
     out = {}
     if env("DART_MARKET", "1") != "0":
         try:
@@ -1648,18 +1662,42 @@ def is_running():
         return True
 
 
-STUCK_SEC = 900
+STUCK_SEC = 1500      # 진행 흔적이 25분 동안 그대로면 멈춘 것으로 봄
 
 
-def run_stuck():
-    """수집 잠금은 잡혀 있는데 진행 상태가 15분 넘게 갱신이 없으면 멈춘 수집으로 본다. (멈춤 여부, 마지막 단계 문구)"""
-    if not is_running():
-        return False, ""
+def _progress_sig():
+    """지금 진행 상태의 지문: 처리 건수·단계·진행 흔적 시각·API 호출 수 중 하나라도 바뀌면 진행 중"""
     try:
         st = json.loads(status_file().read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return True, "진행 상태 파일이 없어요"
-    age = time.time() - float(st.get("updated") or 0)
+        st = {}
+    try:
+        prog = (data_dir() / "run_progress.txt").read_text().strip()
+    except OSError:
+        prog = ""
+    return [st.get("done"), st.get("stage"), st.get("calls"), prog], st
+
+
+def run_stuck(update=False):
+    """수집 잠금은 잡혀 있는데 진행 지문이 25분 넘게 그대로면 멈춘 수집. (멈춤 여부, 문구)
+    update=True(10분마다 도는 tick)일 때 지문과 바뀐 시각을 data/run_sig.json에 기록"""
+    if not is_running():
+        return False, ""
+    sig, st = _progress_sig()
+    f = data_dir() / "run_sig.json"
+    try:
+        old = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        old = None
+    now = time.time()
+    if not old or old.get("sig") != sig:
+        if update or not old:
+            try:
+                f.write_text(json.dumps(dict(sig=sig, since=now)), encoding="utf-8")
+            except OSError:
+                pass
+        return False, ""
+    age = now - float(old.get("since") or now)
     if age > STUCK_SEC:
         return True, f"{st.get('stage', '')} 단계에서 {age / 60:.0f}분째 진행이 없어요"
     return False, ""
@@ -1865,7 +1903,7 @@ def news_tick(now):
 
 def stuck_tick():
     """수집이 멈춘 것 같으면(잠금은 잡혀 있고 진행이 15분 넘게 없음) 한 번만 푸시하고, 진단용으로 상태를 파일에 남김"""
-    stuck, why = run_stuck()
+    stuck, why = run_stuck(update=True)
     if not stuck:
         return False
     try:
