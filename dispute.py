@@ -744,7 +744,10 @@ def fetch_structure(code, corp, key, today=None, session=None, corp_name=""):
         nm = h["name"]
         if is_insider(nm, names) or is_insider(nm, aff) or is_group_affiliate(nm, corp_name, names):
             continue
-        if any(is_insider(nm, [e["name"]]) or is_insider(e["name"], [nm]) for e in ext):
+        same = next((e for e in ext if is_insider(nm, [e["name"]]) or is_insider(e["name"], [nm])), None)
+        if same is not None:
+            if same.get("pct") is not None and abs(same["pct"] - h["pct"]) >= 3.0:          # 같은 보유자인데 5% 보고와 정기보고서 표의 지분이 3%p 넘게 다름 → 점검 화면에 알림
+                same["rep_pct"] = h["pct"]
             continue
         ext.append(dict(name=nm, pct=h["pct"], tp="", chg=None, date=(rinfo[1] if rinfo else ""), resn="정기보고서 5% 주주 표", activist=_is_activist(nm), rcept_no=(rinfo[2] if rinfo else ""),
                         src="report", shift="", grow=0.0, first_pct=h["pct"], track=[], acc_months=0, pct_1y=None, acc_up=0, slow=False))

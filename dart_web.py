@@ -4762,6 +4762,52 @@ def view_float(conn, q):
     return page("품절주", flash + prep + head + how)
 
 
+def _dsp_check(conn):
+    """지분분쟁 지분 자료 점검: 가비아처럼 5% 보고에 안 잡히다 정기보고서 표에서 나온 보유자, 공개매수로 뺀 보고자, 지분 자료 경고, 5% 보고와 정기보고서 지분이 다른 보유자를 한곳에 모음"""
+    import dispute as dp
+    states = dp.load_states(conn)
+    only_rep, pend, warns, diff = [], [], [], []
+    hy_cnt, rep_ok, no_meta = {}, 0, 0
+    for s_ in states:
+        sc = (s_["payload"] or {}).get("struct") or {}
+        name = f'{escape(s_["name"] or s_["code"])}'
+        link = f'<a href="/ideas?{urlencode({"t": "dispute", "code": s_["code"]})}"><b>{name}</b></a> <span class="muted" style="font-size:11px">{escape(s_["code"])} · {escape(s_["level"])}</span>'
+        meta = sc.get("meta")
+        if sc:
+            if meta:
+                hy_cnt[(meta.get("hy") or "?")] = hy_cnt.get((meta.get("hy") or "?"), 0) + 1
+                rep_ok += 1 if meta.get("report") else 0
+            else:
+                no_meta += 1
+        for h in sc.get("ext") or []:
+            if h.get("src") == "report":
+                only_rep.append((link, h["name"], h["pct"], (meta or {}).get("report", "")))
+            if h.get("rep_pct") is not None:
+                diff.append((link, h["name"], h["pct"], h["rep_pct"]))
+        for x in sc.get("pending") or []:
+            pend.append((link, x["name"], x.get("pct")))
+        for w in sc.get("warn") or []:
+            warns.append((link, w))
+    def tbl(title, desc, head, rows, fmt):
+        if not rows:
+            return f'<div class="card"><b>{title}</b> <span class="muted">0건</span><div class="muted" style="font-size:12px">{desc}</div></div>'
+        return (f'<div class="card"><details><summary><b>{title}</b> <span class="muted">{len(rows)}건</span></summary><div class="muted" style="font-size:12px;margin:4px 0">{desc}</div>'
+                f'<div class="scroll"><table><tr>{head}</tr>' + "".join(fmt(r) for r in rows[:80]) + '</table></div>' + ('<div class="muted" style="font-size:11px">80건까지만 보여 줘요.</div>' if len(rows) > 80 else "") + '</details></div>')
+    cov = ('<div class="card"><b>🔎 지분 자료 점검</b><div class="muted" style="font-size:13px">판정에 쓴 지분 자료가 얼마나 빠짐없이 읽혔는지, 가비아처럼 5% 보고에 안 잡히던 보유자가 있는지 모아 봤어요. '
+           f'판정 종목 {len(states)}개 · 정기보고서 5% 주주 표를 읽은 종목 {rep_ok}개' + (f' · <b class="down">예전 분석이라 기준 정보가 없는 종목 {no_meta}개 (공시 새로 훑기/모두 지우고 새로 분석 후 점검돼요)</b>' if no_meta else "")
+           + '</div>' + ('<div style="margin-top:6px;font-size:12px">최대주주 현황 기준: ' + " · ".join(f"{escape(k)} {v}개" for k, v in sorted(hy_cnt.items(), key=lambda x: -x[1])) + '</div>' if hy_cnt else "")
+           + '<div class="muted" style="font-size:11px;margin-top:4px">이 점검은 이 서버에 저장된 판정 결과만 봐요. DART에서 새로 받은 것이 아니라서, 최신 반영은 위 버튼으로 다시 분석한 뒤에 정확해요.</div></div>')
+    return (cov
+            + tbl("5% 보고에는 없고 정기보고서 표에만 있는 보유자 (가비아형)", "대량보유 보고(5% 보고) 목록에는 안 나오지만 사업·반기보고서의 5% 이상 주주 표에 있어서 보유자로 더한 경우예요. 지분 판단이 크게 달라질 수 있는 종목이에요.",
+                   "<th>종목</th><th>보유자</th><th>지분</th><th>읽은 보고서</th>", only_rep, lambda r: f'<tr><td>{r[0]}</td><td>{escape(r[1])}</td><td>{r[2]:.1f}%</td><td class="muted">{escape(r[3])}</td></tr>')
+            + tbl("5% 보고와 정기보고서 지분이 3%p 넘게 다른 보유자", "같은 보유자인데 두 자료의 지분이 많이 달라요. 한쪽이 옛 값이거나 특별관계자 합산일 수 있어 원문을 확인하세요.",
+                  "<th>종목</th><th>보유자</th><th>5% 보고</th><th>정기보고서</th>", diff, lambda r: f'<tr><td>{r[0]}</td><td>{escape(r[1])}</td><td>{r[2]:.1f}%</td><td>{r[3]:.1f}%</td></tr>')
+            + tbl("공개매수·인수 진행 중이라 지분 비교에서 뺀 보고자", "공개매수 신고서를 낸 쪽의 보고 지분이에요. 실제 보유인지 확인이 필요하면 상세에서 '내 판단'으로 바꿀 수 있어요.",
+                  "<th>종목</th><th>보고자</th><th>예정 지분</th>", pend, lambda r: f'<tr><td>{r[0]}</td><td>{escape(r[1])}</td><td>{("%.1f%%" % r[2]) if r[2] is not None else "-"}</td></tr>')
+            + tbl("지분 자료 확인 필요 경고", "도전자 지분이 최대주주 측보다 큼·지분 합이 100% 초과·1년 넘은 보고 같은 이상 징후예요.",
+                  "<th>종목</th><th>내용</th>", warns, lambda r: f'<tr><td>{r[0]}</td><td style="font-size:12px">{escape(r[1])}</td></tr>'))
+
+
 def view_dispute(conn, q):
     """시장 → 지분분쟁: 분쟁 가능성이 있는 종목, 막 시작한 종목, 치열하게 싸우는 종목"""
     import dispute as dp
@@ -4799,6 +4845,8 @@ def view_dispute(conn, q):
     code = (q.get("code") or "").strip()
     if code:
         return page("지분분쟁", flash + _dsp_detail(conn, by_code.get(code), code))
+    if q.get("chk") == "1":
+        return page("지분분쟁 점검", '<div class="card"><a href="/ideas?t=dispute" class="muted" style="font-size:12px">← 목록</a></div>' + _dsp_check(conn))
     if not states:
         return page("지분분쟁", flash + prep + how + '<div class="card muted">아직 분석한 결과가 없어요. 위 버튼으로 공시를 훑어 주세요 (DART 키가 설정에 있어야 해요).</div>', refresh=running)
     lv_sel = q.get("lv") if q.get("lv") in dp.LEVEL_ORDER else ""
@@ -4856,6 +4904,7 @@ def view_dispute(conn, q):
     if slow_n or slow_only:
         chips += (f' <b class="chip" style="background:var(--accent);color:var(--bg)">🕰 장기 누적 {slow_n}</b>' if slow_only else
                   f' <a class="chip" href="/ideas?{urlencode({"t": "dispute", "slow": "1", **hq})}" title="1년 가까이 천천히 지분을 모아 온 도전자가 있는 종목">🕰 장기 누적 {slow_n}</a>')
+    chips += ' <a class="chip" href="/ideas?t=dispute&chk=1" title="지분 자료가 빠짐없이 읽혔는지 점검">🔎 지분 자료 점검</a>'
     chips += f' <span style="margin-left:6px">{halt_chip_}</span>'
     flt = []
     for lab, k, v in (("최대주주 측 30% 이하", "ho", "30"), ("40% 이하", "ho", "40"), ("🎯 행동주의 도전자", "ac", "1"), ("📅 주총 90일 내", "mt", "1"), ("📢 공개매수·인수 진행", "tn", "1"), ("시총 1천억↑", "mc", "1000"), ("3천억↑", "mc", "3000")):
