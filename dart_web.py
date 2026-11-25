@@ -4826,6 +4826,16 @@ def view_dispute(conn, q):
         items = [s_ for s_ in states if s_["level"] == lv and (not kw or kw in (s_["name"] or "") or kw in s_["code"])]
         if not items:
             continue
+
+        def _urgency(s_):
+            """주총이 임박한 종목(앞으로 90일 안)을 먼저, 그다음 점수 높은 순"""
+            mt_ = (s_["payload"] or {}).get("meeting")
+            try:
+                dd = (dt.date.fromisoformat(mt_["date"]) - dt.date.today()).days if mt_ else None
+            except (ValueError, KeyError, TypeError):
+                dd = None
+            return (0 if dd is not None and 0 <= dd <= 90 else 1, dd if dd is not None and 0 <= dd <= 90 else 0, -s_["score"])
+        items.sort(key=_urgency)
         body = ""
         for s_ in items[:60]:
             pl = s_["payload"]
