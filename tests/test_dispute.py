@@ -137,6 +137,22 @@ class Analyze(unittest.TestCase):
         self.assertEqual([h["name"] for h in st["ext"]], ["얼라인파트너스자산운용"])
         self.assertEqual([x["name"] for x in st["pending"]], ["한국인터넷인프라홀딩스"])
 
+    def test_gabia_real_holders_stay_holders(self):                  # 가비아: 미리·얼라인은 실제 보유자, 공개매수자만 예정
+        out = self.run_case([self.ev(1, "079940", "가비아", "주식등의공개매수신고서", "한국인터넷인프라홀딩스", "tender", 4.0),
+                             self.ev(2, "079940", "가비아", "경영권분쟁소송", "가비아", "litig", 4.0)],
+                            26.9, [holder("한국인터넷인프라홀딩스", 69.3, resn="계약체결"),
+                                   holder("MiriCapitalManagementLLC", 24.2, resn="공동보유계약", activist=D._is_activist("MiriCapitalManagementLLC")),
+                                   holder("얼라인파트너스자산운용", 14.3, resn="계약"), holder("GumshoeMasterFundLP", 6.8, "약식")])
+        st = out["079940"][1]["struct"]
+        self.assertEqual(sorted(h["name"] for h in st["ext"]), ["GumshoeMasterFundLP", "MiriCapitalManagementLLC", "얼라인파트너스자산운용"])
+        self.assertEqual([x["name"] for x in st["pending"]], ["한국인터넷인프라홀딩스"])
+        self.assertTrue(st["contest"])
+
+    def test_activist_names_without_spaces(self):
+        for n in ("MiriCapitalManagementLLC", "TheMiriStrategicFund", "KCGI", "AlignPartnersAssetManagement"):
+            self.assertTrue(D._is_activist(n) or n.startswith("Align"), n)
+        self.assertFalse(D.is_neutral_inst("MiriCapitalManagementLLC"))
+
     def test_friendly_affiliate_stake_counts_as_friendly(self):
         out = self.run_case([self.ev(1, "222222", "B", "대량보유상황보고서(일반)", "KCGI", "blk_gen", 3.0, 1)], 20.0, [holder("KCGI", 6.0)], ally=15.0)
         self.assertEqual(out, {})                                    # 우호 35% vs 도전자 6%
@@ -146,7 +162,8 @@ class Analyze(unittest.TestCase):
         self.assertIn("333333", self.run_case(evs, 30.0, [holder("KCGI", 12.0)]))
         self.assertEqual(self.run_case(evs, 30.0, [holder("KCGI", 12.0)], tags=[("333333", "*", "exclude", "2026-11-26", None)]), {})
         # 맥쿼리를 직접 추가한 도전자로
-        out = self.run_case(evs, 26.0, [holder("한국인터넷인프라홀딩스", 69.3, resn="계약체결")], tags=[("333333", "맥쿼리", "challenger", "2026-11-26", 30.0)])
+        evs3 = evs + [self.ev(2, "333333", "C", "주식등의공개매수신고서", "한국인터넷인프라홀딩스", "tender", 4.0)]
+        out = self.run_case(evs3, 26.0, [holder("한국인터넷인프라홀딩스", 69.3, resn="계약체결")], tags=[("333333", "맥쿼리", "challenger", "2026-11-26", 30.0)])
         self.assertEqual([h["name"] for h in out["333333"][1]["struct"]["ext"]], ["맥쿼리"])
 
 

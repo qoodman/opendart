@@ -56,8 +56,14 @@ def ensure(conn):
 
 
 # ---------------- 분류 ----------------
+def _squash(t):
+    return re.sub(r"[\s\(\)\[\]·\.,\-_&]", "", (t or "")).lower()
+
+
 def _is_activist(name, strict=False):
-    return any(a.lower() in (name or "").lower() for a in (ACTIVIST_STRICT if strict else ACTIVISTS))
+    """행동주의 이름 포함 여부. DART 이름은 'MiriCapitalManagementLLC'처럼 띄어쓰기가 없는 경우가 많아 공백·기호를 뺀 채로 비교"""
+    n = _squash(name)
+    return any(_squash(a) in n for a in (ACTIVIST_STRICT if strict else ACTIVISTS))
 
 
 def norm_name(t):
@@ -918,7 +924,8 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
                 ext, ally = ext2, ally2
             pending = []
             for h in ext:            # 공개매수·인수 계약 진행 중인 보고자의 지분은 아직 실제 보유가 아닐 수 있음 → 보유자 목록·지분 비교에서 빼고 '진행 중'으로 따로 보여 줌
-                if not h.get("manual") and (any(e["kind"] == "tender" and e.get("flr") and is_insider(h["name"], [e["flr"]]) for e in by[code]) or re.search(r"계약|공개매수", h.get("resn") or "")):
+                # 공개매수 신고서를 낸 쪽(공개매수자)의 보고 지분만 '예정'으로 봄. 보고 사유에 '계약'이 있다는 것만으로는 안 됨 (공동보유 계약 등 실제 보유자도 흔함)
+                if not h.get("manual") and any(e["kind"] == "tender" and e.get("flr") and is_insider(h["name"], [e["flr"]]) for e in by[code]):
                     h["pending"] = True
                     pending.append(dict(name=h["name"], pct=h.get("pct"), date=h.get("date"), resn=h.get("resn"), rcept_no=h.get("rcept_no")))
             if pending:
