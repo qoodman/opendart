@@ -1108,14 +1108,14 @@ def _conc_card(conn):
         return ('<div class="card"><b>코스피 쏠림 — 시총 상위 종목 비중</b><div class="muted" style="font-size:13px">아직 자료가 없어요. <b>지금 수집 → 시장·정책만</b>을 한 번 돌리면 들어와요 (키 불필요).</div></div>')
     rows = a["rows"][:10]
     pc = lambda v: "-" if v is None else f"{v:.0%}"
-    trs = "".join(f'<tr><td>{r["rank"]}</td><td><b>{escape(r["name"])}</b></td><td>{r["w"]:.1%}</td><td>{pc(r["v20"])}</td><td>{pc(r["v60"])}</td><td>{pc(r.get("risk"))}</td></tr>' for r in rows)
+    trs = "".join(f'<tr><td>{r["rank"]}</td><td><b>{escape(r["name"])}</b></td><td>{r["w"]:.1%}</td><td>{pc(r["v20"])}</td><td>{pc(r["v60"])}</td><td>{pc(r.get("risk"))}</td><td>{_sg(r.get("f5"))}</td><td>{_sg(r.get("i5"))}</td></tr>' for r in rows)
     r1, r2 = a["rows"][0], a["rows"][1]
     big = a["top2"] >= 0.4
     return ('<div class="card"><details open><summary><b>코스피 쏠림 — 시총 상위 종목 비중과 변동성</b></summary>'
             f'<div style="margin:6px 0">1·2위 <b>{escape(r1["name"])}+{escape(r2["name"])}</b> = 코스피(보통주·우선주 합계)의 <b>{a["top2"]:.0%}</b> · 상위 5개 {a["top5"]:.0%} · 상위 10개 {a["top10"]:.0%}</div>'
             + ('<div class="muted" style="font-size:12px">두 종목이 합쳐서 절반 가까이면, 같은 업황·같은 뉴스에 움직이는 종목이 지수를 좌우해서 분산 효과가 작아요. 지수 변동성이 큰 이유가 이 두 종목일 수 있어요.</div>' if big else "")
-            + f'<div class="scroll"><table><tr><th>순위</th><th>종목</th><th>지수 비중</th><th>20일 변동성</th><th>60일 변동성</th><th>위험 비중(추정)</th></tr>{trs}</table></div>'
-            '<div class="muted" style="font-size:11px;margin-top:4px">변동성은 최근 종가로 계산한 연환산 값이에요. 위험 비중(추정)은 상위 10개 안에서 비중×변동성의 몫이고, 종목 간 상관을 무시한 단순 추정이라 실제 기여와 달라요. '
+            + f'<div class="scroll"><table><tr><th>순위</th><th>종목</th><th>지수 비중</th><th>20일 변동성</th><th>60일 변동성</th><th>위험 비중(추정)</th><th>외국인 5일<br>(억원)</th><th>기관 5일<br>(억원)</th></tr>{trs}</table></div>'
+            '<div class="muted" style="font-size:11px;margin-top:4px">변동성은 최근 종가로 계산한 연환산 값이에요. 순매수 금액은 최근 5거래일 순매수 수량×최근 종가로 어림한 값이에요(네이버 기준, 참고용). 위험 비중(추정)은 상위 10개 안에서 비중×변동성의 몫이고, 종목 간 상관을 무시한 단순 추정이라 실제 기여와 달라요. '
             f'비중은 네이버 시가총액 기준 상위 500개 중 ETF·ETN 제외 합계 대비이고 거래소 지수 비중(유동 시가총액 기준)과는 조금 달라요. 기준 {escape(a["synced"])}</div>'
             '</details></div>')
 

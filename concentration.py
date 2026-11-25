@@ -64,7 +64,9 @@ def sync(db_path, log=print, force=False, session=None):
         conn.execute("INSERT OR REPLACE INTO conc_meta VALUES ('total', ?)", (str(sum(r[2] for r in rows)),))
         conn.execute("INSERT OR REPLACE INTO conc_meta VALUES ('synced', ?)", (today,))
         conn.commit()
-        n = 0
+        n = nf = 0
+        import stock_value
+        stock_value.ensure(conn)
         for code, name, _ in rows[:TOP]:
             try:
                 bill_watch.ensure_stock(conn, code, name, session)
@@ -72,8 +74,16 @@ def sync(db_path, log=print, force=False, session=None):
                 n += 1
             except Exception as e:
                 log(f"  ✖ {code}: {type(e).__name__}")
+            try:        # 외국인·기관·개인 순매수 (최근 며칠)
+                tr = stock_value.fetch_trend(code, session=session)
+                conn.executemany("INSERT OR REPLACE INTO flow VALUES (?,?,?,?,?,?)",
+                                 [(code, r["date"], r["foreign"], r["inst"], r["indiv"], today) for r in tr])
+                conn.commit()
+                nf += 1
+            except Exception as e:
+                log(f"  ✖ {code} 순매수: {type(e).__name__}")
             time.sleep(0.3)
-        return f"{len(rows)}종목 합계 · 상위 {n}개 종가"
+        return f"{len(rows)}종목 합계 · 상위 {n}개 종가 · 순매수 {nf}개"
     finally:
         conn.close()
 
@@ -102,7 +112,16 @@ def analyze(conn):
             px = [r[0] for r in conn.execute("SELECT close FROM bill_px WHERE code=? ORDER BY d", (code,)).fetchall() if r[0]]
         except sqlite3.Error:
             px = []
-        out.append(dict(code=code, name=name, mcap=mcap, w=mcap / total, rank=rank, v20=_vol(px, 20), v60=_vol(px, 60), v250=_vol(px, 250)))
+        item = dict(code=code, name=name, mcap=mcap, w=mcap / total, rank=rank, v20=_vol(px, 20), v60=_vol(px, 60), v250=_vol(px, 250))
+        try:
+            fl = conn.execute("SELECT date, foreign_qty, inst_qty FROM flow WHERE code=? ORDER BY date DESC LIMIT 5", (code,)).fetchall()
+        except sqlite3.Error:
+            fl = []
+        if fl and px:
+            item["f5"] = sum((r[1] or 0) for r in fl) * px[-1] / 1e8       # 외국인 최근 5거래일 순매수 금액(억원, 종가 기준 어림)
+            item["i5"] = sum((r[2] or 0) for r in fl) * px[-1] / 1e8
+            item["f_last"] = fl[0][0]
+        out.append(item)
     top = out[:TOP]
     have = [t for t in top if t["v20"] is not None]
     # 단순 추정: 비중 × 변동성 (종목 간 상관을 무시한 위험 비중, 실제 기여와 다를 수 있음)
