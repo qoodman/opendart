@@ -4807,9 +4807,16 @@ def view_dispute(conn, q):
     hq = {"hh": "1"} if hide_h else {}
     if hide_h:
         states = [s_ for s_ in states if s_["code"] not in halt_set(conn)]
+    if q.get("slow") == "1":
+        states = [s_ for s_ in states if any(h.get("slow") for h in ((s_["payload"].get("struct") or {}).get("ext") or []))]
     cnt = {lv: sum(1 for s_ in states if s_["level"] == lv) for lv in dp.LEVEL_ORDER}
     chips = " ".join((f'<b class="chip" style="background:var(--accent);color:var(--bg)">{lv} {n}</b>' if lv == lv_sel else f'<a class="chip {DSP_CLS.get(lv, "")}" href="/ideas?{urlencode({"t": "dispute", "lv": lv, **hq})}">{lv} {n}</a>') for lv, n in cnt.items())
     chips += (f' <a class="chip" href="/ideas?{urlencode({"t": "dispute", **hq})}">전체</a>' if lv_sel or kw else "")
+    slow_n = sum(1 for s_ in states if any(h.get("slow") for h in ((s_["payload"].get("struct") or {}).get("ext") or [])))
+    slow_only = q.get("slow") == "1"
+    if slow_n or slow_only:
+        chips += (f' <b class="chip" style="background:var(--accent);color:var(--bg)">🕰 장기 누적 {slow_n}</b>' if slow_only else
+                  f' <a class="chip" href="/ideas?{urlencode({"t": "dispute", "slow": "1", **hq})}" title="1년 가까이 천천히 지분을 모아 온 도전자가 있는 종목">🕰 장기 누적 {slow_n}</a>')
     chips += f' <span style="margin-left:6px">{halt_chip_}</span>'
     form = ('<form method="get" action="/ideas" class="filters" style="margin:6px 0"><input type="hidden" name="t" value="dispute"><input type="hidden" name="hh" value="%s"><input type="search" name="kw" value="%s" placeholder="종목 이름·코드"><button>찾기</button></form>' % (escape(q.get("hh") or ""), escape(kw)))
     sections = ""
@@ -5003,11 +5010,15 @@ def _dsp_detail(conn, s_, code):
                     (f' <span class="chip" style="font-size:10px" title="약식(단순투자) 보고로 지분을 늘려 가는 중">단순투자로 {h.get("first_pct") or 0:.1f}%→{h["pct"]:.1f}%</span>' if h.get("tp") == "약식" and (h.get("grow") or 0) >= 2.0 else ""))
             if h.get("pending"):
                 sh_t += ' <span class="chip warn" style="font-size:10px" title="공개매수·인수 계약이 진행 중인 보고자예요. 보고된 지분은 예정분이라 실제 보유가 아닐 수 있어요">공개매수·계약 진행 중</span>'
+            if h.get("slow"):
+                sh_t += f' <span class="chip down" style="font-size:10px" title="첫 보고 이후 {h.get("acc_months", 0)}개월 동안 천천히 지분을 늘려 왔어요">🕰 {h.get("acc_months", 0)}개월째 누적</span>'
             if h.get("manual"):
                 sh_t += ' <span class="chip" style="font-size:10px">직접 추가</span>'
             if h.get("rcept_no"):
                 sh_t += f' <a class="chip" style="font-size:10px" href="{dart_link(h["rcept_no"])}" target="_blank" rel="noopener noreferrer">보고서 ↗</a>'
-            rows += (f'<tr><td>{escape(h["name"])}{" 🎯" if h.get("activist") else ""}{sh_t}</td><td>{h["pct"]:.2f}%</td><td>{escape(h.get("tp") or "")}</td><td class="muted" style="font-size:12px">{escape(h.get("date") or "")} {escape(h.get("resn") or "")}</td>'
+            trk = h.get("track") or []
+            trk_t = ('<br><span class="muted" style="font-size:11px">추이 ' + " → ".join(f"{d[:4]}-{d[4:6]} {p_:.1f}%" for d, p_ in trk[-6:]) + '</span>') if len(trk) >= 2 else ""
+            rows += (f'<tr><td>{escape(h["name"])}{" 🎯" if h.get("activist") else ""}{sh_t}{trk_t}</td><td>{h["pct"]:.2f}%</td><td>{escape(h.get("tp") or "")}</td><td class="muted" style="font-size:12px">{escape(h.get("date") or "")} {escape(h.get("resn") or "")}</td>'
                      f'<td>{chg_t}</td><td>{role_form(h["name"])}</td></tr>')
         why = "".join(f'<li>{escape(r)}</li>' for r in sc.get("reasons") or [])
         warn_html = ("<div style=\"margin:6px 0;font-size:12px\"><b class=\"down\">⚠ 지분 자료 확인 필요</b><ul style=\"padding-left:18px;margin:2px 0\">" + "".join(f"<li>{escape(x)}</li>" for x in sc.get("warn") or []) + "</ul></div>") if sc.get("warn") else ""

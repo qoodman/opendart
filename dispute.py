@@ -309,6 +309,8 @@ def contestable(holder_pct, ext_holders):
         return True
     if len(ch) >= 2 and sum(h["pct"] for h in ch) >= 0.7 * holder_pct:
         return True
+    if any(h.get("slow") for h in ch) and (gap <= 20 or ratio >= 0.3):          # 오래 모아 온 도전자는 격차가 조금 커도 위험 후보
+        return True
     return False
 
 
@@ -360,7 +362,12 @@ def structure_score(holder_pct, ext_holders, pbr=None):
     if sh:
         score += 3
         reasons.append("단순투자(약식)로 지분을 모으다 경영참여(일반)로 목적을 바꾼 보유자: " + ", ".join(f"{h['name']} {h['pct']:.1f}% ({d[:4]}-{d[4:6]}-{d[6:]})" for h, d in sh[:3]))
-    acc = [h for h in ext if (h.get("grow") or 0) >= 2.0 and h["pct"] >= 5]
+    slow = [h for h in ext if h.get("slow")]
+    if slow:
+        score += 3
+        reasons.append("1년 가까이 천천히 지분을 모아 온 보유자(분쟁은 보통 이렇게 시작해요): " + ", ".join(
+            f"{h['name']} {h.get('acc_months', 0)}개월째 " + (f"1년 전 {h['pct_1y']:.1f}% → " if h.get("pct_1y") is not None else f"{h.get('first_pct') or 0:.1f}% → ") + f"{h['pct']:.1f}% (최근 1년 {h.get('acc_up', 0)}번 늘림)" for h in sorted(slow, key=lambda h: -(h.get("grow") or 0))[:3]))
+    acc = [h for h in ext if (h.get("grow") or 0) >= 2.0 and h["pct"] >= 5 and not h.get("slow")]
     if acc:
         score += 2
         reasons.append("지분을 꾸준히 늘려 온 보유자(야금야금 모으는 중): " + ", ".join(
@@ -630,7 +637,7 @@ def fetch_structure(code, corp, key, today=None, session=None, corp_name=""):
                                date=d, resn=(r.get("report_resn") or "")[:40], activist=_is_activist(who), rcept_no=r.get("rcept_no") or "")
     ext = [h for h in latest.values() if h["pct"] and h["pct"] >= 5]
     for h in ext:
-        h.update(purpose_shift(hist.get(h["name"], [])))
+        h.update(purpose_shift(hist.get(h["name"], []), today))
     ally_pct = sum(p for _, p in ally.values() if p >= 5)
     return holder_pct, ext, sorted(names) + sorted(aff)[:150], round(ally_pct, 2)
 
@@ -660,7 +667,7 @@ def data_warnings(friendly_pct, ext, today=None):
     return w
 
 
-def purpose_shift(rows):
+def purpose_shift(rows, today=None):
     """한 보고자의 보고 이력 [(날짜, 일반/약식, 지분율, 사유)] → dict(shift=단순투자→경영참여 전환 날짜 또는 '', first_pct, grow(%p))
     처음엔 단순투자(약식)로 지분을 모으다 나중에 경영참여(일반)로 바꾸는 흐름을 잡는다."""
     rows = sorted(rows, key=lambda r: r[0])
@@ -677,7 +684,41 @@ def purpose_shift(rows):
                 shift = d
                 break
     pcts = [r[2] for r in rows if r[2]]
-    return dict(shift=shift, first_pct=pcts[0] if pcts else None, grow=(pcts[-1] - pcts[0]) if len(pcts) >= 2 else 0.0, n_rep=len(rows))
+    out = dict(shift=shift, first_pct=pcts[0] if pcts else None, grow=(pcts[-1] - pcts[0]) if len(pcts) >= 2 else 0.0, n_rep=len(rows))
+    out.update(accumulation(rows, today))
+    return out
+
+
+def _to_date(d):
+    try:
+        return dt.date(int(d[:4]), int(d[4:6]), int(d[6:8]))
+    except (ValueError, TypeError):
+        return None
+
+
+def accumulation(rows, today=None):
+    """보고 이력 [(날짜, 일반/약식, 지분율, 사유)] → 오랫동안 천천히 지분을 늘려 왔는지.
+    경영권 분쟁은 보통 1년 전부터 지분을 모으면서 천천히 시작되므로, 첫 보고 이후 기간·1년 전 지분·늘린 횟수로 '장기 누적'을 본다.
+    → dict(track=[[날짜, 지분율]…최근 10개], acc_months=첫 보고 이후 개월, pct_1y=1년 전 지분(없으면 None), acc_up=최근 1년 지분을 늘린 보고 수, slow=장기 누적 여부)"""
+    today = today or dt.date.today()
+    pts = [(_to_date(r[0]), r[2]) for r in sorted(rows, key=lambda r: r[0]) if r[2] and _to_date(r[0])]
+    if not pts:
+        return dict(track=[], acc_months=0, pct_1y=None, acc_up=0, slow=False)
+    first_d = pts[0][0]
+    months = max(0, (today.year - first_d.year) * 12 + today.month - first_d.month)
+    cut = today - dt.timedelta(days=365)
+    before = [p for d, p in pts if d <= cut]
+    pct_1y = before[-1] if before else None
+    recent = [(d, p) for d, p in pts if d > cut]
+    prev = pct_1y if pct_1y is not None else (recent[0][1] if recent else None)
+    ups, last = 0, prev
+    for d, p in recent:
+        if last is not None and p > last + 0.3:
+            ups += 1
+        last = p
+    cur = pts[-1][1]
+    slow = bool(months >= 9 and cur - pts[0][1] >= 2.0 and ups >= 2)
+    return dict(track=[[d.strftime("%Y%m%d"), p] for d, p in pts[-10:]], acc_months=months, pct_1y=pct_1y, acc_up=ups, slow=slow)
 
 
 def _num(v):
