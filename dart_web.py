@@ -5050,7 +5050,7 @@ def _dsp_detail(conn, s_, code):
     if sc and sc.get("ext") is not None:
         rows = ""
         if sc.get("holder_pct") is not None:
-            rows += f'<tr style="background:var(--chip)"><td><b>최대주주 및 특수관계인 합계</b></td><td><b>{sc["holder_pct"]:.2f}%</b></td><td>-</td><td class="muted">연말 사업보고서 기준</td><td></td></tr>'
+            rows += f'<tr style="background:var(--chip)"><td><b>최대주주 및 특수관계인 합계</b></td><td><b>{sc["holder_pct"]:.2f}%</b></td><td>-</td><td class="muted">{escape((sc.get("meta") or {}).get("hy") or "연말 사업보고서")} 기준</td><td></td></tr>'
             if sc.get("ally_pct"):
                 rows += f'<tr style="background:var(--chip)"><td><b>+ 계열·우호 회사 5% 보유분</b></td><td><b>+{sc["ally_pct"]:.2f}%</b></td><td>-</td><td class="muted">우호 지분 합계 {sc.get("friendly_pct", 0):.2f}%</td><td></td></tr>'
         try:
@@ -5077,6 +5077,15 @@ def _dsp_detail(conn, s_, code):
                 sh_t += f' <a class="chip" style="font-size:10px" href="{dart_link(h["rcept_no"])}" target="_blank" rel="noopener noreferrer">보고서 ↗</a>'
             trk = h.get("track") or []
             trk_t = ('<br><span class="muted" style="font-size:11px">추이 ' + " → ".join(f"{d[:4]}-{d[4:6]} {p_:.1f}%" for d, p_ in trk[-6:]) + '</span>') if len(trk) >= 2 else ""
+            det_bits = []
+            if h.get("shares"):
+                det_bits.append(f'보유 {h["shares"]:,.0f}주' + (f' ({h["shares_chg"]:+,.0f})' if h.get("shares_chg") else ""))
+            if h.get("ctr_pct"):
+                det_bits.append(f'계약상 {h["ctr_pct"]:.2f}%')
+            if h.get("resn"):
+                det_bits.append(f'보고사유 {escape(h["resn"])}')
+            if det_bits:
+                trk_t += '<br><span class="muted" style="font-size:11px">' + " · ".join(det_bits) + '</span>'
             rows += (f'<tr><td>{escape(h["name"])}{" 🎯" if h.get("activist") else ""}{sh_t}{trk_t}</td><td>{h["pct"]:.2f}%</td><td>{escape(h.get("tp") or "")}</td><td class="muted" style="font-size:12px">{escape(h.get("date") or "")} {escape(h.get("resn") or "")}</td>'
                      f'<td>{chg_t}</td><td>{role_form(h["name"])}</td></tr>')
         why = "".join(f'<li>{escape(r)}</li>' for r in sc.get("reasons") or [])
@@ -5099,6 +5108,8 @@ def _dsp_detail(conn, s_, code):
                      + ((f'<div class="muted" style="font-size:11px;margin-top:4px">지분 자료 기준 — 최대주주 현황: {escape(sc["meta"].get("hy", "") or "?")}' + (f' · 5% 주주 표: {escape(sc["meta"]["report"])}' if sc["meta"].get("report") else "") + '</div>') if sc.get("meta") else "")
                      + pend_html
                      + warn_html
+                     + ('<form method="post" action="/dispute/refresh" class="filters" style="margin:8px 0 0;font-size:12px"><input type="hidden" name="code" value="' + escape(code) + '"><button style="font-size:12px">이 종목 지분 다시 받기 (DART)</button>'
+                        '<span class="muted" style="font-size:11px"> 7일 저장분을 무시하고 최대주주 현황·5% 보고·정기보고서 표를 지금 다시 받아 이 종목만 다시 판정해요.</span></form>')
                      + add_form_html
                      + '<div class="muted" style="font-size:11px">일반 = 경영참여 목적 보고, 약식 = 단순·일반투자 보고. 🎯 = 행동주의 성향으로 알려진 이름. 최대주주 측 지분은 연말 기준이라 최근 변동은 반영이 늦을 수 있어요. 최대주주와 특수관계인의 정확한 합계는 최대주주등소유주식변동신고서를 확인하세요. 최대주주 측 구분은 사업보고서의 최대주주·특수관계인 명단과 이름으로 맞추기 때문에 명단에 없는 계열사는 못 거를 수 있어요 — 그런 경우 알려 주세요.</div></div>')
     guide = ('<div class="card"><details><summary><b>이 신호들을 어떻게 읽나요?</b></summary><ul class="muted" style="font-size:13px;padding-left:18px">'
@@ -8527,6 +8538,12 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 S = settings()
                 ok, why = S["float_run"]() if "float_run" in S else (False, "이 서버 버전은 지원하지 않아요")
                 return self._redirect("/ideas?" + urlencode({"t": "float", "msg": ("✔ " if ok else "✖ ") + why}))
+            if path == "/dispute/refresh" and settings_api:
+                n = min(int(self.headers.get("Content-Length") or 0), 4096)
+                form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore")).items()}
+                S = settings()
+                ok, why = S["dispute_refresh"](form) if "dispute_refresh" in S else (False, "이 서버 버전은 지원하지 않아요")
+                return self._redirect("/ideas?" + urlencode({"t": "dispute", "code": form.get("code", ""), "msg": ("✔ " if ok else "✖ ") + why}))
             if path == "/dispute/reset" and settings_api:
                 n = min(int(self.headers.get("Content-Length") or 0), 4096)
                 self.rfile.read(n)

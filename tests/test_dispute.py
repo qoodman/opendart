@@ -182,6 +182,29 @@ class Reports(unittest.TestCase):
         got = {h["name"]: h["pct"] for h in D.parse_holder_table(txt)}
         self.assertEqual(got, {"The Miri Strategic Fund": 24.2, "국민연금공단": 6.0})
 
+    def test_report_row_details_are_kept(self):             # 11월 3일 Miri 약식 보고: 24.17%, 3,243,617주, 주식매매계약 체결
+        class R:
+            def __init__(self, j):
+                self._j, self.status_code = j, 200
+
+            def json(self):
+                return self._j
+
+        class Sess:
+            def get(self, url, params=None, timeout=0):
+                if "hyslrSttus" in url:
+                    return R({"status": "000", "list": [{"nm": "김홍국", "trmend_posesn_stock_qota_rt": "26.9"}, {"nm": "계", "trmend_posesn_stock_qota_rt": "26.9"}]} if params["reprt_code"] == "11012" else {"status": "013"})
+                if "otrCpr" in url or "list.json" in url:
+                    return R({"status": "000", "list": []})
+                return R({"status": "000", "list": [{"repror": "Miri Capital Management LLC", "stkrt": "24.17", "stkrt_irds": "0.21", "stkqy": "3,243,617", "stkqy_irds": "0",
+                                                      "ctr_stkrt": "0", "report_tp": "약식", "rcept_dt": "20261103", "report_resn": "주식매매계약 체결", "rcept_no": "1"}]})
+        hp, ext, _, _ = D.fetch_structure("079940", "c", "k", TODAY, Sess(), corp_name="가비아")
+        self.assertEqual(hp, 26.9)
+        self.assertEqual(ext[0]["shares"], 3243617.0)
+        self.assertEqual(ext[0]["resn"], "주식매매계약 체결")
+        self.assertTrue(ext[0]["activist"])
+        self.assertTrue(D.structure_score(hp, ext, None)["contest"])
+
     def test_miri_is_activist(self):
         self.assertTrue(D._is_activist("The Miri Strategic Fund"))
         self.assertFalse(D.is_neutral_inst("The Miri Strategic Fund"))

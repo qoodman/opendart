@@ -726,7 +726,8 @@ def fetch_structure(code, corp, key, today=None, session=None, corp_name=""):
             continue
         if who not in latest or d > latest[who]["date"]:
             latest[who] = dict(name=who, pct=_num(r.get("stkrt")), chg=_num(r.get("stkrt_irds")), tp=("일반" if "일반" in (r.get("report_tp") or "") else "약식" if "약식" in (r.get("report_tp") or "") else ""),
-                               date=d, resn=(r.get("report_resn") or "")[:40], activist=_is_activist(who), rcept_no=r.get("rcept_no") or "")
+                               date=d, resn=(r.get("report_resn") or "")[:60], activist=_is_activist(who), rcept_no=r.get("rcept_no") or "",
+                               shares=_num(r.get("stkqy")), shares_chg=_num(r.get("stkqy_irds")), ctr_pct=_num(r.get("ctr_stkrt")))
     ext = [h for h in latest.values() if h["pct"] and h["pct"] >= 5]
     for h in ext:
         h.update(purpose_shift(hist.get(h["name"], []), today))
@@ -839,7 +840,7 @@ def _num(v):
 
 
 # ---------------- 한 번에 ----------------
-def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60, progress=None):
+def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60, progress=None, only=None):
     """저장된 신호로 종목별 단계를 매기고, 신호가 있거나 경영참여 보유자가 있는 종목은 지분 구조도 받아 '가능성'까지 계산 → dispute_state 저장"""
     ensure(conn)
     today = today or dt.date.today()
@@ -847,7 +848,7 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
     by = {}
     names = {}
     corp = {}
-    for code, name, cc, d, nm, flr, kind, w, act, rn in conn.execute("SELECT stock_code, corp_name, corp_code, rcept_dt, report_nm, flr_nm, kind, weight, activist, rcept_no FROM dispute_event WHERE rcept_dt >= ?", (since,)):
+    for code, name, cc, d, nm, flr, kind, w, act, rn in conn.execute("SELECT stock_code, corp_name, corp_code, rcept_dt, report_nm, flr_nm, kind, weight, activist, rcept_no FROM dispute_event WHERE rcept_dt >= ?" + (" AND stock_code = ?" if only else ""), ((since, only) if only else (since,))):
         if kind in ("injunction", "tender", "litig", "proxy_ext", "proxy_co"):            # 분류 규칙이 바뀌었을 수 있어 제목으로 다시 매김 (예전에 잘못 잡힌 가처분·자기주식 공개매수를 걸러냄)
             re_ = classify(nm, flr or "", name or "")
             if re_ is None:
@@ -1006,6 +1007,12 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
                      (code, s_["name"], level, sc, json.dumps(payload, ensure_ascii=False), today.isoformat(), prev[0] if prev else None, prev[1] if prev else None))
         out += 1
     # 더는 해당 없는 종목은 지움
+    if only:                         # 한 종목만 다시 분석한 경우: 그 종목만 갱신하고 다른 종목은 건드리지 않음
+        if only not in kept:
+            conn.execute("DELETE FROM dispute_state WHERE code=?", (only,))
+        conn.commit()
+        log(f"[지분분쟁] {only} 다시 분석 → " + (conn.execute("SELECT level FROM dispute_state WHERE code=?", (only,)).fetchone() or ["판정 없음"])[0])
+        return len(kept)
     conn.execute("DELETE FROM dispute_state WHERE updated < ?", (today.isoformat(),))
     if kept:
         conn.execute("DELETE FROM dispute_state WHERE code NOT IN (%s)" % ",".join("?" * len(kept)), kept)
@@ -1017,6 +1024,20 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
 
 
 LEVEL_ORDER = {"치열": 0, "시작": 1, "징후": 2, "가능성 높음": 3, "가능성": 4}
+
+
+def refresh_one(db_path, key, code, log=print, session=None):
+    """한 종목의 지분 구조를 저장분 무시하고 DART에서 다시 받아 그 종목만 다시 판정 → 판정 단계 또는 None"""
+    conn = sqlite3.connect(db_path)
+    try:
+        ensure(conn)
+        conn.execute("DELETE FROM dispute_struct WHERE code=?", (code,))
+        conn.commit()
+        analyze(conn, key, log=log, session=session, only=code)
+        r = conn.execute("SELECT level FROM dispute_state WHERE code=?", (code,)).fetchone()
+        return r[0] if r else None
+    finally:
+        conn.close()
 
 
 def load_states(conn):

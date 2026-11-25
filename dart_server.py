@@ -1086,6 +1086,22 @@ def cmd_foreign_sync(args):
     return 0
 
 
+def dispute_refresh(form):
+    """종목 상세의 '이 종목 지분 다시 받기': 그 종목의 지분 구조(최대주주 현황·5% 보고·정기보고서 표)를 DART에서 바로 다시 받아 다시 판정. (성공 여부, 안내)"""
+    import dispute
+    code = (form.get("code") or "").strip()
+    if not re.fullmatch(r"\d{6}", code):
+        return False, "종목을 알 수 없어요."
+    key = read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", "")
+    if not key:
+        return False, "DART_API_KEY가 없어요. 설정에서 DART 키를 먼저 넣어 주세요."
+    try:
+        lv = dispute.refresh_one(str(results_db()), key, code)
+    except Exception as e:
+        return False, f"다시 받지 못했어요: {type(e).__name__}: {str(e)[:120]}"
+    return True, f"{code} 지분을 DART에서 다시 받았어요 → " + (f"판정 {lv}" if lv else "지금 규칙에서는 분쟁으로 안 올라와요")
+
+
 def dispute_reset():
     """지분분쟁 결과를 모두 지우고 처음부터 다시 분석 (판정·공시 신호·지분 구조 저장분·5% 보유자 목록). 내가 정한 역할·제외는 남김. (성공 여부, 안내)"""
     import dispute
@@ -2476,7 +2492,7 @@ def cmd_web(args):
                     update_info=update_info, check_update=check_update, start_update=start_update,
                     backup_list=backup_list, backup_busy=backup_busy, backup_start=backup_start,
                     backup_file=backup_file, krx_key=krx_key_now, save_krx_key=save_krx_key,
-                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, event_action=event_action, legstudy_run=legstudy_run, fin_run=fin_run, world_run=world_run, picks_snapshot=picks_snapshot, dispute_run=dispute_run, dispute_tag=dispute_tag, dispute_reset=dispute_reset, float_run=float_run, foreign_run=foreign_run, fin_clue_run=fin_clue_run, fin_action=fin_action, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
+                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, event_action=event_action, legstudy_run=legstudy_run, fin_run=fin_run, world_run=world_run, picks_snapshot=picks_snapshot, dispute_run=dispute_run, dispute_tag=dispute_tag, dispute_reset=dispute_reset, dispute_refresh=dispute_refresh, float_run=float_run, foreign_run=foreign_run, fin_clue_run=fin_clue_run, fin_action=fin_action, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
     serve(results_db(), host=args.host, port=args.port, child_env=child_env,
           get_key=lambda: read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", ""),
           save_key=save_key, settings_api=settings_api)
