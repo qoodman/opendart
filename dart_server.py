@@ -101,6 +101,22 @@ def data_dir():
     return d
 
 
+def _enable_wal():
+    """결과 DB를 WAL 방식으로: 수집이 쓰는 동안에도 화면(읽기)이 막히지 않게. 한 번 바꾸면 계속 유지되고, 못 바꾸면(수집이 쓰는 중) 다음 실행 때 다시 시도"""
+    try:
+        db = results_db()
+        if not db.exists():
+            return
+        c = sqlite3.connect(str(db), timeout=3)
+        try:
+            c.execute("PRAGMA journal_mode=WAL")
+            c.execute("PRAGMA synchronous=NORMAL")
+        finally:
+            c.close()
+    except sqlite3.Error:
+        pass
+
+
 def results_db():
     return data_dir() / "results.sqlite"
 
@@ -2284,6 +2300,7 @@ def main(argv=None):
     se.add_argument("key")
     se.add_argument("--if-empty", action="store_true", help="비어 있을 때만")
     a = p.parse_args(argv)
+    _enable_wal()
     return {"run": cmd_run, "web": cmd_web, "net-check": cmd_net_check, "notify-test": cmd_notify_test,
             "status": cmd_status, "set-env": cmd_set_env, "hk-check": cmd_hk_check, "reports-check": cmd_hk_check, "market-check": cmd_market_check, "parse-check": cmd_parse_check,
             "tick": cmd_tick, "update": cmd_update, "legis-prepare": cmd_legis_prepare, "legis-study": cmd_legis_study, "fin-analyze": cmd_fin_analyze, "world-sync": cmd_world_sync, "dispute-sync": cmd_dispute_sync, "fin-clues": cmd_fin_clues}[a.cmd](a)

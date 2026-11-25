@@ -7861,7 +7861,7 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 q["n"] = saved
             if url.path == "/health":
                 return self._send(200, "application/json", json.dumps(st, ensure_ascii=False).encode())
-            conn = sqlite3.connect(f"file:{quote(str(db_path))}?mode=ro", uri=True) if Path(db_path).exists() else sqlite3.connect(":memory:")
+            conn = sqlite3.connect(f"file:{quote(str(db_path))}?mode=ro", uri=True, timeout=15) if Path(db_path).exists() else sqlite3.connect(":memory:")
             conn.row_factory = sqlite3.Row
             _CTX.pre = hub_tabs_row(url.path)
             try:
