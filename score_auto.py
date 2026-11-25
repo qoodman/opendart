@@ -143,6 +143,36 @@ def dart_json(path, key, session=None, timeout=20, **params):
     return st, body
 
 
+def _download_corp_map(cache_dir, key, session=None):
+    """DART 회사 목록(corpCode.xml)을 받아 종목코드→고유번호(corp_map.json), 회사이름→고유번호(corp_names.json, 상장사만)로 저장"""
+    s = session or requests
+    r = s.get(f"{DART_BASE}/corpCode.xml", params={"crtfc_key": key}, timeout=60)
+    if r.status_code != 200:
+        raise AutoError(f"DART 회사 목록 HTTP {r.status_code}")
+    import xml.etree.ElementTree as ET
+    try:
+        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+            root = ET.fromstring(z.read(z.namelist()[0]))
+    except Exception:
+        raise AutoError("DART 회사 목록을 읽지 못함")
+    m, names = {}, {}
+    for it in root.iter("list"):
+        sc, cc = (it.findtext("stock_code") or "").strip(), (it.findtext("corp_code") or "").strip()
+        if sc and cc:
+            m[sc] = cc
+            nm = (it.findtext("corp_name") or "").strip()
+            if nm:
+                names[nm] = cc
+    os.makedirs(cache_dir, exist_ok=True)
+    for fname, data in (("corp_map.json", m), ("corp_names.json", names)):
+        path = os.path.join(cache_dir, fname)
+        tmp = path + ".part"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    return m
+
+
 def corp_code_for(stock_code, cache_dir, key, session=None):
     """종목코드 → DART 기업고유번호. 회사 목록(corpCode.xml)을 한 번 받아 dart_cache/corp_map.json 에 둠."""
     path = os.path.join(cache_dir, "corp_map.json")
@@ -152,30 +182,31 @@ def corp_code_for(stock_code, cache_dir, key, session=None):
     except (OSError, ValueError):
         m = None
     if m is None or (stock_code not in m and time.time() - os.path.getmtime(path) > 86400):
-        s = session or requests
-        r = s.get(f"{DART_BASE}/corpCode.xml", params={"crtfc_key": key}, timeout=60)
-        if r.status_code != 200:
-            raise AutoError(f"DART 회사 목록 HTTP {r.status_code}")
-        import xml.etree.ElementTree as ET
-        try:
-            with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-                root = ET.fromstring(z.read(z.namelist()[0]))
-        except Exception:
-            raise AutoError("DART 회사 목록을 읽지 못함")
-        m = {}
-        for it in root.iter("list"):
-            sc, cc = (it.findtext("stock_code") or "").strip(), (it.findtext("corp_code") or "").strip()
-            if sc and cc:
-                m[sc] = cc
-        os.makedirs(cache_dir, exist_ok=True)
-        tmp = path + ".part"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(m, f)
-        os.replace(tmp, path)
+        m = _download_corp_map(cache_dir, key, session)
     cc = m.get(stock_code)
     if not cc:
         raise AutoError("DART 회사 목록에 이 종목이 없어요")
     return cc
+
+
+def corp_code_by_name(name, cache_dir, key, session=None):
+    """상장사 이름 → DART 기업고유번호 (없으면 None). 이름 표기가 조금 달라도 ㈜·주식회사를 뺀 이름이 같으면 찾음"""
+    path = os.path.join(cache_dir, "corp_names.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            names = json.load(f)
+    except (OSError, ValueError):
+        _download_corp_map(cache_dir, key, session)
+        with open(path, encoding="utf-8") as f:
+            names = json.load(f)
+    clean = lambda t: re.sub(r"주식회사|㈜|\(주\)|\s", "", t or "")
+    want = clean(name)
+    if name in names:
+        return names[name]
+    for n, cc in names.items():
+        if clean(n) == want:
+            return cc
+    return None
 
 
 def last_business_year(today=None):

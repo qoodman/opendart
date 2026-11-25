@@ -486,6 +486,53 @@ def potential_level(sc):
     return "가능성 높음" if sc >= 5 else "가능성" if sc >= 3 else None
 
 
+COMPANY_WORDS = ["㈜", "(주)", "주식회사", "홀딩스", "그룹", "물산", "생명", "화재", "전자", "증권", "은행", "건설", "재단", "투자", "자산운용", "파트너스", "펀드", "회사", "지주", "산업", "제약", "화학", "에너지", "금융", "보험", "카드", "캐피탈", "개발"]
+
+
+def _is_company(name):
+    n = name or ""
+    return any(w in n for w in COMPANY_WORDS) or len(norm_name(n)) >= 5
+
+
+def _cache_dir():
+    import os
+    base = os.environ.get("DART_DATA_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    return os.path.join(os.path.expanduser(base), "dart_cache")
+
+
+def affiliate_names(corp, corp_name, hy_names, key, today, session=None):
+    """공시의 '타법인 출자 현황'으로 본 계열·우호 회사 이름: 대상 회사가 출자한 법인들 + 최대주주 법인(지주사 등)이 출자한 법인들.
+    5% 보고자가 여기에 있으면 같은 그룹이거나 서로 지분을 가진 우호 관계라 분쟁 상대로 보지 않음"""
+    s = session or requests
+    year = today.year - 1 if today.month >= 4 else today.year - 2
+    out = set()
+
+    def otr(cc):
+        try:
+            r = s.get(f"{DART_BASE}/otrCprInvstmntSttus.json", params=dict(crtfc_key=key, corp_code=cc, bsns_year=str(year), reprt_code="11011"), timeout=30)
+            j = r.json() if r.status_code == 200 else {}
+        except (requests.RequestException, ValueError):
+            return []
+        if str(j.get("status")) == "020":
+            raise DisputeError("DART 하루 호출 한도를 넘었어요")
+        return [(x.get("inv_prm") or "").strip() for x in (j.get("list") or []) if (x.get("inv_prm") or "").strip()] if str(j.get("status")) == "000" else []
+    out.update(otr(corp))
+    owners = [n for n in hy_names if _is_company(n)][:2]          # 최대주주 법인(지주사 등) — 사업보고서 명단의 앞쪽
+    if owners:
+        try:
+            from score_auto import corp_code_by_name
+            for nm in owners:
+                cc = corp_code_by_name(nm, _cache_dir(), key, session)
+                if cc and cc != corp:
+                    out.update(otr(cc))
+                    out.add(nm)
+        except DisputeError:
+            raise
+        except Exception:
+            pass
+    return {n for n in out if len(norm_name(n)) >= 3 and norm_name(n) != norm_name(corp_name)}
+
+
 def fetch_structure(code, corp, key, today=None, session=None, corp_name=""):
     """한 종목의 최대주주 측 지분율과 외부 5% 보유자 → (holder_pct, [ext...]) (못 받으면 (None, []))"""
     today = today or dt.date.today()
@@ -509,18 +556,25 @@ def fetch_structure(code, corp, key, today=None, session=None, corp_name=""):
             names.add(nm)
     if holder_pct is None:
         holder_pct = sum(_num(r.get("trmend_posesn_stock_qota_rt")) or 0 for r in hy) or None
+    hy_order = [(r.get("nm") or "").strip() for r in hy if (r.get("nm") or "").strip() not in ("", "계", "합계")]
+    try:
+        aff = affiliate_names(corp, corp_name, hy_order, key, today, s)
+    except DisputeError:
+        raise
+    except Exception:
+        aff = set()
     ms = call("majorstock.json")
     latest = {}
     hist = {}
     for r in sorted(ms, key=lambda r: r.get("rcept_dt") or ""):
         who = (r.get("repror") or "").strip()
-        if who and not is_insider(who, names) and not is_group_affiliate(who, corp_name, names):
+        if who and not is_insider(who, names) and not is_insider(who, aff) and not is_group_affiliate(who, corp_name, names):
             tp0 = "일반" if "일반" in (r.get("report_tp") or "") else "약식" if "약식" in (r.get("report_tp") or "") else ""
             hist.setdefault(who, []).append((r.get("rcept_dt") or "", tp0, _num(r.get("stkrt")), (r.get("report_resn") or "")))
     for r in ms:
         who = (r.get("repror") or "").strip()
         d = r.get("rcept_dt") or ""
-        if not who or is_insider(who, names) or is_group_affiliate(who, corp_name, names):          # 최대주주 본인·특수관계인·같은 그룹 계열사(지주사 포함)는 맞서는 쪽이 아님
+        if not who or is_insider(who, names) or is_insider(who, aff) or is_group_affiliate(who, corp_name, names):          # 최대주주 본인·특수관계인·타법인 출자 공시로 본 계열·우호 회사·같은 그룹 계열사는 맞서는 쪽이 아님
             continue
         if who not in latest or d > latest[who]["date"]:
             latest[who] = dict(name=who, pct=_num(r.get("stkrt")), chg=_num(r.get("stkrt_irds")), tp=("일반" if "일반" in (r.get("report_tp") or "") else "약식" if "약식" in (r.get("report_tp") or "") else ""),
@@ -528,7 +582,7 @@ def fetch_structure(code, corp, key, today=None, session=None, corp_name=""):
     ext = [h for h in latest.values() if h["pct"] and h["pct"] >= 5]
     for h in ext:
         h.update(purpose_shift(hist.get(h["name"], [])))
-    return holder_pct, ext, sorted(names)
+    return holder_pct, ext, sorted(names) + sorted(aff)[:150]
 
 
 def purpose_shift(rows):
