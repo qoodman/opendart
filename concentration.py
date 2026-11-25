@@ -76,8 +76,8 @@ def sync(db_path, log=print, force=False, session=None):
                 log(f"  ✖ {code}: {type(e).__name__}")
             try:        # 외국인·기관·개인 순매수 (최근 며칠)
                 tr = stock_value.fetch_trend(code, session=session)
-                conn.executemany("INSERT OR REPLACE INTO flow VALUES (?,?,?,?,?,?)",
-                                 [(code, r["date"], r["foreign"], r["inst"], r["indiv"], today) for r in tr])
+                conn.executemany("INSERT OR REPLACE INTO flow (code, date, foreign_qty, inst_qty, indiv_qty, fetched, foreign_ratio) VALUES (?,?,?,?,?,?,?)",
+                                 [(code, r["date"], r["foreign"], r["inst"], r["indiv"], today, r.get("ratio")) for r in tr])
                 conn.commit()
                 nf += 1
             except Exception as e:
@@ -121,6 +121,13 @@ def analyze(conn):
             item["f5"] = sum((r[1] or 0) for r in fl) * px[-1] / 1e8       # 외국인 최근 5거래일 순매수 금액(억원, 종가 기준 어림)
             item["i5"] = sum((r[2] or 0) for r in fl) * px[-1] / 1e8
             item["f_last"] = fl[0][0]
+        try:
+            fr = conn.execute("SELECT foreign_ratio FROM flow WHERE code=? AND foreign_ratio IS NOT NULL ORDER BY date DESC LIMIT 6", (code,)).fetchall()
+        except sqlite3.Error:
+            fr = []
+        if fr:
+            item["fr"] = fr[0][0]
+            item["fr_chg"] = fr[0][0] - fr[-1][0] if len(fr) >= 2 else None
         out.append(item)
     top = out[:TOP]
     have = [t for t in top if t["v20"] is not None]

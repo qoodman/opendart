@@ -35,6 +35,10 @@ def ensure(conn):
         code TEXT, date TEXT, foreign_qty REAL, inst_qty REAL, indiv_qty REAL, fetched TEXT,
         PRIMARY KEY (code, date));
     """)
+    try:                                  # 외국인 보유율(%) 칸: 예전 DB에는 없어서 한 번 추가
+        conn.execute("ALTER TABLE flow ADD COLUMN foreign_ratio REAL")
+    except sqlite3.OperationalError:
+        pass
 
 
 def _num(text):
@@ -182,7 +186,12 @@ def parse_trend(payload):
                 if word in k and "quant" in k:
                     return _signed(v)
             return None
-        out.append({"date": date, "foreign": pick("foreign"), "inst": pick("organ"), "indiv": pick("individual")})
+        ratio = None
+        for k, v in keys.items():
+            if "foreign" in k and "ratio" in k:
+                m_ = re.search(r"-?\d+(?:\.\d+)?", str(v or ""))
+                ratio = float(m_.group(0)) if m_ else None
+        out.append({"date": date, "foreign": pick("foreign"), "inst": pick("organ"), "indiv": pick("individual"), "ratio": ratio})
     return out
 
 
@@ -217,8 +226,8 @@ def sync_flow(db_path, log=print, sleep=0.4, session=None):
                 break
             try:
                 rows = fetch_trend(code, session=session)
-                conn.executemany("INSERT OR REPLACE INTO flow VALUES (?,?,?,?,?,?)",
-                                 [(code, r["date"], r["foreign"], r["inst"], r["indiv"], today) for r in rows])
+                conn.executemany("INSERT OR REPLACE INTO flow (code, date, foreign_qty, inst_qty, indiv_qty, fetched, foreign_ratio) VALUES (?,?,?,?,?,?,?)",
+                                 [(code, r["date"], r["foreign"], r["inst"], r["indiv"], today, r.get("ratio")) for r in rows])
                 conn.commit()
                 saved += 1
                 streak = 0
@@ -242,6 +251,15 @@ def flows(conn, code, days=20):
     except sqlite3.OperationalError:
         return []
     return [tuple(r) for r in rows][::-1]
+
+
+def foreign_ratio(conn, code, days=20):
+    """외국인 보유율(%) [(날짜, 비율)] 오래된 순. 없으면 []"""
+    try:
+        rows = conn.execute("SELECT date, foreign_ratio FROM flow WHERE code=? AND foreign_ratio IS NOT NULL ORDER BY date DESC LIMIT ?", (code, days)).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [(r[0], r[1]) for r in rows][::-1]
 
 
 def flow_sums(conn, codes, days=5):

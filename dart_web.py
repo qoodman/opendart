@@ -877,7 +877,14 @@ def flow_block(conn, code):
     body = "".join(
         f'<tr><td>{escape(d[:4])}-{escape(d[4:6])}-{escape(d[6:])}</td><td>{_sg(fo)}</td><td>{_sg(ins)}</td><td>{_sg(ind)}</td></tr>'
         for d, fo, ins, ind in reversed(rs))
-    return (f'<details style="margin:8px 0"><summary>순매수 · 최근 5거래일 외국인 <b>{_sg(f5)}</b>주 · 기관 <b>{_sg(i5)}</b>주 '
+    fr_t = ""
+    try:
+        frs = stock_value.foreign_ratio(conn, code, 20)
+        if frs:
+            fr_t = f' · 외국인 보유율 <b>{frs[-1][1]:.2f}%</b>' + (f' (최근 {len(frs)}거래일 {frs[-1][1] - frs[0][1]:+.2f}%p)' if len(frs) >= 2 else "")
+    except Exception:
+        pass
+    return (f'<details style="margin:8px 0"><summary>순매수 · 최근 5거래일 외국인 <b>{_sg(f5)}</b>주 · 기관 <b>{_sg(i5)}</b>주{fr_t} '
             '<span class="muted">(펼치기 · 네이버 증권 기준, 참고용)</span></summary>'
             '<table><tr><th>날짜</th><th>외국인(주)</th><th>기관(주)</th><th>개인(주)</th></tr>'
             f'{body}</table></details>')
@@ -1108,13 +1115,13 @@ def _conc_card(conn):
         return ('<div class="card"><b>코스피 쏠림 — 시총 상위 종목 비중</b><div class="muted" style="font-size:13px">아직 자료가 없어요. <b>지금 수집 → 시장·정책만</b>을 한 번 돌리면 들어와요 (키 불필요).</div></div>')
     rows = a["rows"][:10]
     pc = lambda v: "-" if v is None else f"{v:.0%}"
-    trs = "".join(f'<tr><td>{r["rank"]}</td><td><b>{escape(r["name"])}</b></td><td>{r["w"]:.1%}</td><td>{pc(r["v20"])}</td><td>{pc(r["v60"])}</td><td>{pc(r.get("risk"))}</td><td>{_sg(r.get("f5"))}</td><td>{_sg(r.get("i5"))}</td></tr>' for r in rows)
+    trs = "".join(f'<tr><td>{r["rank"]}</td><td><b>{escape(r["name"])}</b></td><td>{r["w"]:.1%}</td><td>{pc(r["v20"])}</td><td>{pc(r["v60"])}</td><td>{pc(r.get("risk"))}</td><td>{("-" if r.get("fr") is None else f'{r["fr"]:.1f}%' + ("" if r.get("fr_chg") is None else f' <span class="muted" style="font-size:11px">({r["fr_chg"]:+.2f}%p)</span>'))}</td><td>{_sg(r.get("f5"))}</td><td>{_sg(r.get("i5"))}</td></tr>' for r in rows)
     r1, r2 = a["rows"][0], a["rows"][1]
     big = a["top2"] >= 0.4
     return ('<div class="card"><details open><summary><b>코스피 쏠림 — 시총 상위 종목 비중과 변동성</b></summary>'
             f'<div style="margin:6px 0">1·2위 <b>{escape(r1["name"])}+{escape(r2["name"])}</b> = 코스피(보통주·우선주 합계)의 <b>{a["top2"]:.0%}</b> · 상위 5개 {a["top5"]:.0%} · 상위 10개 {a["top10"]:.0%}</div>'
             + ('<div class="muted" style="font-size:12px">두 종목이 합쳐서 절반 가까이면, 같은 업황·같은 뉴스에 움직이는 종목이 지수를 좌우해서 분산 효과가 작아요. 지수 변동성이 큰 이유가 이 두 종목일 수 있어요.</div>' if big else "")
-            + f'<div class="scroll"><table><tr><th>순위</th><th>종목</th><th>지수 비중</th><th>20일 변동성</th><th>60일 변동성</th><th>위험 비중(추정)</th><th>외국인 5일<br>(억원)</th><th>기관 5일<br>(억원)</th></tr>{trs}</table></div>'
+            + f'<div class="scroll"><table><tr><th>순위</th><th>종목</th><th>지수 비중</th><th>20일 변동성</th><th>60일 변동성</th><th>위험 비중(추정)</th><th>외국인 보유율</th><th>외국인 5일<br>(억원)</th><th>기관 5일<br>(억원)</th></tr>{trs}</table></div>'
             '<div class="muted" style="font-size:11px;margin-top:4px">변동성은 최근 종가로 계산한 연환산 값이에요. 순매수 금액은 최근 5거래일 순매수 수량×최근 종가로 어림한 값이에요(네이버 기준, 참고용). 위험 비중(추정)은 상위 10개 안에서 비중×변동성의 몫이고, 종목 간 상관을 무시한 단순 추정이라 실제 기여와 달라요. '
             f'비중은 네이버 시가총액 기준 상위 500개 중 ETF·ETN 제외 합계 대비이고 거래소 지수 비중(유동 시가총액 기준)과는 조금 달라요. 기준 {escape(a["synced"])}</div>'
             '</details></div>')
