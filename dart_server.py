@@ -1084,20 +1084,26 @@ def dispute_tag(form):
     code = (form.get("code") or "").strip()
     name = (form.get("name") or "").strip()[:80]
     role = (form.get("role") or "").strip()
-    if not re.fullmatch(r"\d{6}", code) or not name:
+    if not re.fullmatch(r"\d{6}", code) or not (name or form.get("role") == "exclude"):
         return False, "종목이나 보유자를 알 수 없어요."
-    if role not in ("", "ally", "neutral", "challenger"):
+    if role not in ("", "ally", "neutral", "challenger", "exclude"):
         return False, "알 수 없는 역할이에요."
+    if role == "exclude":
+        name = "*"
     conn = sqlite3.connect(results_db())
     try:
         dispute.ensure(conn)
         if role:
             conn.execute("INSERT OR REPLACE INTO dispute_tag VALUES (?,?,?,?)", (code, name, role, dt.date.today().isoformat()))
+            if role == "exclude":
+                conn.execute("DELETE FROM dispute_state WHERE code=?", (code,))          # 바로 목록에서 사라지게
         else:
             conn.execute("DELETE FROM dispute_tag WHERE code=? AND name=?", (code, name))
         conn.commit()
     finally:
         conn.close()
+    if role == "exclude":
+        return True, "이 종목을 분쟁에서 뺐어요. 목록에서 사라졌고 다음 분석에서도 제외돼요."
     lab = {"ally": "우호", "neutral": "중립(캐스팅보트)", "challenger": "도전자", "": "자동 판단"}[role]
     return True, f"{name}을(를) {lab}(으)로 정했어요. 다음 '지분분쟁 분석'부터 반영돼요."
 

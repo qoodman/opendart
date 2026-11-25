@@ -774,7 +774,13 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
     out = 0
     skipped = weak = 0
     kept = []
+    try:
+        excluded = {c for (c,) in conn.execute("SELECT code FROM dispute_tag WHERE role='exclude'")}      # 내가 '분쟁 아님'으로 뺀 종목
+    except sqlite3.Error:
+        excluded = set()
     for code, s_ in states.items():
+        if code in excluded:
+            continue
         if s_.get("majority") is not None:          # 최대주주 측 50% 이상 → 분쟁 판정 대상 아님
             skipped += 1
             continue

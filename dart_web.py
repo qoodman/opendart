@@ -4890,6 +4890,23 @@ def _dsp_detail(conn, s_, code):
             + (f' · 이전 단계 {escape(s_["prev_level"])}' if s_.get("prev_level") and s_["prev_level"] != s_["level"] else "") + '</span></div>'
             + (f'<div style="font-size:13px">최근 90일 신호: ' + ", ".join(escape(dp.KIND_LABEL.get(k, k)) for k in (ev.get("hot") or [])) + f' · 최근 30일 {ev.get("recent30", 0)}건' + (" · 행동주의 성향 보유자 관련" if ev.get("activist") else "") + '</div>' if ev else "")
             + '</div>')
+    why_l = []
+    if ev:
+        why_l.append("공시 신호: " + ", ".join(escape(dp.KIND_LABEL.get(k, k)) for k in (ev.get("kinds") or [])) + f" (점수 {ev.get('score', 0)}, 단계 {escape(ev.get('level', ''))})")
+    if sc:
+        fp = sc.get("friendly_pct") if sc.get("friendly_pct") is not None else sc.get("holder_pct")
+        if fp is not None:
+            top_ = max([h for h in (sc.get("ext") or []) if not dp._neutral(h)], key=lambda h: h.get("pct") or 0, default=None)
+            why_l.append(f"최대주주 측(우호 포함) {fp:.1f}%" + (f" vs 도전자 {escape(top_['name'])} {top_['pct']:.1f}% — 격차 {fp - top_['pct']:.1f}%p" if top_ else " · 맞서는 5% 보유자 없음") + (" · 흔들 만한 구조" if sc.get("contest") else " · 흔들 만한 구조 아님"))
+        for r_ in (sc.get("reasons") or [])[:5]:
+            why_l.append(escape(r_))
+    try:
+        excl_ = conn.execute("SELECT 1 FROM dispute_tag WHERE code=? AND role='exclude'", (code,)).fetchone()
+    except sqlite3.Error:
+        excl_ = None
+    why_card = ('<div class="card"><b>왜 이 종목이 올라왔나</b><ul style="padding-left:18px;margin:4px 0;font-size:13px">' + "".join(f"<li>{x}</li>" for x in why_l) + "</ul>"
+                '<form method="post" action="/dispute/tag" style="margin:6px 0 0"><input type="hidden" name="code" value="' + escape(code) + '"><input type="hidden" name="role" value="exclude"><button>이 종목은 분쟁 아님 — 목록에서 빼기</button>'
+                '<span class="muted" style="font-size:12px"> 분쟁이 아니라고 판단되면 빼 두세요 (이 서버에만 적용, 목록에서 바로 사라지고 다음 분석에서도 제외돼요)</span></form></div>')
     mt = pl.get("meeting")
     meet_card = ""
     if mt:
@@ -4962,7 +4979,7 @@ def _dsp_detail(conn, s_, code):
     rec_card = ('<div class="card"><b>⏳ 의결권 기준일 (12월 결산 기준)</b><div style="margin:4px 0">정기주총 의결권 기준일 <b>%s</b> · <b>D-%d</b></div>'
                 '<div class="muted" style="font-size:12px">정기주총에서 이사 선임 등으로 승부를 보려면 보통 결산일(12월 결산이면 12월 31일) 주주명부에 올라 있어야 의결권을 가져요. 그래서 분쟁 당사자들은 이 날짜 전에 지분을 확보하려고 해요 '
                 '(결산월이 다르거나 임시주총이면 기준일이 달라요 — 주주총회 소집 공고·기준일 공고로 확인하세요). 신주 발행·자기주식의 복지기금 출연처럼 의결권이 되살아나는 방어책도 이 일정을 보고 나와요.</div></div>') % (rec.isoformat(), (rec - today_).days)
-    return head + meet_card + rec_card + _dsp_price_card(conn, code, pl.get("events") or []) + prox_card + tl_card + hold_card + guide
+    return head + why_card + meet_card + rec_card + _dsp_price_card(conn, code, pl.get("events") or []) + prox_card + tl_card + hold_card + guide
 
 
 _PICKS = {"t": 0.0, "v": None}
