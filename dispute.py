@@ -112,8 +112,13 @@ def classify(report_nm, flr_nm="", corp_name="", ptype=""):
     if re.search(r"경영권분쟁", t):
         return "litig", 4.0, 0
     if "가처분" in t:
-        return "injunction", 3.0, 0
+        # 대기업은 특허·노동·거래 소송 가처분도 많아서, 경영권·주주총회·신주 발행처럼 지배구조와 관련된 말이 있을 때만 분쟁 신호로 봄
+        if re.search(r"경영권|의결권|주주총회|주총|신주|이사|해임|선임|주주명부|대표이사|주식처분|전환사채|신주인수권|유상증자|제3자배정", t):
+            return "injunction", 3.0, 0
+        return None
     if "공개매수" in t:
+        if _same_company(flr_nm, corp_name):          # 회사가 자기 주식을 사들이는 공개매수는 분쟁이 아님 (주주환원)
+            return "defense", 1.0, 0
         return "tender", 4.0, 0
     if "의결권대리행사권유" in t or ptype == "D003":
         return ("proxy_co", 1.0, 0) if _same_company(flr_nm, corp_name) else ("proxy_ext", 4.0, 1 if _is_activist(flr_nm) else 0)
@@ -314,7 +319,7 @@ def structure_score(holder_pct, ext_holders, pbr=None):
     # 맞서는 쪽(도전자)은 공적 기관(국민연금·산업은행 등)을 뺀 5% 보유자. 공적 기관은 분쟁 당사자가 아니라 캐스팅보트로만 봄
     ext = sorted([h for h in ext_holders if h.get("pct") and not _neutral(h)], key=lambda h: -h["pct"])
     if not ext:                # 맞서는 쪽(공적 기관 제외 5% 보유자)이 없으면 분쟁 구조가 아님 — 지분율이 낮다는 이유만으로 가능성을 매기지 않음
-        return dict(score=0, reasons=[], gap=None)
+        return dict(score=0, reasons=[], gap=None, contest=False)
     if not contestable(holder_pct, ext):      # 5% 이상 보유자가 있어도 최대주주 측과 격차가 크면 경영권 분쟁으로 보지 않음 (예: 행동주의 펀드 6% vs 최대주주 측 45%)
         top = ext[0]
         return dict(score=0, gap=(holder_pct - top["pct"]) if holder_pct is not None else None, contest=False,
@@ -667,6 +672,11 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
     names = {}
     corp = {}
     for code, name, cc, d, nm, flr, kind, w, act, rn in conn.execute("SELECT stock_code, corp_name, corp_code, rcept_dt, report_nm, flr_nm, kind, weight, activist, rcept_no FROM dispute_event WHERE rcept_dt >= ?", (since,)):
+        if kind in ("injunction", "tender", "litig"):            # 분류 규칙이 바뀌었을 수 있어 제목으로 다시 매김 (예전에 잘못 잡힌 가처분·자기주식 공개매수를 걸러냄)
+            re_ = classify(nm, flr or "", name or "")
+            if re_ is None:
+                continue
+            kind, w, act = re_
         if kind in ("blk_gen", "proxy_ext", "proposal", "tender") and is_neutral_inst(flr):
             continue                      # 국민연금·산업은행 같은 공적 기관의 보고는 분쟁 신호로 세지 않음 (캐스팅보트로만 봄)
         by.setdefault(code, []).append(dict(date=d, kind=kind, weight=w, activist=act, title=nm, flr=flr, rcept_no=rn))
@@ -763,6 +773,7 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
             pass
     out = 0
     skipped = weak = 0
+    kept = []
     for code, s_ in states.items():
         if s_.get("majority") is not None:          # 최대주주 측 50% 이상 → 분쟁 판정 대상 아님
             skipped += 1
@@ -782,16 +793,21 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
             if level == "징후" and not (stc and stc.get("contest")):
                 weak += 1
                 continue
-            if level in ("시작", "치열") and stc and stc.get("contest") is False:
+            if level in ("시작", "치열") and (not stc or stc.get("contest") is False):          # 지분 구조를 확인 못 했거나 흔들 만한 구조가 아니면 뺌
                 weak += 1
                 continue
         prev = conn.execute("SELECT level, alerted FROM dispute_state WHERE code=?", (code,)).fetchone()
         payload = dict(ev=s_["ev"], struct=s_["struct"], dropped=s_.get("dropped") or [], majority=s_.get("majority"), meeting=s_.get("meeting"), proxies=s_.get("proxies") or [], events=[e for e in sorted(by[code], key=lambda e: e["date"], reverse=True) if e["kind"] != "agm"][:30])
+        kept.append(code)
         conn.execute("INSERT OR REPLACE INTO dispute_state VALUES (?,?,?,?,?,?,?,?)",
                      (code, s_["name"], level, sc, json.dumps(payload, ensure_ascii=False), today.isoformat(), prev[0] if prev else None, prev[1] if prev else None))
         out += 1
     # 더는 해당 없는 종목은 지움
     conn.execute("DELETE FROM dispute_state WHERE updated < ?", (today.isoformat(),))
+    if kept:
+        conn.execute("DELETE FROM dispute_state WHERE code NOT IN (%s)" % ",".join("?" * len(kept)), kept)
+    else:
+        conn.execute("DELETE FROM dispute_state")
     conn.commit()
     log(f"[지분분쟁] 판정 종목 {out}개" + (f" (최대주주 측 {MAJORITY:.0f}% 이상이라 뺀 종목 {skipped}개)" if skipped else "") + (f" (경영권을 흔들 만한 구조가 아니라 뺀 약한 신호 {weak}개)" if weak else ""))
     return out
