@@ -4751,7 +4751,6 @@ def _dsp_detail(conn, s_, code):
                      + (f'<div style="margin-top:6px;font-size:13px"><b>분쟁 가능성 근거</b> (구조 점수 {sc.get("score", 0)})<ul style="padding-left:18px;margin:4px 0">{why}</ul></div>' if why else "")
                      + ('<div style="margin-top:6px;font-size:13px"><b>🎚 캐스팅보트</b> — 두 쪽의 격차(' + f'{sc["swing"][0]["gap"]:.1f}%p' + ')보다 지분이 커서 표가 갈리면 승패를 가를 수 있는 보유자<ul style="padding-left:18px;margin:4px 0">'
                         + "".join(f'<li><b>{escape(x["name"])}</b> {x["pct"]:.1f}%' + (" (기관 — 의결권 행사 입장은 공개되거나 보도되는 경우가 많아요)" if x.get("inst") else "") + '</li>' for x in sc["swing"][:5]) + '</ul></div>' if sc.get("swing") else "")
-                     + ((f'<div style="margin-top:6px;font-size:12px"><b>최대주주 측 지분 {pl["majority"]:.1f}% (과반)</b> — 외부 세력의 경영권 도전 신호와 지분 구조 점수는 분쟁으로 세지 않아요. 가족·특수관계인 간 다툼은 소송·가처분·최대주주 변경 공시로만 잡아요.</div>') if pl.get("majority") else "")
                      + ((f'<div style="margin-top:6px;font-size:12px"><b>최대주주 측으로 보고 뺀 공시</b> (지주사·계열사 포함 — 분쟁 상대가 아니에요): '
                          + ", ".join(f'{escape(d.get("flr") or "")} ({escape(d.get("date", ""))})' for d in (pl.get("dropped") or [])[:5]) + '</div>') if pl.get("dropped") else "")
                      + ((f'<div class="muted" style="font-size:11px;margin-top:4px">최대주주 측으로 본 이름: {escape(", ".join(sc.get("insiders") or []))} · 표기가 달라도(㈜·주식회사) 같은 곳으로 봐요</div>') if sc.get("insiders") else "")
