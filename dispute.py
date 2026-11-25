@@ -229,12 +229,25 @@ def assess_events(evs, today=None):
 
 
 # ---------------- 구조(가능성) ----------------
+INSTITUTIONS = ["국민연금", "산업은행", "한국산업은행", "한국투자공사", "예금보험공사", "신용보증기금", "기술보증기금", "우정사업본부"]
+NEUTRAL_EXTRA = ["공제회", "연금", "정책금융", "수출입은행", "진흥공단", "예금보험", "자산관리공사", "주택금융공사"]
+
+
+def is_neutral_inst(name):
+    """국민연금·산업은행 같은 공적 기관: 경영권 분쟁의 한쪽이 아니라 표를 쥐는 캐스팅보트로만 봄"""
+    n = name or ""
+    return any(i in n for i in INSTITUTIONS + NEUTRAL_EXTRA)
+
+
 def structure_score(holder_pct, ext_holders, pbr=None):
     """최대주주 측 지분과 외부 5% 보유자들 → dict(score, reasons[], gap)
     ext_holders: [dict(name, pct, tp('일반'/'약식'), activist(bool), chg(최근 증감 %p), date)] (최대주주 측 제외)"""
     reasons, score = [], 0
     gap = None
-    ext = sorted([h for h in ext_holders if h.get("pct")], key=lambda h: -h["pct"])
+    # 맞서는 쪽(도전자)은 공적 기관(국민연금·산업은행 등)을 뺀 5% 보유자. 공적 기관은 분쟁 당사자가 아니라 캐스팅보트로만 봄
+    ext = sorted([h for h in ext_holders if h.get("pct") and not is_neutral_inst(h.get("name"))], key=lambda h: -h["pct"])
+    if not ext:                # 맞서는 쪽(공적 기관 제외 5% 보유자)이 없으면 분쟁 구조가 아님 — 지분율이 낮다는 이유만으로 가능성을 매기지 않음
+        return dict(score=0, reasons=[], gap=None)
     if holder_pct is not None and ext:
         gap = holder_pct - ext[0]["pct"]
         if gap <= 5:
@@ -287,7 +300,6 @@ def structure_score(holder_pct, ext_holders, pbr=None):
 MAJORITY = 50.0          # 최대주주 측 지분이 이 값 이상이면 분쟁이 없는 종목으로 봄
 
 
-INSTITUTIONS = ["국민연금", "산업은행", "한국산업은행", "한국투자공사", "예금보험공사", "신용보증기금", "기술보증기금", "우정사업본부"]
 
 
 def swing_holders(holder_pct, ext):
@@ -295,15 +307,20 @@ def swing_holders(holder_pct, ext):
     격차가 작을수록 제3자의 한 표가 승패를 가르므로, 격차보다 지분이 큰 보유자를 캐스팅보트로 봐요."""
     if holder_pct is None or not ext:
         return []
-    gen = sorted([h for h in ext if h.get("tp") == "일반" and h.get("pct")], key=lambda h: -h["pct"])
-    top = gen[0] if gen else max(ext, key=lambda h: h.get("pct") or 0)
+    ch = [h for h in ext if not is_neutral_inst(h.get("name"))]
+    if not ch:                 # 맞서는 쪽이 없으면 캐스팅보트도 없음
+        return []
+    gen = sorted([h for h in ch if h.get("tp") == "일반" and h.get("pct")], key=lambda h: -h["pct"])
+    top = gen[0] if gen else max(ch, key=lambda h: h.get("pct") or 0)
     gap = abs(holder_pct - top["pct"])
     out = []
     for h in ext:
         if h["name"] == top["name"] or not h.get("pct"):
             continue
-        if h["pct"] >= max(gap, 3.0):
-            out.append(dict(name=h["name"], pct=h["pct"], inst=any(i in h["name"] for i in INSTITUTIONS), gap=gap, tp=h.get("tp")))
+        neutral = is_neutral_inst(h["name"])
+        decisive = h["pct"] >= max(gap, 3.0)
+        if decisive or (neutral and h["pct"] >= 5):          # 공적 기관은 지분이 격차보다 작아도 표를 쥔 캐스팅보트 후보로 보여 줌
+            out.append(dict(name=h["name"], pct=h["pct"], inst=neutral, gap=gap, tp=h.get("tp"), decisive=decisive))
     return sorted(out, key=lambda x: -x["pct"])
 
 
@@ -517,6 +534,8 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
     names = {}
     corp = {}
     for code, name, cc, d, nm, flr, kind, w, act, rn in conn.execute("SELECT stock_code, corp_name, corp_code, rcept_dt, report_nm, flr_nm, kind, weight, activist, rcept_no FROM dispute_event WHERE rcept_dt >= ?", (since,)):
+        if kind in ("blk_gen", "proxy_ext", "proposal", "tender") and is_neutral_inst(flr):
+            continue                      # 국민연금·산업은행 같은 공적 기관의 보고는 분쟁 신호로 세지 않음 (캐스팅보트로만 봄)
         by.setdefault(code, []).append(dict(date=d, kind=kind, weight=w, activist=act, title=nm, flr=flr, rcept_no=rn))
         names[code] = name
         corp[code] = cc

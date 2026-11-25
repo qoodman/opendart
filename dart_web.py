@@ -4826,7 +4826,7 @@ def _dsp_detail(conn, s_, code):
         hold_card = ('<div class="card"><b>지분 구조</b>' + (f'<div class="scroll"><table><tr><th>보유자</th><th>지분율</th><th>보고 종류</th><th>마지막 보고</th><th>직전 대비</th></tr>{rows}</table></div>' if rows else "")
                      + (f'<div style="margin-top:6px;font-size:13px"><b>분쟁 가능성 근거</b> (구조 점수 {sc.get("score", 0)})<ul style="padding-left:18px;margin:4px 0">{why}</ul></div>' if why else "")
                      + ('<div style="margin-top:6px;font-size:13px"><b>🎚 캐스팅보트</b> — 두 쪽의 격차(' + f'{sc["swing"][0]["gap"]:.1f}%p' + ')보다 지분이 커서 표가 갈리면 승패를 가를 수 있는 보유자<ul style="padding-left:18px;margin:4px 0">'
-                        + "".join(f'<li><b>{escape(x["name"])}</b> {x["pct"]:.1f}%' + (" (기관 — 의결권 행사 입장은 공개되거나 보도되는 경우가 많아요)" if x.get("inst") else "") + '</li>' for x in sc["swing"][:5]) + '</ul></div>' if sc.get("swing") else "")
+                        + "".join(f'<li><b>{escape(x["name"])}</b> {x["pct"]:.1f}%' + (" (공적 기관 — 분쟁 당사자가 아니라 표를 쥔 쪽이에요. 의결권 행사 입장은 공개되거나 보도되는 경우가 많아요)" if x.get("inst") else "") + ("" if x.get("decisive", True) else " · 지분이 격차보다 작아 단독으론 승패를 못 가르지만 표를 보태요") + '</li>' for x in sc["swing"][:5]) + '</ul></div>' if sc.get("swing") else "")
                      + ((f'<div style="margin-top:6px;font-size:12px"><b>최대주주 측으로 보고 뺀 공시</b> (지주사·계열사 포함 — 분쟁 상대가 아니에요): '
                          + ", ".join(f'{escape(d.get("flr") or "")} ({escape(d.get("date", ""))})' for d in (pl.get("dropped") or [])[:5]) + '</div>') if pl.get("dropped") else "")
                      + ((f'<div class="muted" style="font-size:11px;margin-top:4px">최대주주 측으로 본 이름: {escape(", ".join(sc.get("insiders") or []))} · 표기가 달라도(㈜·주식회사) 같은 곳으로 봐요</div>') if sc.get("insiders") else "")
