@@ -1786,12 +1786,19 @@ class RunLock:
 
     def __enter__(self):
         import fcntl
-        self.f = open(self.path, "w")
+        self.f = open(self.path, "a+")
         try:
             fcntl.flock(self.f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             self.f.close()
             raise SystemExit("이미 수집이 진행 중입니다.")
+        try:                                  # 잠금을 잡은 프로세스 번호를 적어 둠 (화면에서 멈춘 수집을 끝낼 때 씀)
+            self.f.seek(0)
+            self.f.truncate()
+            self.f.write(str(os.getpid()))
+            self.f.flush()
+        except OSError:
+            pass
         return self
 
     def __exit__(self, *a):
@@ -1801,7 +1808,7 @@ class RunLock:
 def is_running():
     import fcntl
     try:
-        with open(data_dir() / "run.lock", "w") as f:
+        with open(data_dir() / "run.lock", "a+") as f:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
             fcntl.flock(f, fcntl.LOCK_UN)
         return False
@@ -2237,6 +2244,128 @@ def busy_jobs():
     return out
 
 
+def _is_ours(pid):
+    """그 프로세스가 이 앱의 작업(dart_server.py)인지 확인 — 엉뚱한 프로세스를 끄지 않게"""
+    try:
+        with open(f"/proc/{int(pid)}/cmdline", "rb") as f:
+            return b"dart_server.py" in f.read()
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _children(pid):
+    out = []
+    try:
+        for d in os.listdir("/proc"):
+            if d.isdigit():
+                try:
+                    with open(f"/proc/{d}/stat", encoding="utf-8") as f:
+                        ppid = int(f.read().rsplit(")", 1)[1].split()[1])
+                except (OSError, ValueError, IndexError):
+                    continue
+                if ppid == pid:
+                    out.append(int(d))
+    except OSError:
+        pass
+    return out
+
+
+def _kill_tree(pid):
+    """프로세스와 그 자식들을 끝냄 (SIGTERM → 5초 뒤 남아 있으면 SIGKILL)"""
+    import signal
+    pids = [pid]
+    for c in list(pids):
+        pids += _children(c)
+    for p_ in reversed(pids):
+        try:
+            os.kill(p_, signal.SIGTERM)
+        except OSError:
+            pass
+    for _ in range(25):
+        time.sleep(0.2)
+        if not any(os.path.exists(f"/proc/{p_}") for p_ in pids):
+            return
+    for p_ in pids:
+        try:
+            os.kill(p_, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def job_details():
+    """작업 현황 화면용: 돌고 있는 수집·분석의 [dict(key, name, pid, stage, progress, started, updated_age, same_for)]"""
+    import legis
+    out = []
+    now = time.time()
+    if is_running():
+        try:
+            st = json.loads(status_file().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            st = {}
+        try:
+            pid = int((data_dir() / "run.lock").read_text().strip() or 0)
+        except (OSError, ValueError):
+            pid = 0
+        try:
+            sig = json.loads((data_dir() / "run_sig.json").read_text(encoding="utf-8"))
+            same = now - float(sig.get("since") or now)
+        except (OSError, ValueError):
+            same = None
+        total, done = st.get("total") or 0, st.get("done") or 0
+        out.append(dict(key="run", name="수집", pid=pid, stage=st.get("stage", ""), progress=(f"{done:,}/{total:,}" if total else ""), started="", updated_age=now - float(st.get("updated") or now), same_for=same))
+    for f, label in JOB_FILES:
+        st = legis.read_status(str(data_dir() / f))
+        if st and st.get("running"):
+            steps = st.get("steps") or []
+            cur = next((x for x in steps if x.get("state") == "run"), steps[-1] if steps else {})
+            out.append(dict(key=f, name=label, pid=st.get("pid") or 0, stage=cur.get("name", ""), progress=cur.get("msg", ""), started=st.get("started", ""), updated_age=None, same_for=None))
+    return out
+
+
+def stop_job(form):
+    """멈춘 것 같은 수집·분석을 화면에서 끝냄. form: job = 'run' 또는 상태 파일 이름. (성공 여부, 안내)"""
+    job = (form.get("job") or "").strip()
+    if job == "run":
+        try:
+            pid = int((data_dir() / "run.lock").read_text().strip() or 0)
+        except (OSError, ValueError):
+            pid = 0
+        if not pid or not _is_ours(pid):
+            return False, "수집 프로세스를 찾지 못했어요. 서버에서 `sudo systemctl stop dart-daily`로 끝내 주세요."
+        _kill_tree(pid)
+        try:
+            st = json.loads(status_file().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            st = {}
+        st.update(state="failed", error="화면에서 중단했어요", updated=time.time())
+        try:
+            status_file().write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
+        return True, "수집을 중단했어요. 필요하면 다시 시작해 주세요."
+    names = dict(JOB_FILES)
+    if job not in names:
+        return False, "알 수 없는 작업이에요."
+    path = data_dir() / job
+    try:
+        st = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False, "작업 상태를 읽지 못했어요."
+    pid = st.get("pid")
+    if pid and _is_ours(pid):
+        _kill_tree(int(pid))
+    st["running"] = False
+    st["finished"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for x in st.get("steps") or []:
+        if x.get("state") in ("run", "wait"):
+            x.update(state="fail", msg="중단했어요")
+    try:
+        path.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+    return True, f"{names[job]}을(를) 중단했어요."
+
+
 def _queue_file():
     return data_dir() / "update_queue.json"
 
@@ -2566,7 +2695,7 @@ def cmd_web(args):
                     update_info=update_info, check_update=check_update, start_update=start_update,
                     backup_list=backup_list, backup_busy=backup_busy, backup_start=backup_start,
                     backup_file=backup_file, krx_key=krx_key_now, save_krx_key=save_krx_key,
-                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, event_action=event_action, legstudy_run=legstudy_run, fin_run=fin_run, world_run=world_run, picks_snapshot=picks_snapshot, cancel_update_queue=cancel_update_queue, dispute_run=dispute_run, dispute_tag=dispute_tag, dispute_reset=dispute_reset, dispute_refresh=dispute_refresh, float_run=float_run, foreign_run=foreign_run, fin_clue_run=fin_clue_run, fin_action=fin_action, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
+                    ext_check=ext_check, news_refresh=news_refresh_web, bills_action=bills_action, legis_prepare=legis_prepare, legis_action=legis_action, event_action=event_action, legstudy_run=legstudy_run, fin_run=fin_run, world_run=world_run, picks_snapshot=picks_snapshot, cancel_update_queue=cancel_update_queue, stop_job=stop_job, job_details=job_details, dispute_run=dispute_run, dispute_tag=dispute_tag, dispute_reset=dispute_reset, dispute_refresh=dispute_refresh, float_run=float_run, foreign_run=foreign_run, fin_clue_run=fin_clue_run, fin_action=fin_action, datagokr_key=lambda: env_shared("DATA_GO_KR_KEY"))
     serve(results_db(), host=args.host, port=args.port, child_env=child_env,
           get_key=lambda: read_env_file().get("DART_API_KEY", "") or os.environ.get("DART_API_KEY", ""),
           save_key=save_key, settings_api=settings_api)

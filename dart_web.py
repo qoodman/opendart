@@ -179,14 +179,43 @@ def busy_info():
     return _BUSY["v"]
 
 
+def view_jobs(S, q):
+    """작업 현황: 돌고 있는 수집·분석, 진행 상황, 마지막으로 진행이 바뀐 때, 멈춘 것 같을 때 끝내는 버튼"""
+    jobs = S["job_details"]() if "job_details" in S else []
+    msg = q.get("msg", "")
+    flash = f'<div class="card {"warn" if msg.startswith("✖") else ""}">{escape(msg)}</div>' if msg else ""
+    _, queued = busy_info()
+    rows = ""
+    for j in jobs:
+        same = j.get("same_for")
+        same_t = ""
+        if same is not None:
+            m_ = int(same // 60)
+            same_t = f'<div style="font-size:12px" class="{"down" if m_ >= 10 else "muted"}">진행 상황이 <b>{m_}분째</b> 그대로예요' + (" — 멈췄을 수 있어요" if m_ >= 10 else "") + ' <span class="muted">(10분마다 확인해서 기록해요)</span></div>'
+        age = j.get("updated_age")
+        if age is not None and age > 120:
+            same_t += f'<div style="font-size:12px" class="down">상태 파일이 {int(age // 60)}분째 갱신되지 않았어요</div>'
+        rows += (f'<div class="card"><div class="row"><b>{escape(j["name"])}</b>'
+                 + ('<form method="post" action="/jobs/stop" style="margin:0" onsubmit="return confirm(\'이 작업을 중단할까요? 하던 일은 멈추고, 이미 저장된 것은 남아요.\')">'
+                    f'<input type="hidden" name="job" value="{escape(j["key"])}"><button>중단</button></form>') + '</div>'
+                 f'<div style="font-size:13px">{escape(j.get("stage") or "")} {escape(j.get("progress") or "")}</div>'
+                 f'<div class="muted" style="font-size:12px">프로세스 {j.get("pid") or "?"}' + (f' · 시작 {escape(j["started"])}' if j.get("started") else "") + '</div>' + same_t + '</div>')
+    body = ('<div class="card"><b>작업 현황</b><div class="muted" style="font-size:13px">지금 돌고 있는 수집·분석이에요. 오래 걸리는 작업은 정상일 수 있어요(예: 지분분쟁 전체 분석은 수천 번 DART를 불러서 몇십 분). '
+            '진행 상황이 오래 그대로면 멈춘 것일 수 있으니 <b>중단</b>한 뒤 다시 시작하세요.</div></div>'
+            + (rows or '<div class="card muted">지금 돌고 있는 수집·분석이 없어요.</div>')
+            + ('<div class="card">🔄 <b>업데이트 예약됨</b> — 위 작업이 모두 끝나면 바로 시작해요. '
+               '<form method="post" action="/settings/update-cancel" style="display:inline"><button>예약 취소</button></form></div>' if queued else ""))
+    return page("작업 현황", flash + body, refresh=bool(jobs))
+
+
 def busy_chips():
     """헤더: 수집 말고 돌고 있는 분석 작업과 업데이트 예약 표시"""
     names, queued = busy_info()
     out = ""
     if names:
-        out += f'<span class="runbtn busy" title="{escape(", ".join(names))}">⏳ {escape(names[0])}' + (f' 외 {len(names) - 1}' if len(names) > 1 else "") + ' 중</span>'
+        out += f'<a class="runbtn busy" href="/jobs" title="{escape(", ".join(names))}">⏳ {escape(names[0])}' + (f' 외 {len(names) - 1}' if len(names) > 1 else "") + ' 중</a>'
     if queued:
-        out += '<span class="runbtn alt" title="수집·분석이 모두 끝나면 바로 업데이트해요 (업데이트 메뉴에서 취소)">🔄 업데이트 예약됨</span>'
+        out += '<a class="runbtn alt" href="/jobs" title="수집·분석이 모두 끝나면 바로 업데이트해요 (취소는 작업 현황·업데이트 메뉴)">🔄 업데이트 예약됨</a>'
     return out
 
 
@@ -196,7 +225,7 @@ def run_widget():
     if st.get("state") == "running" and time.time() - st.get("updated", 0) < 120:
         total, done = st.get("total") or 0, st.get("done") or 0
         pct = f" {done / total:.0%}" if total else ""
-        return (f'<a class="runbtn busy" id="runbusy" href="/">수집 중{pct}</a>' + busy_chips() +
+        return (f'<a class="runbtn busy" id="runbusy" href="/jobs">수집 중{pct}</a>' + busy_chips() +
                 "<script>(function(){const b=document.getElementById('runbusy');const t=setInterval(()=>{"
                 "fetch('/health').then(r=>r.json()).then(s=>{if(s.state==='running'){"
                 "b.textContent='수집 중'+(s.total?' '+Math.round(s.done/s.total*100)+'%':'');}"
@@ -8405,6 +8434,8 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     body = view_world(conn, q)
                 elif url.path == "/crash":
                     body = view_crash(conn, q)
+                elif url.path == "/jobs":
+                    body = view_jobs(S, q)
                 elif url.path == "/dispute":          # 지분분쟁은 아이디어 탭으로 옮겼어요 (예전 주소 호환)
                     return self._redirect("/ideas?" + urlencode({"t": "dispute", **{k: v for k, v in q.items() if not k.startswith("_")}}))
                 elif url.path == "/ideas":
@@ -8645,6 +8676,12 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 S = settings()
                 ok, why = S["float_run"]() if "float_run" in S else (False, "이 서버 버전은 지원하지 않아요")
                 return self._redirect("/ideas?" + urlencode({"t": "float", "msg": ("✔ " if ok else "✖ ") + why}))
+            if path == "/jobs/stop" and settings_api:
+                n = min(int(self.headers.get("Content-Length") or 0), 4096)
+                form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore")).items()}
+                S = settings()
+                ok, why = S["stop_job"](form) if "stop_job" in S else (False, "이 서버 버전은 지원하지 않아요")
+                return self._redirect("/jobs?" + urlencode({"msg": ("✔ " if ok else "✖ ") + why}))
             if path == "/dispute/refresh" and settings_api:
                 n = min(int(self.headers.get("Content-Length") or 0), 4096)
                 form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore")).items()}
