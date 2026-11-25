@@ -1195,6 +1195,55 @@ def _fresh_card(conn):
             '<div class="muted" style="font-size:11px">5일 넘게 지났거나 없으면 시장 → 해외 증시에서 받기, 또는 지금 수집 → 시장·정책만을 돌려 주세요.</div></div>')
 
 
+def _stress_card(conn):
+    """동반 하락 탭: 내 자산 스트레스 테스트 — 자산 종류별 금액을 넣으면 과거 하락 구간이 다시 오면 얼마나 줄지 어림"""
+    import json as _json
+    import crash_response as cr
+    import vol_limit as vl
+    eps = cr.episode_table(conn)
+    kospi = vl.kospi(conn)
+
+    def kret(d0, d1):
+        a = next((v for d, v in kospi if d >= d0.replace("-", "")), None)
+        b = next((v for d, v in kospi if d >= d1.replace("-", "")), None)
+        return b / a - 1 if a and b else None
+    rows = [("kospi", "한국 주식"), ("SPY", "미국 주식"), ("TLT.O", "장기 국채"), ("IEF.O", "중기 국채"), ("SHY.O", "단기채·현금성"), ("GLD", "금"),
+            ("UUP", "달러"), ("VNQ", "해외 리츠"), ("DBC", "원자재"), ("re", "부동산(직접, 직접 입력 충격)"), ("coin", "가상자산(직접 입력 충격)")]
+    if not eps:
+        return ""
+    data = []
+    for e in eps:
+        r = {}
+        for k, _ in rows:
+            if k == "kospi":
+                r[k] = kret(e["d0"], e["d1"])
+            elif k in e["cells"] and e["cells"][k]:
+                r[k] = e["cells"][k][0]
+            else:
+                r[k] = None
+        data.append(dict(name=e["name"], r=r))
+    inputs = "".join(
+        f'<label style="font-size:12px">{escape(lbl)}(만원)<input class="st_in" data-k="{k}" type="number" min="0" value="0" style="width:100%"></label>' for k, lbl in rows)
+    shocks = ('<label style="font-size:12px">부동산 충격(%)<input id="st_re" type="number" value="-15" style="width:100%"></label>'
+              '<label style="font-size:12px">가상자산 충격(%)<input id="st_coin" type="number" value="-60" style="width:100%"></label>')
+    payload = _json.dumps(data, ensure_ascii=False)
+    return ('<div class="card"><details><summary><b>내 자산 스트레스 테스트 — 과거 하락이 다시 오면</b></summary>'
+            '<div class="muted" style="font-size:12px;margin:4px 0">자산 종류별로 가진 금액(만원)을 넣으면, 위 2번 표의 과거 하락 구간(시작→바닥) 수익률을 그대로 적용했을 때 얼마나 줄어드는지 어림해요. 이 브라우저에서만 계산하고 저장하거나 보내지 않아요.</div>'
+            f'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:6px">{inputs}{shocks}</div>'
+            '<div id="st_out" style="margin-top:8px;font-size:13px"></div>'
+            '<div class="muted" style="font-size:11px;margin-top:6px">해외 자산은 달러 가격 기준이라 원화 환율 변화는 빠져 있어요 (위기 때 달러가 오르면 실제 손실은 이보다 작을 수 있어요). 해당 구간에 자료가 없는 자산은 0%로 계산하고, 부동산·가상자산은 아래 칸의 충격을 모든 구간에 똑같이 써요. 실제 하락은 과거와 달라요. 투자 권유가 아니에요.</div>'
+            '<script>(function(){var D=' + payload + ';var ins=document.querySelectorAll(".st_in");'
+            'function N(x){return Math.round(x).toLocaleString()}'
+            'function u(){var amt={},tot=0;ins.forEach(function(i){var v=+i.value||0;amt[i.dataset.k]=v;tot+=v});'
+            'var h="";if(!tot){document.getElementById("st_out").innerHTML="<span class=muted>금액을 넣어 보세요.</span>";return}'
+            'h="<table><tr><th>구간</th><th>예상 손실</th><th>비율</th></tr>";'
+            'D.forEach(function(e){var loss=0;for(var k in amt){var r=e.r[k];if(k=="re")r=(+document.getElementById("st_re").value||0)/100;if(k=="coin")r=(+document.getElementById("st_coin").value||0)/100;if(r==null)r=0;loss+=amt[k]*r}'
+            'h+="<tr><td>"+e.name+"</td><td><b>"+N(loss)+"만원</b></td><td>"+(loss/tot*100).toFixed(1)+"%</td></tr>"});'
+            'document.getElementById("st_out").innerHTML=h+"</table><div class=muted style=font-size:12px>합계 "+N(tot)+"만원 기준</div>"}'
+            'document.querySelectorAll(".st_in,#st_re,#st_coin").forEach(function(i){i.addEventListener("input",u)});u()})()</script>'
+            '</details></div>')
+
+
 def view_crash(conn, q):
     """시장 → 동반 하락 대응: 하락 유형 진단 · 과거 하락에서 자산별 성적 · 분할 매수 규칙 비교 · 먼저 점검할 것"""
     import crash_response as cr
@@ -1269,7 +1318,7 @@ def view_crash(conn, q):
              '<li><b>분할 규칙은 미리 적어 두기</b>: 낙폭 구간마다 어느 만큼 살지 정해 두면 공포 속에서 판단하지 않아도 돼요.</li>'
              '<li><b>하나가 아니라 유형이 다른 자산</b>: 위 2번 표처럼 유형이 바뀌면 방어가 되는 자산도 바뀌어요.</li></ul>'
              '<div class="muted" style="font-size:12px;margin-top:6px">관련 화면: <a href="/cycle">투자 사이클</a> · <a href="/diag">하락 점검</a> · <a href="/ideas?t=picks">투자처(해외·다자산)</a> · <a href="/world">해외 증시 ETF</a></div></div>')
-    return page("동반 하락 대응", intro + _fresh_card(conn) + _vol_card(conn) + _conc_card(conn) + _nps_card(conn) + diag + past + split + alloc + check)
+    return page("동반 하락 대응", intro + _fresh_card(conn) + _vol_card(conn) + _conc_card(conn) + _nps_card(conn) + diag + past + _stress_card(conn) + split + alloc + check)
 
 
 def view_derivs(conn, q):
