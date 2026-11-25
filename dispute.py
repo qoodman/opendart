@@ -48,10 +48,11 @@ def ensure(conn):
     CREATE TABLE IF NOT EXISTS dispute_tag (code TEXT, name TEXT, role TEXT, updated TEXT, PRIMARY KEY (code, name));
     CREATE TABLE IF NOT EXISTS dispute_struct (code TEXT PRIMARY KEY, fetched TEXT, hp REAL, ext TEXT, insiders TEXT);
     """)
-    try:
-        conn.execute("ALTER TABLE dispute_struct ADD COLUMN ally REAL")
-    except sqlite3.OperationalError:
-        pass
+    for stmt in ("ALTER TABLE dispute_struct ADD COLUMN ally REAL", "ALTER TABLE dispute_tag ADD COLUMN pct REAL"):
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass
 
 
 # ---------------- 분류 ----------------
@@ -696,9 +697,12 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
         pass
     if key:
         cached = {r[0]: r for r in conn.execute("SELECT code, fetched, hp, ext, insiders, ally FROM dispute_struct")}
-        tags = {}
-        for tc, tn, tr in conn.execute("SELECT code, name, role FROM dispute_tag"):
-            tags.setdefault(tc, {})[norm_name(tn)] = tr
+        tags, manual = {}, {}
+        for tc, tn, tr, tp_ in conn.execute("SELECT code, name, role, pct FROM dispute_tag"):
+            if tn != "*":
+                tags.setdefault(tc, {})[norm_name(tn)] = tr
+                if tp_ is not None and tr in ("challenger", "ally"):
+                    manual.setdefault(tc, []).append((tn, tr, tp_))
         ttl = (today - dt.timedelta(days=STRUCT_TTL_DAYS)).isoformat()
         n_fetch = 0
         for i, code in enumerate(cand):
@@ -723,17 +727,27 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
                 time.sleep(0.15)
             # 내가 정한 역할(우호·중립·도전자)을 반영: 우호는 우호 지분에 더하고, 중립은 캐스팅보트로만, 도전자는 공적 기관이라도 도전자로 봄
             mine = tags.get(code) or {}
-            if mine:
+            if mine or manual.get(code):
                 ext2, ally2 = [], ally or 0.0
                 for h in ext:
                     role = mine.get(norm_name(h["name"]))
+                    if role == "ignore":                  # 지분을 가진 쪽이 아니라고 내가 정함 (예: 공개매수 진행 중인 인수 목적 회사의 예정 지분)
+                        continue
                     if role == "ally":
                         ally2 += h.get("pct") or 0.0
                         continue
                     if role:
                         h = dict(h, role=role)
                     ext2.append(h)
+                for nm, role, pc_ in manual.get(code, []):          # 내가 직접 넣은 보유자 (DART 5% 보고에 없는 쪽, 예: 맥쿼리)
+                    if role == "ally":
+                        ally2 += pc_
+                    elif not any(norm_name(h["name"]) == norm_name(nm) for h in ext2):
+                        ext2.append(dict(name=nm, pct=pc_, tp="일반", activist=False, chg=None, date="", resn="직접 추가", role="challenger", manual=True, shift="", grow=0.0, first_pct=pc_))
                 ext, ally = ext2, ally2
+            for h in ext:            # 공개매수·인수 계약 진행 중인 보고자의 지분은 아직 실제 보유가 아닐 수 있음
+                if any(e["kind"] == "tender" and e.get("flr") and is_insider(h["name"], [e["flr"]]) for e in by[code]) or re.search(r"계약|공개매수", h.get("resn") or ""):
+                    h["pending"] = True
             hp_eff = (hp + ally) if (hp is not None and ally) else hp          # 최대주주 측 + 계열·우호 회사 5% 보유분 = 우호 지분
             st_ = structure_score(hp_eff, ext, pbr.get(code))
             states[code]["struct"] = dict(holder_pct=hp, ally_pct=ally or 0.0, friendly_pct=hp_eff, ext=ext, swing=swing_holders(hp_eff, ext), insiders=insiders[:12], **st_)
