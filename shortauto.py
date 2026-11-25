@@ -42,6 +42,9 @@ REGION_RULES = [("한국", re.compile(r"Korea|Korean|Seoul|Samsung|Hynix|KOSPI|K
                 ("일본", re.compile(r"Japan|Japanese|Tokyo|Nikkei|TSE|일본|도쿄", re.I)),
                 ("미국", re.compile(r"Nasdaq|NYSE|Wall Street|U\.S\.|US-listed|S&P|Nvidia|Tesla|Apple|Amazon|미국|나스닥|뉴욕", re.I))]
 MAX_NEW, MAX_AUTO, PRUNE_DAYS = 20, 60, 120
+# 텔레그램 공개 채널(웹 미리보기 t.me/s/<채널>) — 공매도 리포트 소식 채널이라 키워드 거름 없이 올림 (광고·잡담만 걸러냄)
+TELEGRAM = [("shortreportalrm", "미국")]
+TG_NOISE = re.compile(r"광고|가입|문의|텔레그램 채널|구독|이벤트|할인|상담|유료|리딩|수익 ?인증", re.I)
 
 
 def ensure(conn):
@@ -106,7 +109,36 @@ def fetch_feed(query, hl, gl, ceid, session=None, timeout=20):
     return parse_feed(r.text)
 
 
-def ingest(conn, articles, today=None):
+def parse_telegram(html_text, channel):
+    """t.me/s/<채널> 웹 미리보기 HTML → [(제목, 출처, 링크, 날짜)] — 글 첫 줄(없으면 앞 100자)을 제목으로 씀"""
+    import html as _h
+    out = []
+    for blk in re.findall(r'<div class="tgme_widget_message_wrap.*?(?=<div class="tgme_widget_message_wrap|\Z)', html_text, re.S):
+        mt = re.search(r'tgme_widget_message_text[^>]*>(.*?)</div>', blk, re.S)
+        if not mt:
+            continue
+        txt = _h.unescape(re.sub(r"<br\s*/?>", "\n", mt.group(1)))
+        txt = re.sub(r"<[^>]+>", "", txt).strip()
+        lines = [x.strip() for x in txt.splitlines() if x.strip()]
+        if not lines:
+            continue
+        head = re.sub(r"\s+", " ", lines[0])[:110]
+        if len(head) < 8 and len(lines) > 1:
+            head = re.sub(r"\s+", " ", lines[0] + " " + lines[1])[:110]
+        ml = re.search(r'href="(https://t\.me/%s/\d+)[^"]*"' % re.escape(channel), blk)
+        md = re.search(r'<time[^>]*datetime="(\d{4}-\d{2}-\d{2})', blk)
+        out.append((head, f"텔레그램 @{channel}", ml.group(1) if ml else f"https://t.me/s/{channel}", md.group(1) if md else ""))
+    return out
+
+
+def fetch_telegram(channel, session=None, timeout=20):
+    s = session or requests
+    r = s.get(f"https://t.me/s/{channel}", headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
+    r.raise_for_status()
+    return parse_telegram(r.text, channel)
+
+
+def ingest(conn, articles, today=None, trust=False, region=None):
     """후보 기사를 표에 넣음 → 새로 넣은 개수"""
     ensure(conn)
     now = (today or dt.date.today()).isoformat()
@@ -115,7 +147,10 @@ def ingest(conn, articles, today=None):
     for head, src, link, d in sorted(articles, key=lambda a: a[3], reverse=True):
         if added >= MAX_NEW or have_auto + added >= MAX_AUTO:
             break
-        if not is_candidate(head):
+        if trust:
+            if NOISE.search(head) or TG_NOISE.search(head):
+                continue
+        elif not is_candidate(head):
             continue
         h = norm_hash(head)
         if conn.execute("SELECT 1 FROM short_seen WHERE h=?", (h,)).fetchone():
@@ -125,10 +160,10 @@ def ingest(conn, articles, today=None):
         conn.execute(
             "INSERT INTO short_reports (seed, region, firm, target, report_date, title, status, claims, response, reaction, korea_link,"
             " source, source_url, verified, price_move, added, updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("auto:" + h, guess_region(head), m.group(0) if m else "", "", d, head[:120], "이슈 진행 중",
+            ("auto:" + h, (guess_region(head) if guess_region(head) != "기타" else region) if region else guess_region(head), m.group(0) if m else "", "", d, head[:120], "이슈 진행 중",
              "자동 수집한 기사 제목이에요. 보고서 내용·회사 반응·주가 반응은 아직 비어 있어요 — 원문을 읽고 수정해서 채우거나, 관련 없으면 삭제해 주세요. "
              "(날짜는 기사 날짜예요, 보고서가 나온 날과 다를 수 있어요)", "", "", "",
-             f"자동 수집 · {src or '뉴스'} 기사", link if link.startswith(("http://", "https://")) else "", 0, "", now, now))
+             f"자동 수집 · {src or '뉴스'} " + ("게시글" if (src or "").startswith("텔레그램") else "기사"), link if link.startswith(("http://", "https://")) else "", 0, "", now, now))
         added += 1
     conn.commit()
     return added
@@ -157,9 +192,17 @@ def sync(db_path, log=print, session=None, today=None, force=False):
             except Exception as e:
                 fails += 1
                 log(f"공매도 리포트 검색 실패 ({q[:25]}…): {type(e).__name__}")
-        if fails == len(FEEDS):
-            return {"새 후보": 0, "검색 실패": fails}            # 오늘 확인한 것으로 치지 않음 → 다음에 다시 시도
-        n = ingest(conn, arts, today)
+        tg_n = tg_fail = 0
+        for ch, region in TELEGRAM:
+            try:
+                tg = fetch_telegram(ch, session)
+                tg_n += ingest(conn, tg, today, trust=True, region=region)
+            except Exception as e:
+                tg_fail += 1
+                log(f"텔레그램 @{ch} 실패: {type(e).__name__}")
+        if fails == len(FEEDS) and tg_n == 0:
+            return {"새 후보": 0, "검색 실패": fails, "텔레그램 실패": tg_fail}            # 오늘 확인한 것으로 치지 않음 → 다음에 다시 시도
+        n = ingest(conn, arts, today) + tg_n
         pr = prune(conn, today)
         conn.execute("INSERT OR REPLACE INTO short_meta VALUES ('auto_last', ?)", (now,))
         conn.commit()
