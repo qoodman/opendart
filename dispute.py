@@ -33,9 +33,9 @@ KIND_LABEL = {
 KIND_ICON = {"litig": "⚖", "injunction": "⚖", "tender": "📢", "proxy_ext": "🗳", "proxy_co": "🗳", "proposal": "📝", "owner_chg": "👑", "blk_gen": "🎯", "owner_buy": "📈",
              "defense": "🛡", "clarify": "❓", "legal": "🚨", "egm": "📅", "agm": "📅"}
 # 행동주의 성향으로 알려진 투자자·펀드 이름의 일부 (제출인 이름에 들어 있으면 표시). 직접 고칠 수 있게 상수로 둠
-ACTIVISTS = ["얼라인", "KCGI", "강성부", "플래시라이트", "차파트너스", "트러스톤", "라이프", "머스트", "FCP", "팰리서", "엘리엇", "ELLIOTT", "행동주의", "주주가치",
+ACTIVISTS = ["얼라인", "KCGI", "강성부", "플래시라이트", "차파트너스", "트러스톤", "라이프", "머스트", "FCP", "팰리서", "엘리엇", "ELLIOTT", "행동주의", "주주가치", "미리캐피탈", "Miri Capital", "스팍스", "SPARX", "Starboard", "Third Point", "Cevian", "Oasis Management",
              "안다", "밸류파트너스", "서울마린", "파인밸류", "VIP", "에이치플러스", "아이온", "비케이", "KB자산"]
-ACTIVIST_STRICT = ["얼라인", "KCGI", "강성부", "플래시라이트", "차파트너스", "트러스톤", "팰리서", "엘리엇", "ELLIOTT", "행동주의", "주주가치", "머스트", "FCP"]
+ACTIVIST_STRICT = ["얼라인", "KCGI", "강성부", "플래시라이트", "차파트너스", "트러스톤", "팰리서", "엘리엇", "ELLIOTT", "행동주의", "주주가치", "머스트", "FCP", "미리캐피탈", "MIRI CAPITAL", "스팍스", "SPARX", "STARBOARD", "THIRD POINT", "CEVIAN", "OASIS MANAGEMENT"]
 
 
 def ensure(conn):
