@@ -772,6 +772,14 @@ def run_market_policy(log=print):
         except Exception as e:
             out["brief"] = f"실패: {e}"
             log(f"시장 요약 실패: {e}")
+    if env("DART_HALT", "1") != "0":            # 거래정지 종목 목록 (네이버, 하루 1회·가벼움): 아이디어 화면에서 '거래정지 제외'로 거름
+        try:
+            import trade_halt
+            n_ = trade_halt.sync(str(results_db()), log=log)
+            out["halt"] = "오늘 받음" if n_ < 0 else f"거래정지 {n_}개"
+        except Exception as e:
+            out["halt"] = f"실패: {e}"
+            log(f"거래정지 목록 실패: {e}")
     if env("DART_PICKS", "1") != "0":           # 투자처 탭: 오늘의 단기·중기·장기 선정을 기록해 두고 나중에 성과를 보여 줌
         try:
             ok_, why_ = picks_snapshot()

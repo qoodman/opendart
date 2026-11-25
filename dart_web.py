@@ -3691,6 +3691,7 @@ def view_fin(conn, q):
     picks = fin_picks(conn)
     only_pick = q.get("pick") == "1"
     only_rep = q.get("rp") == "1"
+    hide_halt = q.get("hh") == "1"
     reps_all = report_map(conn, [r["code"] for r in rows])
     # 업종 안 순위 (분석한 종목이 5개 이상인 업종만) · 점수 추이 (보고서가 쌓인 종목)
     ind_pos = {}
@@ -3731,7 +3732,10 @@ def view_fin(conn, q):
             up_n, dn_n, _same, _ch = target_moves(conn, code_)
             rinfo[code_] = dict(up=(tg_ / cl_ - 1) if (tg_ and cl_) else None, nb=nb_, upn=up_n, dn=dn_n)
     sel = []
+    halted_ = halt_set(conn) if hide_halt else frozenset()
     for r in rows:
+        if r["code"] in halted_:
+            continue
         if only_rep and r["code"] not in reps_all:
             continue
         if kw and kw not in (r["name"] or "") and kw not in r["code"]:
@@ -3751,7 +3755,7 @@ def view_fin(conn, q):
         sel.sort(key=FIN_SORTS[sort][1])
     show = [r for r in sel if r["score"] is not None]
     limit = 500 if q.get("all") == "1" else 80
-    keep = {k: v for k, v in q.items() if k in ("kw", "s", "p", "pick", "all", *FIN_NUMS, "cl", "fc", "nc", "tn", "td", "tu", "in", "sh", "su", "au", "nw", "rp") and v}
+    keep = {k: v for k, v in q.items() if k in ("kw", "s", "p", "pick", "all", *FIN_NUMS, "cl", "fc", "nc", "tn", "td", "tu", "in", "sh", "su", "au", "nw", "rp", "hh") and v}
     link = lambda **kw_: "/ideas?" + urlencode({"t": "fin", **{k: v for k, v in {**keep, **kw_}.items() if v not in (None, "")}})
     # 프리셋 칩
     chips = " ".join((f'<b class="chip" style="background:var(--accent);color:var(--bg)" title="{escape(v[1])}">{escape(v[0])}</b>' if k == pkey else
@@ -3765,6 +3769,7 @@ def view_fin(conn, q):
     checks = "".join(f'<label style="font-size:13px;white-space:nowrap"><input type="checkbox" name="{k}" value="1"{" checked" if crit.get(key) else ""}> {lab}</label> '
                      for k, key, lab in (("cl", "clean", "경고 없음"), ("fc", "fcf", "잉여현금흐름 흑자"), ("nc", "netcash", "순현금"), ("tn", "turn", "영업이익 흑자 전환"), ("td", "tdown", "목표가 하향 우세"), ("tu", "tup", "목표가 상향 우세"), ("in", "insider", "내부자 순매수(단서)"), ("sh", "shr", "배당·자사주(단서)"), ("su", "staff_up", "직원 5%↑(단서)"), ("au", "audit_ok", "감사의견 적정(단서)"), ("nw", "no_warn_clue", "경고 단서 없음(단서)")))
     checks += f'<label style="font-size:13px;white-space:nowrap"><input type="checkbox" name="rp" value="1"{" checked" if only_rep else ""}> 증권사 리포트 있는 종목만</label> '
+    checks += f'<label style="font-size:13px;white-space:nowrap"><input type="checkbox" name="hh" value="1"{" checked" if hide_halt else ""}> 거래정지 종목 제외</label> '
     opts = lambda cur, items: "".join(f'<option value="{k}"{" selected" if k == cur else ""}>{escape(v)}</option>' for k, v in items)
     form = ('<form method="get" action="/ideas" class="filters" style="align-items:center"><input type="hidden" name="t" value="fin">'
             + (f'<input type="hidden" name="pick" value="1">' if only_pick else "")
@@ -3805,7 +3810,7 @@ def view_fin(conn, q):
         hp_ = hist_pts.get(r["code"]) or []
         pos_t = "" if not ip_ else f'<span title="{escape(ip_[3])}">{ip_[0]}/{ip_[1]}위</span>'
         trd_t = "" if len(hp_) < 2 else " → ".join(f"{v:.0f}" for v in hp_) + f' <span class="{"up" if hp_[-1] > hp_[-2] else "down" if hp_[-1] < hp_[-2] else ""}">{"▲" if hp_[-1] > hp_[-2] else "▼" if hp_[-1] < hp_[-2] else "─"}</span>'
-        trs += (f'<tr><td>{star(r["code"])}</td><td><a href="/ideas?{urlencode({"t": "fin", "code": r["code"]})}"><b>{escape(r["name"] or r["code"])}</b></a><br><span class="muted" style="font-size:11px">{escape(r["code"])} · {escape(_fin_label(r))}</span></td>'
+        trs += (f'<tr><td>{star(r["code"])}</td><td><a href="/ideas?{urlencode({"t": "fin", "code": r["code"]})}"><b>{escape(r["name"] or r["code"])}</b></a> {halt_badge(conn, r["code"])}<br><span class="muted" style="font-size:11px">{escape(r["code"])} · {escape(_fin_label(r))}</span></td>'
                 f'<td><span class="chip {cls}" style="font-weight:700">{r["grade"]} {int(r["score"])}</span><br><span class="muted" style="font-size:10px">{parts}</span></td>'
                 f'<td style="font-size:12px">{pos_t}<br><span class="muted">{trd_t}</span></td><td>{_fin_pct(m.get("rev_yoy"))}</td><td>{turn_t}</td><td>{opm_t}</td><td>{roe_t}</td><td>{cash_t}</td><td>{debt_t}</td><td>{warn_t}</td><td style="font-size:12px">{clue_t}</td><td style="font-size:12px">{rep_t}</td>'
                 f'<td class="muted" style="font-size:12px">{pp_t}<br>{_mcap_text(mc.get(r["code"]))}{px_t}</td></tr>')
@@ -4588,6 +4593,28 @@ def _dsp_events_html(evs, n=3):
     return out
 
 
+def halt_set(conn):
+    import trade_halt as th
+    return th.halted(conn)
+
+
+def halt_badge(conn, code):
+    return '<span class="chip warn" style="font-size:10px" title="거래정지 중인 종목이에요 (네이버 증권 기준, 하루 한 번 갱신)">🚫 거래정지</span> ' if code in halt_set(conn) else ""
+
+
+def halt_toggle(conn, q, base):
+    """'거래정지 제외' 토글 칩 → (제외 여부, 칩 HTML). 거래정지 자료가 없으면 (False, '')"""
+    import trade_halt as th
+    n = len(halt_set(conn))
+    if not th.last_synced(conn):
+        return False, ""
+    hide = q.get("hh") == "1"
+    href = "/ideas?" + urlencode({**{k: v for k, v in base.items() if v not in (None, "")}, "hh": "" if hide else "1"})
+    chip = (f'<b class="chip" style="background:var(--accent);color:var(--bg)">🚫 거래정지 제외 중 ({n}개)</b> <a class="chip" href="{href}">다시 보기</a>' if hide
+            else f'<a class="chip" href="{href}">🚫 거래정지 제외 ({n}개)</a>')
+    return hide, chip
+
+
 _TBG = {"t": 0.0, "v": None}
 
 
@@ -4632,25 +4659,27 @@ def view_tenbagger(conn, q):
     except ValueError:
         mn = 40.0
     kw = (q.get("kw") or "").strip()
-    sel = [r for r in rows if r["score"] >= mn and (not rng or (r["mcap"] and rng[0] <= r["mcap"] < rng[1])) and (not kw or kw in (r["name"] or "") or kw in r["code"])]
-    base = {"t": "tenbagger", "size": size, "min": str(int(mn)), "kw": kw}
-    link = lambda **kw_: "/ideas?" + urlencode({**base, **kw_})
+    hide_h, halt_chip_ = halt_toggle(conn, q, {"t": "tenbagger", "size": size, "min": str(int(mn)), "kw": kw})
+    sel = [r for r in rows if r["score"] >= mn and (not rng or (r["mcap"] and rng[0] <= r["mcap"] < rng[1])) and (not kw or kw in (r["name"] or "") or kw in r["code"])
+           and not (hide_h and r["code"] in halt_set(conn))]
+    base = {"t": "tenbagger", "size": size, "min": str(int(mn)), "kw": kw, "hh": q.get("hh") or ""}
+    link = lambda **kw_: "/ideas?" + urlencode({k: v for k, v in {**base, **kw_}.items() if v != ""})
     chips = " ".join((f'<b class="chip" style="background:var(--accent);color:var(--bg)">{lab}</b>' if size == k else f'<a class="chip" href="{link(size=k)}">{lab}</a>')
                      for k, lab in (("", "전체"), ("s", "시총 500억 미만"), ("m", "500억~3천억"), ("l", "3천억~1조")))
     chips2 = " ".join((f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}점 이상</b>' if int(mn) == v else f'<a class="chip" href="{link(min=v)}">{v}점 이상</a>') for v in (30, 40, 50, 60, 70))
     form = ('<form method="get" action="/ideas" class="filters" style="margin:6px 0"><input type="hidden" name="t" value="tenbagger">'
-            f'<input type="hidden" name="size" value="{size}"><input type="hidden" name="min" value="{int(mn)}"><input type="search" name="kw" value="{escape(kw)}" placeholder="종목 이름·코드"><button>찾기</button></form>')
+            f'<input type="hidden" name="size" value="{size}"><input type="hidden" name="min" value="{int(mn)}"><input type="hidden" name="hh" value="{escape(q.get("hh") or "")}"><input type="search" name="kw" value="{escape(kw)}" placeholder="종목 이름·코드"><button>찾기</button></form>')
     body = ""
     for r in sel[:60]:
         pt = " · ".join(f"{k} {v}" for k, v in r["parts"].items())
         body += (f'<div style="border-top:1px solid var(--line);padding:8px 0"><div><a href="/ideas?{urlencode({"t": "fin", "code": r["code"]})}"><b>{escape(r["name"])}</b></a> '
-                 f'<span class="muted" style="font-size:12px">{escape(r["code"])} · {escape(r["period"])}</span> <span class="chip {"up" if r["score"] >= 70 else ""}" style="font-weight:700">{r["score"]}</span>'
+                 f'<span class="muted" style="font-size:12px">{escape(r["code"])} · {escape(r["period"])}</span> {halt_badge(conn, r["code"])}<span class="chip {"up" if r["score"] >= 70 else ""}" style="font-weight:700">{r["score"]}</span>'
                  + (f' <span class="chip" style="font-size:11px">시총 {r["mcap"]:,.0f}억</span>' if r.get("mcap") else ' <span class="chip warn" style="font-size:11px">시총 모름</span>')
                  + (f' <span class="chip" style="font-size:11px">실질 유통 {r["float_real"]:.0f}%</span>' if r.get("float_real") is not None else "")
                  + f' {dispute_chip(conn, r["code"])}</div><div class="muted" style="font-size:11px">{escape(pt)}</div>'
                  + (f'<div style="font-size:12px">✔ ' + " · ".join(escape(g) for g in r["good"][:6]) + '</div>' if r["good"] else "")
                  + (f'<div style="font-size:12px;color:var(--down)">⚠ ' + " · ".join(escape(g) for g in r["risk"][:4]) + '</div>' if r["risk"] else "") + '</div>')
-    card = (f'<div class="card"><div>{chips}</div><div style="margin-top:4px">{chips2}</div>{form}'
+    card = (f'<div class="card"><div>{chips}</div><div style="margin-top:4px">{chips2}</div><div style="margin-top:4px">{halt_chip_}</div>{form}'
             f'<div class="muted" style="font-size:12px">조건에 맞는 종목 {len(sel):,}개 (분석된 {len(rows):,}개 중)' + (' · 위 60개만' if len(sel) > 60 else '') + '</div>'
             + (body or '<div class="muted" style="margin-top:6px">조건에 맞는 종목이 없어요. 점수 기준을 낮춰 보세요.</div>') + '</div>')
     return page("텐배거 후보", intro + card + how)
@@ -4698,17 +4727,18 @@ def view_float(conn, q):
     mk = q.get("mk") if q.get("mk") in ("KOSPI", "KOSDAQ") else ""
     sort = q.get("sort") if q.get("sort") in ("real", "simple", "turn", "mcap") else "real"
     kw = (q.get("kw") or "").strip()
+    hide_h, halt_chip_ = halt_toggle(conn, q, {"t": "float", "max": str(int(mx)), "minc": str(int(minc)), "mk": mk, "sort": sort, "kw": kw})
     sel = [r for r in rows if r["float_real"] is not None and r["float_real"] <= mx and (r["mcap"] or 0) >= minc and (not mk or r["market"] == mk)
-           and (not kw or kw in r["name"] or kw in r["code"])]
+           and (not kw or kw in r["name"] or kw in r["code"]) and not (hide_h and r["code"] in halt_set(conn))]
     keyf = {"real": lambda r: r["float_real"], "simple": lambda r: r["float_pct"], "turn": lambda r: (r["turnover"] if r["turnover"] is not None else 9e9), "mcap": lambda r: -(r["mcap"] or 0)}[sort]
     sel.sort(key=keyf)
-    base = {"t": "float", "max": str(int(mx)), "minc": str(int(minc)), "mk": mk, "sort": sort, "kw": kw}
-    link = lambda **kw_: "/ideas?" + urlencode({**base, **kw_})
+    base = {"t": "float", "max": str(int(mx)), "minc": str(int(minc)), "mk": mk, "sort": sort, "kw": kw, "hh": q.get("hh") or ""}
+    link = lambda **kw_: "/ideas?" + urlencode({k: v for k, v in {**base, **kw_}.items() if v != ""})
     chips = " ".join((f'<b class="chip" style="background:var(--accent);color:var(--bg)">실질 유통 {v}% 이하</b>' if int(mx) == v else f'<a class="chip" href="{link(max=v)}">{v}% 이하</a>') for v in (10, 20, 30, 40))
     chips2 = " ".join((f'<b class="chip" style="background:var(--accent);color:var(--bg)">{lab}</b>' if sort == k else f'<a class="chip" href="{link(sort=k)}">{lab}</a>') for k, lab in (("real", "실질 유통 적은 순"), ("simple", "유통 적은 순"), ("turn", "회전율 낮은 순"), ("mcap", "시총 큰 순")))
     chips3 = " ".join((f'<b class="chip" style="background:var(--accent);color:var(--bg)">{lab}</b>' if mk == k else f'<a class="chip" href="{link(mk=k)}">{lab}</a>') for k, lab in (("", "전체"), ("KOSPI", "코스피"), ("KOSDAQ", "코스닥")))
     form = ('<form method="get" action="/ideas" class="filters" style="margin:6px 0"><input type="hidden" name="t" value="float">'
-            f'<input type="hidden" name="max" value="{int(mx)}"><input type="hidden" name="sort" value="{sort}"><input type="hidden" name="mk" value="{mk}">'
+            f'<input type="hidden" name="max" value="{int(mx)}"><input type="hidden" name="sort" value="{sort}"><input type="hidden" name="mk" value="{mk}"><input type="hidden" name="hh" value="{escape(q.get("hh") or "")}">'
             f'<input type="search" name="kw" value="{escape(kw)}" placeholder="종목 이름·코드"> 시총 <input type="number" name="minc" value="{int(minc)}" style="width:80px">억 이상 <button>적용</button></form>')
     body = ""
     for r in sel[:100]:
@@ -4722,12 +4752,12 @@ def view_float(conn, q):
         if r["holder_pct"] and r["holder_pct"] >= 70:
             flags.append(f'최대주주 측 {r["holder_pct"]:.0f}%')
         chip = fin_chip(conn, r["code"], long=False) + " " + dispute_chip(conn, r["code"])
-        body += (f'<div style="border-top:1px solid var(--line);padding:8px 0"><div><a href="/stock?code={quote(r["code"])}"><b>{escape(r["name"])}</b></a> <span class="muted" style="font-size:12px">{escape(r["code"])} · {escape(r["market"])}</span> '
+        body += (f'<div style="border-top:1px solid var(--line);padding:8px 0"><div><a href="/stock?code={quote(r["code"])}"><b>{escape(r["name"])}</b></a> <span class="muted" style="font-size:12px">{escape(r["code"])} · {escape(r["market"])}</span> {halt_badge(conn, r["code"])}'
                  f'<span class="chip down" style="font-weight:700">실질 유통 {r["float_real"]:.1f}%</span> <span class="chip">유통 {r["float_pct"]:.1f}%</span> {chip}</div>'
                  f'<div class="muted" style="font-size:12px">시총 {r["mcap"]:,.0f}억 · 최대주주 측 {r["holder_pct"]:.1f}% · 자기주식 {(r["treasury_pct"] or 0):.1f}%'
                  + (f' · 5% 보유자 {escape(ext_t)}' if ext_t else "") + (f' · 회전율 {r["turnover"]:.2f}%' if r["turnover"] is not None else "") + '</div>'
                  + (f'<div style="font-size:11px">' + " ".join(f'<span class="chip warn" style="font-size:10px">{escape(f)}</span>' for f in flags) + '</div>' if flags else "") + '</div>')
-    head = (f'<div class="card"><div>{chips}</div><div style="margin-top:4px">{chips3}</div><div style="margin-top:4px">{chips2}</div>{form}'
+    head = (f'<div class="card"><div>{chips}</div><div style="margin-top:4px">{chips3}</div><div style="margin-top:4px">{chips2}</div><div style="margin-top:4px">{halt_chip_}</div>{form}'
             f'<div class="muted" style="font-size:12px">조건에 맞는 종목 {len(sel):,}개' + (f' (위 100개만)' if len(sel) > 100 else "") + '</div>' + (body or '<div class="muted" style="margin-top:6px">조건에 맞는 종목이 없어요.</div>') + '</div>')
     return page("품절주", flash + prep + head + how)
 
@@ -4773,10 +4803,15 @@ def view_dispute(conn, q):
         return page("지분분쟁", flash + prep + how + '<div class="card muted">아직 분석한 결과가 없어요. 위 버튼으로 공시를 훑어 주세요 (DART 키가 설정에 있어야 해요).</div>', refresh=running)
     lv_sel = q.get("lv") if q.get("lv") in dp.LEVEL_ORDER else ""
     kw = (q.get("kw") or "").strip()
+    hide_h, halt_chip_ = halt_toggle(conn, q, {"t": "dispute", "lv": lv_sel, "kw": kw})
+    hq = {"hh": "1"} if hide_h else {}
+    if hide_h:
+        states = [s_ for s_ in states if s_["code"] not in halt_set(conn)]
     cnt = {lv: sum(1 for s_ in states if s_["level"] == lv) for lv in dp.LEVEL_ORDER}
-    chips = " ".join((f'<b class="chip" style="background:var(--accent);color:var(--bg)">{lv} {n}</b>' if lv == lv_sel else f'<a class="chip {DSP_CLS.get(lv, "")}" href="/ideas?{urlencode({"t": "dispute", "lv": lv})}">{lv} {n}</a>') for lv, n in cnt.items())
-    chips += (' <a class="chip" href="/ideas?t=dispute">전체</a>' if lv_sel or kw else "")
-    form = ('<form method="get" action="/ideas" class="filters" style="margin:6px 0"><input type="hidden" name="t" value="dispute"><input type="search" name="kw" value="%s" placeholder="종목 이름·코드"><button>찾기</button></form>' % escape(kw))
+    chips = " ".join((f'<b class="chip" style="background:var(--accent);color:var(--bg)">{lv} {n}</b>' if lv == lv_sel else f'<a class="chip {DSP_CLS.get(lv, "")}" href="/ideas?{urlencode({"t": "dispute", "lv": lv, **hq})}">{lv} {n}</a>') for lv, n in cnt.items())
+    chips += (f' <a class="chip" href="/ideas?{urlencode({"t": "dispute", **hq})}">전체</a>' if lv_sel or kw else "")
+    chips += f' <span style="margin-left:6px">{halt_chip_}</span>'
+    form = ('<form method="get" action="/ideas" class="filters" style="margin:6px 0"><input type="hidden" name="t" value="dispute"><input type="hidden" name="hh" value="%s"><input type="search" name="kw" value="%s" placeholder="종목 이름·코드"><button>찾기</button></form>' % (escape(q.get("hh") or ""), escape(kw)))
     sections = ""
     for lv in dp.LEVEL_ORDER:
         if lv_sel and lv != lv_sel:
@@ -4801,7 +4836,7 @@ def view_dispute(conn, q):
             if mt:
                 dd_ = (dt.date.fromisoformat(mt["date"]) - dt.date.today()).days
                 mt_t = f'<span class="chip down" style="font-weight:700">📅 주총 {"오늘" if dd_ == 0 else f"D-{dd_}" if dd_ > 0 else f"{-dd_}일 전"} ({escape(mt["date"])})</span> '
-            body += (f'<div style="border-top:1px solid var(--line);padding:8px 0"><div><a href="/ideas?{urlencode({"t": "dispute", "code": s_["code"]})}"><b>{escape(s_["name"] or s_["code"])}</b></a> <span class="muted" style="font-size:12px">{escape(s_["code"])}</span> '
+            body += (f'<div style="border-top:1px solid var(--line);padding:8px 0"><div><a href="/ideas?{urlencode({"t": "dispute", "code": s_["code"]})}"><b>{escape(s_["name"] or s_["code"])}</b></a> <span class="muted" style="font-size:12px">{escape(s_["code"])}</span> {halt_badge(conn, s_["code"])}'
                      f'<span class="chip {DSP_CLS.get(lv, "")}" style="font-weight:700">{lv}</span> <span class="muted" style="font-size:12px">점수 {s_["score"]:.1f}' + (f' · 최근 신호 {escape(ev["last"])}' if ev.get("last") else "") + f'</span> {fin_chip(conn, s_["code"], False)}</div>'
                      f'<div style="margin:3px 0">{mt_t}{kinds}</div>{gap}{sw_t}{rs_}{_dsp_events_html(pl.get("events") or [], 3)}</div>')
         more = f'<div class="muted" style="font-size:12px">{len(items)}개 중 60개만 보여 줘요 (찾기로 좁혀 보세요).</div>' if len(items) > 60 else ""
