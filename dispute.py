@@ -267,6 +267,9 @@ def structure_score(holder_pct, ext_holders, pbr=None):
     return dict(score=score, reasons=reasons, gap=gap)
 
 
+MAJORITY = 50.0          # 최대주주 측 지분이 이 값을 넘으면 외부 공격을 분쟁으로 보지 않음
+
+
 INSTITUTIONS = ["국민연금", "산업은행", "한국산업은행", "한국투자공사", "예금보험공사", "신용보증기금", "기술보증기금", "우정사업본부"]
 
 
@@ -509,6 +512,17 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
                 by[code] = keep
                 states[code]["ev"] = assess_events(keep, today)
                 states[code]["dropped"] = [dict(date=e["date"], kind=e["kind"], flr=e.get("flr"), title=e["title"]) for e in dropped][:10]
+            # 최대주주 측이 과반(50% 초과)이면 외부 세력이 경영권을 가져가기 어려워서 외부발 신호와 구조 점수는 분쟁으로 보지 않음
+            # (가족·특수관계인끼리의 다툼은 소송·가처분·최대주주 변경 공시로 따로 잡힘)
+            if hp is not None and hp > MAJORITY:
+                ext_kinds = ("blk_gen", "proxy_ext", "proposal", "tender")
+                drop2 = [e for e in by[code] if e["kind"] in ext_kinds]
+                if drop2:
+                    by[code] = [e for e in by[code] if e["kind"] not in ext_kinds]
+                    states[code]["ev"] = assess_events(by[code], today)
+                    states[code]["dropped"] = (states[code].get("dropped") or []) + [dict(date=e["date"], kind=e["kind"], flr=e.get("flr"), title=e["title"]) for e in drop2][:10]
+                states[code]["struct"].update(score=0, reasons=[f"최대주주 측 지분 {hp:.1f}%로 과반이라 외부 세력이 경영권을 가져가기 어려운 구조예요 (구조 점수 제외)"], gap=None)
+                states[code]["majority"] = hp
             conn.execute("DELETE FROM dispute_holder WHERE code=?", (code,))
             conn.executemany("INSERT OR REPLACE INTO dispute_holder VALUES (?,?,?,?,?,?)", [(code, h["name"], h["pct"], h["tp"], h["date"], h["resn"]) for h in ext])
             time.sleep(0.15)
@@ -539,7 +553,7 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
         if level is None:
             continue
         prev = conn.execute("SELECT level, alerted FROM dispute_state WHERE code=?", (code,)).fetchone()
-        payload = dict(ev=s_["ev"], struct=s_["struct"], dropped=s_.get("dropped") or [], meeting=s_.get("meeting"), proxies=s_.get("proxies") or [], events=[e for e in sorted(by[code], key=lambda e: e["date"], reverse=True) if e["kind"] != "agm"][:30])
+        payload = dict(ev=s_["ev"], struct=s_["struct"], dropped=s_.get("dropped") or [], majority=s_.get("majority"), meeting=s_.get("meeting"), proxies=s_.get("proxies") or [], events=[e for e in sorted(by[code], key=lambda e: e["date"], reverse=True) if e["kind"] != "agm"][:30])
         conn.execute("INSERT OR REPLACE INTO dispute_state VALUES (?,?,?,?,?,?,?,?)",
                      (code, s_["name"], level, sc, json.dumps(payload, ensure_ascii=False), today.isoformat(), prev[0] if prev else None, prev[1] if prev else None))
         out += 1
