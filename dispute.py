@@ -811,13 +811,17 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
                     elif not any(norm_name(h["name"]) == norm_name(nm) for h in ext2):
                         ext2.append(dict(name=nm, pct=pc_, tp="일반", activist=False, chg=None, date="", resn="직접 추가", role="challenger", manual=True, shift="", grow=0.0, first_pct=pc_))
                 ext, ally = ext2, ally2
-            for h in ext:            # 공개매수·인수 계약 진행 중인 보고자의 지분은 아직 실제 보유가 아닐 수 있음
-                if any(e["kind"] == "tender" and e.get("flr") and is_insider(h["name"], [e["flr"]]) for e in by[code]) or re.search(r"계약|공개매수", h.get("resn") or ""):
+            pending = []
+            for h in ext:            # 공개매수·인수 계약 진행 중인 보고자의 지분은 아직 실제 보유가 아닐 수 있음 → 보유자 목록·지분 비교에서 빼고 '진행 중'으로 따로 보여 줌
+                if not h.get("manual") and (any(e["kind"] == "tender" and e.get("flr") and is_insider(h["name"], [e["flr"]]) for e in by[code]) or re.search(r"계약|공개매수", h.get("resn") or "")):
                     h["pending"] = True
+                    pending.append(dict(name=h["name"], pct=h.get("pct"), date=h.get("date"), resn=h.get("resn"), rcept_no=h.get("rcept_no")))
+            if pending:
+                ext = [h for h in ext if not h.get("pending")]
             hp_eff = (hp + ally) if (hp is not None and ally) else hp          # 최대주주 측 + 계열·우호 회사 5% 보유분 = 우호 지분
             warn = data_warnings(hp_eff, ext, today)
             st_ = structure_score(hp_eff, ext, pbr.get(code))
-            states[code]["struct"] = dict(holder_pct=hp, ally_pct=ally or 0.0, friendly_pct=hp_eff, ext=ext, swing=swing_holders(hp_eff, ext), insiders=insiders[:12], warn=warn, **st_)
+            states[code]["struct"] = dict(holder_pct=hp, ally_pct=ally or 0.0, friendly_pct=hp_eff, ext=ext, swing=swing_holders(hp_eff, ext), insiders=insiders[:12], warn=warn, pending=pending, **st_)
             # 공시한 쪽이 최대주주 측이면(지주사·계열사 포함) 분쟁 신호에서 뺌: 일반 5% 보고·외부 권유·주주제안·공개매수
             keep, dropped = [], []
             for e in by[code]:
