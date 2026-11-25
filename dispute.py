@@ -45,6 +45,7 @@ def ensure(conn):
     CREATE TABLE IF NOT EXISTS dispute_state (code TEXT PRIMARY KEY, name TEXT, level TEXT, score REAL, payload TEXT, updated TEXT, prev_level TEXT, alerted TEXT);
     CREATE TABLE IF NOT EXISTS dispute_holder (code TEXT, reporter TEXT, pct REAL, tp TEXT, date TEXT, resn TEXT, PRIMARY KEY (code, reporter));
     CREATE TABLE IF NOT EXISTS dispute_meta (key TEXT PRIMARY KEY, value TEXT);
+    CREATE TABLE IF NOT EXISTS dispute_struct (code TEXT PRIMARY KEY, fetched TEXT, hp REAL, ext TEXT, insiders TEXT);
     """)
 
 
@@ -57,6 +58,27 @@ def norm_name(t):
     """회사·사람 이름 비교용: 주식회사/㈜/(주)/유한회사, 공백·괄호·점 제거, 소문자"""
     t = re.sub(r"주식회사|유한회사|유한책임회사|㈜|\(주\)|\(유\)", "", t or "")
     return re.sub(r"[\s\(\)\[\]·\.,\-_&]", "", t).lower()
+
+
+GROUP_PREFIX = ["삼성", "현대", "기아", "SK", "LG", "롯데", "한화", "GS", "포스코", "POSCO", "두산", "신세계", "CJ", "한진", "금호", "효성", "대림", "코오롱", "동원", "농심", "오뚜기",
+                "영풍", "고려아연", "LS", "HD현대", "DB", "카카오", "네이버", "NAVER", "아모레", "태평양", "셀트리온", "KT", "하이브", "넥슨", "엔씨", "넷마블", "BGF", "HDC", "한솔", "세아", "OCI",
+                "한국타이어", "금양", "KCC", "삼양", "하림", "교보", "미래에셋", "대신", "한라", "동국", "태광", "부영", "이랜드", "종근당", "유한", "대웅", "동아", "녹십자", "일동", "한미", "오리온", "CJ"]
+
+
+def is_group_affiliate(name, corp_name, insiders=()):
+    """같은 그룹(재벌) 계열사인지 어림: 보고자 이름이 대기업 그룹 이름으로 시작하고 그 이름을 대상 회사나 최대주주 측 명단도 쓰거나,
+    대상 회사 이름과 앞 3글자 이상 같을 때. 사업보고서 명단에 없는 계열사(자산운용·보험·물산 등)를 거르려는 용도"""
+    n, c = norm_name(name), norm_name(corp_name)
+    if not n or not c:
+        return False
+    if len(c) >= 3 and n[:3] == c[:3] and not n.startswith(c[:1] * 2):
+        return True
+    for g in GROUP_PREFIX:
+        gn = norm_name(g)
+        if n.startswith(gn):
+            if c.startswith(gn) or any(norm_name(i).startswith(gn) for i in insiders):
+                return True
+    return False
 
 
 def is_insider(name, insiders):
@@ -231,12 +253,23 @@ def assess_events(evs, today=None):
 # ---------------- 구조(가능성) ----------------
 INSTITUTIONS = ["국민연금", "산업은행", "한국산업은행", "한국투자공사", "예금보험공사", "신용보증기금", "기술보증기금", "우정사업본부"]
 NEUTRAL_EXTRA = ["공제회", "연금", "정책금융", "수출입은행", "진흥공단", "예금보험", "자산관리공사", "주택금융공사"]
+# 지분은 커도 경영권을 다투지 않고 표만 행사하는 외국계 대형 운용사·국부펀드 (행동주의로 알려진 이름은 제외)
+FOREIGN_PASSIVE = ["블랙록", "BLACKROCK", "뱅가드", "VANGUARD", "노르게스", "NORGES", "노르웨이", "스테이트스트리트", "STATE STREET", "캐피탈그룹", "CAPITAL GROUP", "CAPITAL RESEARCH",
+                   "CAPITAL INTERNATIONAL", "템플턴", "TEMPLETON", "프랭클린", "FRANKLIN", "피델리티", "FIDELITY", "티로웨", "T. ROWE", "T.ROWE", "JP모간", "JPMORGAN", "J.P. MORGAN",
+                   "다이멘셔널", "DIMENSIONAL", "슈로더", "SCHRODER", "아문디", "AMUNDI", "인베스코", "INVESCO", "웰링턴", "WELLINGTON", "베일리", "BAILLIE", "싱가포르투자청",
+                   "아부다비", "ABU DHABI", "쿠웨이트", "KUWAIT", "사우디", "카타르투자청", "QATAR", "캘리포니아", "CALIFORNIA", "캐나다연금", "CANADA PENSION", "ABERDEEN", "에버딘", "UBS", "골드만", "GOLDMAN",
+                   "모건스탠리", "MORGAN STANLEY", "시티뱅크", "CITIBANK", "씨티", "HSBC", "BNP", "AQR", "노무라", "NOMURA", "ISHARES", "아이셰어즈"]
 
 
 def is_neutral_inst(name):
-    """국민연금·산업은행 같은 공적 기관: 경영권 분쟁의 한쪽이 아니라 표를 쥐는 캐스팅보트로만 봄"""
+    """국민연금·산업은행 같은 공적 기관, 블랙록·노르웨이 중앙은행 같은 외국계 대형 운용사: 경영권 분쟁의 한쪽이 아니라 표를 쥐는 캐스팅보트로만 봄"""
     n = name or ""
-    return any(i in n for i in INSTITUTIONS + NEUTRAL_EXTRA)
+    if any(i in n for i in INSTITUTIONS + NEUTRAL_EXTRA):
+        return True
+    if _is_activist(n, strict=True):
+        return False
+    u = n.upper()
+    return any(f.upper() in u for f in FOREIGN_PASSIVE)
 
 
 def structure_score(holder_pct, ext_holders, pbr=None):
@@ -283,10 +316,11 @@ def structure_score(holder_pct, ext_holders, pbr=None):
     if sh:
         score += 3
         reasons.append("단순투자(약식)로 지분을 모으다 경영참여(일반)로 목적을 바꾼 보유자: " + ", ".join(f"{h['name']} {h['pct']:.1f}% ({d[:4]}-{d[4:6]}-{d[6:]})" for h, d in sh[:3]))
-    sim = [h for h in ext if h.get("tp") == "약식" and (h.get("grow") or 0) >= 2.0 and ((h.get("activist")) or h["pct"] >= 7)]
-    if sim:
-        score += 1
-        reasons.append("단순투자(약식)로 지분을 늘려 가는 보유자 — 나중에 경영참여로 바꿀 수 있어요: " + ", ".join(f"{h['name']} {h.get('first_pct') or 0:.1f}%→{h['pct']:.1f}%" for h in sim[:3]))
+    acc = [h for h in ext if (h.get("grow") or 0) >= 2.0 and h["pct"] >= 5]
+    if acc:
+        score += 2
+        reasons.append("지분을 꾸준히 늘려 온 보유자(야금야금 모으는 중): " + ", ".join(
+            f"{h['name']} {h.get('first_pct') or 0:.1f}%→{h['pct']:.1f}%" + (" (단순투자 보고)" if h.get("tp") == "약식" else "") for h in sorted(acc, key=lambda h: -(h.get("grow") or 0))[:3]))
     inc = [h for h in ext if (h.get("chg") or 0) >= 0.5]
     if inc:
         score += 1
@@ -297,6 +331,7 @@ def structure_score(holder_pct, ext_holders, pbr=None):
     return dict(score=score, reasons=reasons, gap=gap)
 
 
+STRUCT_TTL_DAYS = 7          # 지분 구조(최대주주 지분·5% 보유자)를 이 기간 안에는 다시 받지 않음
 MAJORITY = 50.0          # 최대주주 측 지분이 이 값 이상이면 분쟁이 없는 종목으로 봄
 
 
@@ -451,7 +486,7 @@ def potential_level(sc):
     return "가능성 높음" if sc >= 5 else "가능성" if sc >= 3 else None
 
 
-def fetch_structure(code, corp, key, today=None, session=None):
+def fetch_structure(code, corp, key, today=None, session=None, corp_name=""):
     """한 종목의 최대주주 측 지분율과 외부 5% 보유자 → (holder_pct, [ext...]) (못 받으면 (None, []))"""
     today = today or dt.date.today()
     year = today.year - 1 if today.month >= 4 else today.year - 2
@@ -479,13 +514,13 @@ def fetch_structure(code, corp, key, today=None, session=None):
     hist = {}
     for r in sorted(ms, key=lambda r: r.get("rcept_dt") or ""):
         who = (r.get("repror") or "").strip()
-        if who and not is_insider(who, names):
+        if who and not is_insider(who, names) and not is_group_affiliate(who, corp_name, names):
             tp0 = "일반" if "일반" in (r.get("report_tp") or "") else "약식" if "약식" in (r.get("report_tp") or "") else ""
             hist.setdefault(who, []).append((r.get("rcept_dt") or "", tp0, _num(r.get("stkrt")), (r.get("report_resn") or "")))
     for r in ms:
         who = (r.get("repror") or "").strip()
         d = r.get("rcept_dt") or ""
-        if not who or is_insider(who, names):          # 최대주주 본인·특수관계인·계열사(지주사 포함)는 맞서는 쪽이 아님
+        if not who or is_insider(who, names) or is_group_affiliate(who, corp_name, names):          # 최대주주 본인·특수관계인·같은 그룹 계열사(지주사 포함)는 맞서는 쪽이 아님
             continue
         if who not in latest or d > latest[who]["date"]:
             latest[who] = dict(name=who, pct=_num(r.get("stkrt")), chg=_num(r.get("stkrt_irds")), tp=("일반" if "일반" in (r.get("report_tp") or "") else "약식" if "약식" in (r.get("report_tp") or "") else ""),
@@ -552,23 +587,35 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
     except sqlite3.Error:
         pass
     if key:
-        for i, code in enumerate(cand[:enrich_limit]):
+        cached = {r[0]: r for r in conn.execute("SELECT code, fetched, hp, ext, insiders FROM dispute_struct")}
+        ttl = (today - dt.timedelta(days=STRUCT_TTL_DAYS)).isoformat()
+        n_fetch = 0
+        for i, code in enumerate(cand):
             if progress and i % 3 == 0:
-                progress(f"지분 구조 {i}/{min(len(cand), enrich_limit)}")
-            try:
-                cc = corp.get(code)
-                hp, ext, insiders = fetch_structure(code, cc, key, today, session)
-            except (DisputeError, requests.RequestException) as e:
-                log(f"  ✖ {code}: {e}")
-                if "한도" in str(e):
-                    break
-                continue
+                progress(f"지분 구조 {i}/{len(cand)}")
+            c_ = cached.get(code)
+            if c_ and c_[1] >= ttl:                       # 며칠 안에 받은 지분 구조는 다시 받지 않음 (그만큼 더 많은 종목을 훑게 됨)
+                hp, ext, insiders = c_[2], json.loads(c_[3] or "[]"), json.loads(c_[4] or "[]")
+            else:
+                if n_fetch >= enrich_limit:
+                    continue
+                try:
+                    cc = corp.get(code)
+                    hp, ext, insiders = fetch_structure(code, cc, key, today, session, corp_name=names.get(code, ""))
+                    n_fetch += 1
+                except (DisputeError, requests.RequestException) as e:
+                    log(f"  ✖ {code}: {e}")
+                    if "한도" in str(e):
+                        break
+                    continue
+                conn.execute("INSERT OR REPLACE INTO dispute_struct VALUES (?,?,?,?,?)", (code, today.isoformat(), hp, json.dumps(ext, ensure_ascii=False), json.dumps(insiders, ensure_ascii=False)))
+                time.sleep(0.15)
             st_ = structure_score(hp, ext, pbr.get(code))
             states[code]["struct"] = dict(holder_pct=hp, ext=ext, swing=swing_holders(hp, ext), insiders=insiders[:12], **st_)
             # 공시한 쪽이 최대주주 측이면(지주사·계열사 포함) 분쟁 신호에서 뺌: 일반 5% 보고·외부 권유·주주제안·공개매수
             keep, dropped = [], []
             for e in by[code]:
-                if e["kind"] in ("blk_gen", "proxy_ext", "proposal", "tender") and is_insider(e.get("flr"), insiders):
+                if e["kind"] in ("blk_gen", "proxy_ext", "proposal", "tender") and (is_insider(e.get("flr"), insiders) or is_group_affiliate(e.get("flr"), names.get(code, ""), insiders)):
                     dropped.append(e)
                 else:
                     keep.append(e)
@@ -581,7 +628,6 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
                 states[code]["majority"] = hp
             conn.execute("DELETE FROM dispute_holder WHERE code=?", (code,))
             conn.executemany("INSERT OR REPLACE INTO dispute_holder VALUES (?,?,?,?,?,?)", [(code, h["name"], h["pct"], h["tp"], h["date"], h["resn"]) for h in ext])
-            time.sleep(0.15)
     if key:
         for code in [c for c in states if states[c]["ev"]][:40]:
             try:
