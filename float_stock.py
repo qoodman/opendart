@@ -127,7 +127,8 @@ def run(conn, key, log=print, limit=2500, progress=None, session=None, today=Non
             hp = hp + (ally or 0.0)          # 계열·우호 회사 5% 보유분도 시장에 안 나오는 지분
             iss, trp = fetch_treasury(corp, key, today, session)
             simple, real, big = compute(hp, trp, ext)
-            detail = dict(ext=[dict(name=h["name"], pct=h["pct"], tp=h.get("tp")) for h in ext][:6])
+            keep = ("name", "pct", "tp", "activist", "slow", "acc_months", "pct_1y", "acc_up", "grow", "first_pct", "shift", "asof", "asof_src", "src", "date", "resn", "rcept_no", "chg")
+            detail = dict(ext=[{k: h.get(k) for k in keep if k in h} for h in ext][:8], ally=ally or 0.0, insiders=list(insiders)[:10], hy=(dispute.STRUCT_META.get(code) or {}).get("hy", ""))
             conn.execute("UPDATE float_stock SET holder_pct=?, treasury_pct=?, big5_pct=?, float_pct=?, float_real=?, issued=?, fetched=?, detail=? WHERE code=?",
                          (hp, trp, big, simple, real, iss, today.isoformat(), json.dumps(detail, ensure_ascii=False), code))
             done += 1

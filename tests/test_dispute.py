@@ -329,5 +329,42 @@ class Contracts(unittest.TestCase):
         self.assertEqual(st["contract_total"], 69.35)
 
 
+class NextCandidates(unittest.TestCase):
+    """공시 신호가 나오기 전 지분 구조만으로 다음 분쟁 후보 찾기"""
+
+    def _db(self):
+        import float_stock
+        c = sqlite3.connect(":memory:")
+        float_stock.ensure(c)
+        D.ensure(c)
+
+        def add(code, name, hp, ext, ally=0.0):
+            c.execute("INSERT INTO float_stock (code,name,market,mcap,tv,holder_pct,treasury_pct,float_real,float_pct,fetched,detail) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                      (code, name, "KOSDAQ", 2000, 1, hp, 0, 30, 40, "2026-11-26", json.dumps(dict(ext=ext, ally=ally), ensure_ascii=False)))
+
+        H = lambda n, p, **k: dict(name=n, pct=p, tp="약식", activist=D._is_activist(n), **k)
+        add("100001", "가상A", 26.9, [H("얼라인파트너스", 14.3, slow=True, acc_months=20, pct_1y=9.0, grow=5.3, acc_up=3, first_pct=5.0)])
+        add("100002", "가상B", 45.0, [H("KCGI", 6.0)])                          # 도전자가 너무 작음
+        add("100003", "가상C", 31.0, [H("국민연금공단", 9.0)])                  # 공적 기관만
+        add("100005", "가상E", 55.0, [H("X펀드", 20.0)])                        # 과반
+        add("100006", "가상F", 30.0, [H("Y펀드", 12.0)], ally=15.0)             # 우호 계열 지분으로 두꺼워짐
+        return c
+
+    def test_ranking(self):
+        c = self._db()
+        rows, scanned = D.next_candidates(c)
+        self.assertEqual(scanned, 5)
+        self.assertEqual([r["code"] for r in rows], ["100001"])
+        self.assertTrue(rows[0]["slow"] and rows[0]["activist"])
+
+    def test_my_exclude_and_role(self):
+        c = self._db()
+        c.execute("INSERT INTO dispute_tag (code,name,role,updated,pct) VALUES ('100001','*','exclude','2026-11-26',NULL)")
+        self.assertEqual(D.next_candidates(c)[0], [])
+        c = self._db()
+        c.execute("INSERT INTO dispute_tag (code,name,role,updated,pct) VALUES ('100001','얼라인파트너스','ally','2026-11-26',NULL)")      # 우호로 정하면 후보에서 빠짐
+        self.assertEqual(D.next_candidates(c)[0], [])
+
+
 if __name__ == "__main__":
     unittest.main()

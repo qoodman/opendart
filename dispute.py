@@ -1010,23 +1010,7 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
             # 내가 정한 역할(우호·중립·도전자)을 반영: 우호는 우호 지분에 더하고, 중립은 캐스팅보트로만, 도전자는 공적 기관이라도 도전자로 봄
             mine = tags.get(code) or {}
             if mine or manual.get(code):
-                ext2, ally2 = [], ally or 0.0
-                for h in ext:
-                    role = mine.get(norm_name(h["name"]))
-                    if role == "ignore":                  # 지분을 가진 쪽이 아니라고 내가 정함 (예: 공개매수 진행 중인 인수 목적 회사의 예정 지분)
-                        continue
-                    if role == "ally":
-                        ally2 += h.get("pct") or 0.0
-                        continue
-                    if role:
-                        h = dict(h, role=role)
-                    ext2.append(h)
-                for nm, role, pc_ in manual.get(code, []):          # 내가 직접 넣은 보유자 (DART 5% 보고에 없는 쪽, 예: 맥쿼리)
-                    if role == "ally":
-                        ally2 += pc_
-                    elif not any(norm_name(h["name"]) == norm_name(nm) for h in ext2):
-                        ext2.append(dict(name=nm, pct=pc_, tp="일반", activist=False, chg=None, date="", resn="직접 추가", role="challenger", manual=True, shift="", grow=0.0, first_pct=pc_))
-                ext, ally = ext2, ally2
+                ext, ally = _apply_tags(ext, ally, mine, manual.get(code))          # 내 판단(무시·우호·중립·도전자)과 직접 추가한 보유자 반영
             pending = []
             for h in ext:            # 공개매수·인수 계약 진행 중인 보고자의 지분은 아직 실제 보유가 아닐 수 있음 → 보유자 목록·지분 비교에서 빼고 '진행 중'으로 따로 보여 줌
                 # 공개매수 신고서를 낸 쪽(공개매수자)의 보고 지분만 '예정'으로 봄. 보고 사유에 '계약'이 있다는 것만으로는 안 됨 (공동보유 계약 등 실제 보유자도 흔함)
@@ -1163,6 +1147,84 @@ def load_contract(conn, rcept_no, key, session=None, today=None):
         return None
     conn.execute("INSERT OR REPLACE INTO dispute_contract VALUES (?,?,?)", (rcept_no, json.dumps(info, ensure_ascii=False), (today or dt.date.today()).isoformat()))
     return info
+
+
+def _apply_tags(ext, ally, mine, manual):
+    """내가 정한 역할(우호·중립·도전자·무시)과 직접 추가한 보유자를 지분 구조에 반영 → (ext, ally)"""
+    ext2, ally2 = [], ally or 0.0
+    for h in ext:
+        role = (mine or {}).get(norm_name(h["name"]))
+        if role == "ignore":
+            continue
+        if role == "ally":
+            ally2 += h.get("pct") or 0.0
+            continue
+        if role:
+            h = dict(h, role=role)
+        ext2.append(h)
+    for nm, role, pc_ in manual or []:
+        if role == "ally":
+            ally2 += pc_
+        elif not any(norm_name(h["name"]) == norm_name(nm) for h in ext2):
+            ext2.append(dict(name=nm, pct=pc_, tp="일반", activist=False, chg=None, date="", resn="직접 추가", role="challenger", manual=True, shift="", grow=0.0, first_pct=pc_))
+    return ext2, ally2
+
+
+def next_candidates(conn, today=None, limit=300):
+    """다음 분쟁 후보 찾기: 아직 공시 신호(소송·위임장·공개매수)가 없어도, 지분 구조만으로 분쟁이 날 수 있는 종목을 점수순으로.
+    품절주 탭의 지분 계산(최대주주 현황·5% 보유자·정기보고서 표)을 재사용하고, 내가 정한 역할·제외도 반영한다.
+    가비아 사례의 초기 신호 — 최대주주 우호 지분이 얇고, 행동주의·외부 5% 보유자가 천천히 늘려 오며, 저PBR — 를 점수로 본다"""
+    ensure(conn)
+    today = today or dt.date.today()
+    try:
+        rows = conn.execute("SELECT code, name, market, mcap, tv, holder_pct, treasury_pct, float_real, detail, fetched FROM float_stock WHERE holder_pct IS NOT NULL AND detail IS NOT NULL").fetchall()
+    except sqlite3.Error:
+        return [], 0
+    pbr = {}
+    try:
+        pbr = {c: p for c, p in conn.execute("SELECT code, pbr FROM valuation")}
+    except sqlite3.Error:
+        pass
+    mine, manual, excluded = {}, {}, set()
+    try:
+        for tc, tn, tr, tp_ in conn.execute("SELECT code, name, role, pct FROM dispute_tag"):
+            if tr == "exclude":
+                excluded.add(tc)
+            elif tn != "*":
+                mine.setdefault(tc, {})[norm_name(tn)] = tr
+                if tp_ is not None and tr in ("challenger", "ally"):
+                    manual.setdefault(tc, []).append((tn, tr, tp_))
+    except sqlite3.Error:
+        pass
+    active = {}
+    try:
+        active = {c: lv for c, lv in conn.execute("SELECT code, level FROM dispute_state")}
+    except sqlite3.Error:
+        pass
+    out = []
+    for code, name, mkt, mcap, tv, hp, tr_, fr, detail, fetched in rows:
+        if code in excluded:
+            continue
+        try:
+            d = json.loads(detail or "{}")
+        except ValueError:
+            continue
+        ext = d.get("ext") or []
+        if not ext:
+            continue
+        ext, ally = _apply_tags(ext, d.get("ally") or 0.0, mine.get(code), manual.get(code))
+        friendly = hp + ally
+        if friendly >= MAJORITY:
+            continue
+        sc = structure_score(friendly, ext, pbr.get(code))
+        if not sc.get("contest") or sc["score"] < 4:
+            continue
+        ch = sorted([h for h in ext if h.get("pct") and not _neutral(h)], key=lambda h: -h["pct"])
+        out.append(dict(code=code, name=name, market=mkt, mcap=mcap, score=sc["score"], reasons=sc["reasons"], friendly=friendly, hp=hp, ally=ally, top=ch[0] if ch else None,
+                        challengers=ch[:3], slow=any(h.get("slow") for h in ch), activist=any(h.get("activist") for h in ch), shift=any(h.get("shift") for h in ch),
+                        pbr=pbr.get(code), level=active.get(code), hy=d.get("hy", ""), fetched=fetched))
+    out.sort(key=lambda r: (-r["score"], r["friendly"]))
+    return out[:limit], len(rows)
 
 
 def refresh_one(db_path, key, code, log=print, session=None):

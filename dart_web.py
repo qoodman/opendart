@@ -4839,6 +4839,72 @@ def view_float(conn, q):
     return page("품절주", flash + prep + head + how)
 
 
+PLAYBOOK = [
+    ("0. 잠복", "분쟁이 시작되기 1년 전부터", ["행동주의·외부 5% 보유자가 약식(단순투자)으로 천천히 지분을 늘림 (🕰 장기 누적)", "최대주주 측 우호 지분이 얇음 (30~40% 이하)", "저PBR·자산(현금·데이터센터·상장 자회사 등)이 많은데 시장가가 낮음", "자기주식 처분·제3자 배정 같은 우호 지분 늘리기 (방어 신호)"]),
+    ("1. 진입", "정기주총에서 발판", ["주주제안 (이사 선임·정관 변경·배당) 공시", "주총에서 주주제안 일부 통과 → 이사 진입", "보유 목적이 약식 → 일반(경영참여)으로 바뀐 5% 보고"]),
+    ("2. 압박", "회사 안을 들여다보기", ["이사회 의사록·회계장부 열람등사 허가·가처분 (경영권분쟁소송)", "임시주총 소집 청구·허가 신청", "공개 서한·가격 반박 (내재가치 제시)"]),
+    ("3. 대결", "표를 모으는 단계", ["의결권 대리행사 권유(위임장) 시작·정정이 반복됨", "의결권행사금지 가처분, 검사인 선임 신청", "임시주총 소집결의·공고·기준일 설정, 우호 지분 확보(자기주식 처분)"]),
+    ("4. 결말", "표대결 / 합의 / 공개매수", ["공개매수 신고서 + 최소 응모 조건 (소수 주주의 거부권이 될 수 있음)", "사전 매매계약(SPA)으로 행동주의 주주가 지분을 넘김 → 임시주총 철회·소송 일괄 종결", "결과 보고서 → 실패 시 계약 해제, 재추진은 가격·조건 변경"]),
+]
+
+
+def _next_view(conn, q):
+    """다음 분쟁 후보 찾기: 공시 신호가 나오기 전의 지분 구조 + 초기 신호로 점수화 (가비아 사례의 앞 단계)"""
+    import dispute as dp
+    rows, scanned = dp.next_candidates(conn)
+    kw = (q.get("kw") or "").strip()
+    fq = {k: q.get(k) for k in ("ho", "ac", "sl", "mc") if q.get(k)}
+    hide_h, halt_chip_ = halt_toggle(conn, q, {"t": "dispute", "next": "1", "kw": kw, **fq})
+    try:
+        ho_v = float(fq["ho"]) if "ho" in fq else None
+    except ValueError:
+        ho_v = None
+    try:
+        mc_v = float(fq["mc"]) if "mc" in fq else None
+    except ValueError:
+        mc_v = None
+    sel = [r for r in rows if (ho_v is None or r["friendly"] <= ho_v) and (not fq.get("ac") or r["activist"]) and (not fq.get("sl") or r["slow"])
+           and (mc_v is None or (r["mcap"] or 0) >= mc_v) and (not kw or kw in (r["name"] or "") or kw in r["code"]) and not (hide_h and r["code"] in halt_set(conn))]
+    base = {"t": "dispute", "next": "1", "kw": kw, **fq, **({"hh": "1"} if hide_h else {})}
+
+    def tog(lab, k, v):
+        on = fq.get(k) == v
+        nq = {kk: vv for kk, vv in {**base, k: ("" if on else v)}.items() if vv not in (None, "")}
+        return f'<b class="chip" style="background:var(--accent);color:var(--bg)">{lab} ✕</b>' if on else f'<a class="chip" href="/ideas?{urlencode(nq)}">{lab}</a>'
+    chips = " ".join([tog("우호 지분 30% 이하", "ho", "30"), tog("40% 이하", "ho", "40"), tog("🎯 행동주의", "ac", "1"), tog("🕰 장기 누적", "sl", "1"), tog("시총 1천억↑", "mc", "1000"), tog("3천억↑", "mc", "3000")]) + f' <span style="margin-left:6px">{halt_chip_}</span>'
+    play = "".join(f'<div style="margin:6px 0"><b>{escape(t)}</b> <span class="muted" style="font-size:12px">{escape(d)}</span><ul style="padding-left:18px;margin:2px 0;font-size:12px">' + "".join(f"<li>{escape(x)}</li>" for x in items) + "</ul></div>" for t, d, items in PLAYBOOK)
+    intro = ('<div class="card"><a href="/ideas?t=dispute" class="muted" style="font-size:12px">← 지분분쟁 목록</a><div style="margin-top:4px"><b>🔭 다음 분쟁 후보</b></div>'
+             '<div class="muted" style="font-size:13px">소송·위임장·공개매수 같은 공시가 나오기 <b>전</b>에, 지분 구조만으로 분쟁이 날 수 있는 종목을 점수순으로 모았어요 (가비아의 0~1단계 신호). '
+             f'지분을 계산한 {scanned:,}개 종목 중 흔들 만한 구조 {len(rows)}개. 품절주 탭의 "유통주식 계산"(최대주주 현황·5% 보유자·정기보고서 표)을 돌려야 채워져요.</div></div>')
+    how = ('<div class="card"><details><summary><b>분쟁은 이렇게 전개돼요 — 가비아 사례로 본 단계별 신호 (찾을 때 체크리스트)</b></summary><div style="font-size:13px;margin-top:6px">' + play +
+           '<div class="muted" style="font-size:12px;margin-top:6px">단계는 보통 순서대로 오지만 건너뛰기도 해요. 후보는 0~1단계예요 — 이 화면의 종목이 분쟁이 난다는 뜻이 아니라, 지분 구조상 <b>가능한 곳</b>이라는 뜻이에요 (우호 지분이 두꺼우면 도전자가 있어도 분쟁이 안 돼요).</div></div></details></div>')
+    body = ""
+    for r in sel[:60]:
+        top = r["top"] or {}
+        tags_ = []
+        if r["activist"]:
+            tags_.append('<span class="chip down" style="font-size:10px">🎯 행동주의</span>')
+        if r["slow"]:
+            tags_.append('<span class="chip down" style="font-size:10px">🕰 장기 누적</span>')
+        if r["shift"]:
+            tags_.append('<span class="chip" style="font-size:10px">단순투자→경영참여</span>')
+        if r.get("level"):
+            tags_.append(f'<span class="chip {DSP_CLS.get(r["level"], "")}" style="font-size:10px">목록에도 있음: {escape(r["level"])}</span>')
+        gap = (r["friendly"] - top["pct"]) if top else None
+        body += (f'<div style="border-top:1px solid var(--line);padding:8px 0"><div><a href="/ideas?{urlencode({"t": "dispute", "code": r["code"]})}"><b>{escape(r["name"] or r["code"])}</b></a> '
+                 f'<span class="muted" style="font-size:12px">{escape(r["code"])} · {escape(r["market"] or "")}</span> {halt_badge(conn, r["code"])}<span class="chip {"down" if r["score"] >= 8 else ""}" style="font-weight:700">{r["score"]}점</span> ' + "".join(tags_) + '</div>'
+                 f'<div style="font-size:12px;margin:2px 0">최대주주 측 우호 <b>{r["friendly"]:.1f}%</b>' + (f' (우호 계열 +{r["ally"]:.1f}%)' if r["ally"] else "")
+                 + (f' vs {escape(top["name"])} <b>{top["pct"]:.1f}%</b> — 격차 {gap:.1f}%p' if top else "") + (f' · 시총 {r["mcap"]:,.0f}억' if r["mcap"] else "") + (f' · PBR {r["pbr"]:.2f}' if r["pbr"] else "") + '</div>'
+                 + "".join(f'<div class="muted" style="font-size:12px">· {escape(x)}</div>' for x in r["reasons"][:4]) + '</div>')
+    card = (f'<div class="card"><div style="font-size:12px"><span class="muted">거르기</span> {chips}</div>'
+            f'<form method="get" action="/ideas" class="filters" style="margin:6px 0"><input type="hidden" name="t" value="dispute"><input type="hidden" name="next" value="1">'
+            + "".join(f'<input type="hidden" name="{k_}" value="{escape(v_)}">' for k_, v_ in {**fq, **({"hh": "1"} if hide_h else {})}.items())
+            + f'<input type="search" name="kw" value="{escape(kw)}" placeholder="종목 이름·코드"><button>찾기</button></form>'
+            f'<div class="muted" style="font-size:12px">조건에 맞는 후보 {len(sel):,}개' + (" (위 60개만)" if len(sel) > 60 else "") + '</div>' + (body or '<div class="muted" style="margin-top:6px">조건에 맞는 후보가 없어요. 품절주 탭에서 지분 계산을 돌렸는지 확인하세요.</div>') + '</div>')
+    lim = ('<div class="card muted" style="font-size:12px">한계: 지분 자료는 DART 보고서 기준이라 최근 며칠의 변화는 늦게 반영돼요(종목 상세의 "지분 다시 받기"로 확인). 지분이 얇다는 것만으로 분쟁이 나지는 않아요 — 도전자가 실제로 움직이는지(주주제안·열람 소송·위임장)는 공시로 따로 봐야 해요. 투자 권유가 아니에요.</div>')
+    return page("다음 분쟁 후보", intro + how + card + lim)
+
+
 def _dsp_check(conn):
     """지분분쟁 지분 자료 점검: 가비아처럼 5% 보고에 안 잡히다 정기보고서 표에서 나온 보유자, 공개매수로 뺀 보고자, 지분 자료 경고, 5% 보고와 정기보고서 지분이 다른 보유자를 한곳에 모음"""
     import dispute as dp
@@ -4922,6 +4988,8 @@ def view_dispute(conn, q):
     code = (q.get("code") or "").strip()
     if code:
         return page("지분분쟁", flash + _dsp_detail(conn, by_code.get(code), code))
+    if q.get("next") == "1":
+        return _next_view(conn, q)
     if q.get("chk") == "1":
         return page("지분분쟁 점검", '<div class="card"><a href="/ideas?t=dispute" class="muted" style="font-size:12px">← 목록</a></div>' + _dsp_check(conn))
     if not states:
@@ -4981,6 +5049,7 @@ def view_dispute(conn, q):
     if slow_n or slow_only:
         chips += (f' <b class="chip" style="background:var(--accent);color:var(--bg)">🕰 장기 누적 {slow_n}</b>' if slow_only else
                   f' <a class="chip" href="/ideas?{urlencode({"t": "dispute", "slow": "1", **hq})}" title="1년 가까이 천천히 지분을 모아 온 도전자가 있는 종목">🕰 장기 누적 {slow_n}</a>')
+    chips += ' <a class="chip" href="/ideas?t=dispute&next=1" title="공시 신호가 나오기 전, 지분 구조로 보는 다음 분쟁 후보">🔭 다음 분쟁 후보</a>'
     chips += ' <a class="chip" href="/ideas?t=dispute&chk=1" title="지분 자료가 빠짐없이 읽혔는지 점검">🔎 지분 자료 점검</a>'
     chips += f' <span style="margin-left:6px">{halt_chip_}</span>'
     flt = []
