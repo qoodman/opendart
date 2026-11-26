@@ -1191,9 +1191,10 @@ def next_candidates(conn, today=None, limit=300):
         rows = conn.execute("SELECT code, name, market, mcap, tv, holder_pct, treasury_pct, float_real, detail, fetched FROM float_stock WHERE holder_pct IS NOT NULL AND detail IS NOT NULL").fetchall()
     except sqlite3.Error:
         return [], 0
-    pbr = {}
+    pbr, eps = {}, {}
     try:
-        pbr = {c: p for c, p in conn.execute("SELECT code, pbr FROM valuation")}
+        for c, p, e in conn.execute("SELECT code, pbr, eps FROM valuation"):
+            pbr[c], eps[c] = p, e
     except sqlite3.Error:
         pass
     mine, manual, excluded = {}, {}, set()
@@ -1215,6 +1216,8 @@ def next_candidates(conn, today=None, limit=300):
     out = []
     for code, name, mkt, mcap, tv, hp, tr_, fr, detail, fetched in rows:
         if code in excluded:
+            continue
+        if eps.get(code) is not None and eps[code] <= 0:          # 적자 회사는 아무도 안 사고 싶어 하니 공시 전 후보에서 뺌 (이미 분쟁이 진행 중인 종목은 별개)
             continue
         try:
             d = json.loads(detail or "{}")

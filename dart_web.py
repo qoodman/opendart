@@ -4848,6 +4848,84 @@ PLAYBOOK = [
 ]
 
 
+_VAL = {"t": 0.0, "v": ({}, {})}
+
+
+def val_maps(conn):
+    """({코드: (PER, PBR, EPS, 배당수익률)}, {코드: dict(opm, roe, op, rev_yoy)}) — 밸류에이션 표와 재무제표 분석의 최신 보고서에서, 60초 재사용"""
+    if time.time() - _VAL["t"] < 60:
+        return _VAL["v"]
+    vals, prof = {}, {}
+    try:
+        for c_, per, pbr, div, eps in conn.execute("SELECT code, per, pbr, div, eps FROM valuation"):
+            vals[c_] = (per, pbr, eps, div)
+    except sqlite3.Error:
+        pass
+    try:
+        order = {"11013": 1, "11012": 2, "11014": 3, "11011": 4}
+        best = {}
+        for c_, y, rc, m_ in conn.execute("SELECT code, year, rcode, m FROM fin_report WHERE m IS NOT NULL"):
+            k = (y, order.get(rc, 0))
+            if c_ not in best or k > best[c_][0]:
+                best[c_] = (k, m_)
+        for c_, (_, m_) in best.items():
+            try:
+                m = json.loads(m_ or "{}")
+            except ValueError:
+                continue
+            prof[c_] = dict(opm=m.get("opm"), roe=m.get("roe"), op=m.get("op"), rev_yoy=m.get("rev_yoy"))
+    except sqlite3.Error:
+        pass
+    _VAL.update(t=time.time(), v=(vals, prof))
+    return _VAL["v"]
+
+
+def is_profitable(conn, code):
+    """흑자 여부: 1 흑자, 0 적자, None 모름 (EPS가 있으면 EPS로, 없으면 재무제표의 영업이익)"""
+    vals, prof = val_maps(conn)
+    v = vals.get(code)
+    if v and v[2] is not None:
+        return 1 if v[2] > 0 else 0
+    p = prof.get(code)
+    if p and p.get("op") is not None:
+        return 1 if p["op"] > 0 else 0
+    return None
+
+
+def val_html(conn, code):
+    """PER·PBR·EPS·배당, 영업이익률·ROE와 흑자/적자 표시 한 줄 (인수할 만한 회사인지)"""
+    vals, prof = val_maps(conn)
+    v, p = vals.get(code), prof.get(code) or {}
+    bits = []
+    if v:
+        per, pbr, eps, div = v
+        bits.append(f'PER <b>{per:.1f}</b>' if per else "PER -")
+        bits.append(f'PBR <b>{pbr:.2f}</b>' if pbr else "PBR -")
+        if div:
+            bits.append(f"배당 {div:.1f}%")
+    pf = is_profitable(conn, code)
+    badge = ('<span class="chip up" style="font-size:10px">💰 흑자</span>' if pf == 1 else '<span class="chip down" style="font-size:10px">적자</span>' if pf == 0 else "")
+    if p.get("opm") is not None:
+        bits.append(f'영업이익률 {p["opm"]:.0%}')
+    if p.get("roe") is not None:
+        bits.append(f'ROE {p["roe"]:.0%}')
+    if p.get("rev_yoy") is not None:
+        bits.append(f'매출 {p["rev_yoy"]:+.0%}')
+    if not bits and not badge:
+        return '<span class="muted">PER·PBR 자료 없음 (시장·정책 수집 후 표시)</span>'
+    return badge + " " + " · ".join(bits)
+
+
+def base_html(sc):
+    """최대주주+우호 지분 한 줄 (항상 표시): 최대주주 측 + 우호 계열 = 합계, 기준 보고서"""
+    if not sc or sc.get("holder_pct") is None:
+        return '<span class="muted">최대주주·우호 지분 아직 못 받음 (전 종목 지분 스캔 또는 상세의 지분 다시 받기)</span>'
+    fp = sc.get("friendly_pct") if sc.get("friendly_pct") is not None else sc["holder_pct"]
+    ally = sc.get("ally_pct") or 0.0
+    hy = (sc.get("meta") or {}).get("hy") or ""
+    return (f'🏛 최대주주+우호 <b>{fp:.1f}%</b> <span class="muted" style="font-size:11px">(최대주주 측 {sc["holder_pct"]:.1f}%' + (f' + 우호 계열 {ally:.1f}%' if ally else "") + (f' · {escape(hy)}' if hy else "") + ')</span>')
+
+
 def _dsp_check(conn):
     """지분분쟁 지분 자료 점검: 가비아처럼 5% 보고에 안 잡히다 정기보고서 표에서 나온 보유자, 공개매수로 뺀 보고자, 지분 자료 경고, 5% 보고와 정기보고서 지분이 다른 보유자를 한곳에 모음"""
     import dispute as dp
@@ -4947,7 +5025,7 @@ def view_dispute(conn, q):
     lv_sel = q.get("lv") if q.get("lv") in dp.LEVEL_ORDER else ""
     kw = (q.get("kw") or "").strip()
     hide_h, halt_chip_ = halt_toggle(conn, q, {"t": "dispute", "lv": lv_sel, "kw": kw})
-    fq = {k: q.get(k) for k in ("ho", "ac", "mt", "tn", "mc") if q.get(k)}          # 내가 고른 거름 조건 (최대주주 측 지분 상한·행동주의 도전자·주총 임박·공개매수·시총 하한)
+    fq = {k: q.get(k) for k in ("ho", "ac", "mt", "tn", "mc", "pf", "pb", "pe") if q.get(k)}          # 내가 고른 거름 조건 (최대주주 측 지분 상한·행동주의 도전자·주총 임박·공개매수·시총 하한)
     hq = {**({"hh": "1"} if hide_h else {}), **fq}
     try:
         ho_v = float(fq["ho"]) if "ho" in fq else None
@@ -4984,6 +5062,13 @@ def view_dispute(conn, q):
             return False
         if mc_v and (mcap_map.get(s_["code"]) is None or mcap_map[s_["code"]] < mc_v):
             return False
+        if fq.get("pf") and is_profitable(conn, s_["code"]) != 1:
+            return False
+        v_ = val_maps(conn)[0].get(s_["code"])
+        if fq.get("pb") and not (v_ and v_[1] and 0 < v_[1] <= 1.0):
+            return False
+        if fq.get("pe") and not (v_ and v_[0] and 0 < v_[0] <= 15):
+            return False
         return True
     if fq:
         states = [s_ for s_ in states if _pass(s_)]
@@ -5002,7 +5087,7 @@ def view_dispute(conn, q):
     chips += ' <a class="chip" href="/ideas?t=dispute&chk=1" title="지분 자료가 빠짐없이 읽혔는지 점검">🔎 지분 자료 점검</a>'
     chips += f' <span style="margin-left:6px">{halt_chip_}</span>'
     flt = []
-    for lab, k, v in (("최대주주 측 30% 이하", "ho", "30"), ("40% 이하", "ho", "40"), ("🎯 행동주의 도전자", "ac", "1"), ("📅 주총 90일 내", "mt", "1"), ("📢 공개매수·인수 진행", "tn", "1"), ("시총 1천억↑", "mc", "1000"), ("3천억↑", "mc", "3000")):
+    for lab, k, v in (("최대주주 측 30% 이하", "ho", "30"), ("40% 이하", "ho", "40"), ("🎯 행동주의 도전자", "ac", "1"), ("📅 주총 90일 내", "mt", "1"), ("📢 공개매수·인수 진행", "tn", "1"), ("시총 1천억↑", "mc", "1000"), ("3천억↑", "mc", "3000"), ("💰 흑자만", "pf", "1"), ("PBR 1 이하", "pb", "1"), ("PER 15 이하", "pe", "1")):
         on = fq.get(k) == v
         nq = {kk: vv for kk, vv in {"t": "dispute", "lv": lv_sel, "kw": kw, **hq, k: ("" if on else v)}.items() if vv not in (None, "")}
         flt.append(f'<b class="chip" style="background:var(--accent);color:var(--bg)">{lab} ✕</b>' if on else f'<a class="chip" href="/ideas?{urlencode(nq)}">{lab}</a>')
@@ -5056,7 +5141,7 @@ def view_dispute(conn, q):
                 mt_t = f'<span class="chip down" style="font-weight:700">📅 주총 {"오늘" if dd_ == 0 else f"D-{dd_}" if dd_ > 0 else f"{-dd_}일 전"} ({escape(mt["date"])})</span> '
             body += (f'<div style="border-top:1px solid var(--line);padding:8px 0"><div><a href="/ideas?{urlencode({"t": "dispute", "code": s_["code"]})}"><b>{escape(s_["name"] or s_["code"])}</b></a> <span class="muted" style="font-size:12px">{escape(s_["code"])}</span> {halt_badge(conn, s_["code"])}'
                      f'<span class="chip {DSP_CLS.get(lv, "")}" style="font-weight:700">{lv}</span> <span class="muted" style="font-size:12px">점수 {s_["score"]:.1f}' + (f' · 최근 신호 {escape(ev["last"])}' if ev.get("last") else "") + f'</span> {fin_chip(conn, s_["code"], False)}</div>'
-                     f'<div style="margin:3px 0">{mt_t}{kinds}</div>{gap}{sw_t}{rs_}{_dsp_events_html(pl.get("events") or [], 3)}</div>')
+                     f'<div style="margin:3px 0">{mt_t}{kinds}</div><div style="font-size:12px;margin:2px 0">{base_html(sc)}</div><div style="font-size:12px;margin:2px 0">{val_html(conn, s_["code"])}</div>{gap}{sw_t}{rs_}{_dsp_events_html(pl.get("events") or [], 3)}</div>')
         more = f'<div class="muted" style="font-size:12px">{len(items)}개 중 60개만 보여 줘요 (찾기로 좁혀 보세요).</div>' if len(items) > 60 else ""
         desc = {"치열": "서로 맞붙는 신호가 겹친, 지금 가장 뜨거운 분쟁", "시작": "분쟁 신호가 막 나온 종목", "징후": "경영참여 목적 5% 보유자가 나타난 종목",
                 "가능성 높음": "분쟁 공시는 없지만 지분 구조가 아슬아슬한 종목", "가능성": "구조상 분쟁 가능성이 있는 종목"}[lv]
@@ -5282,7 +5367,8 @@ def _dsp_detail(conn, s_, code):
     rec_card = ('<div class="card"><b>⏳ 의결권 기준일 (12월 결산 기준)</b><div style="margin:4px 0">정기주총 의결권 기준일 <b>%s</b> · <b>D-%d</b></div>'
                 '<div class="muted" style="font-size:12px">정기주총에서 이사 선임 등으로 승부를 보려면 보통 결산일(12월 결산이면 12월 31일) 주주명부에 올라 있어야 의결권을 가져요. 그래서 분쟁 당사자들은 이 날짜 전에 지분을 확보하려고 해요 '
                 '(결산월이 다르거나 임시주총이면 기준일이 달라요 — 주주총회 소집 공고·기준일 공고로 확인하세요). 신주 발행·자기주식의 복지기금 출연처럼 의결권이 되살아나는 방어책도 이 일정을 보고 나와요.</div></div>') % (rec.isoformat(), (rec - today_).days)
-    return head + why_card + meet_card + rec_card + _dsp_price_card(conn, code, pl.get("events") or []) + prox_card + tl_card + hold_card + guide
+    base_card = f'<div class="card"><div style="font-size:14px">{base_html(sc)}</div><div style="font-size:13px;margin-top:4px">{val_html(conn, code)}</div></div>'
+    return head + base_card + why_card + meet_card + rec_card + _dsp_price_card(conn, code, pl.get("events") or []) + prox_card + tl_card + hold_card + guide
 
 
 _PICKS = {"t": 0.0, "v": None}

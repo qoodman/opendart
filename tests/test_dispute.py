@@ -368,6 +368,14 @@ class NextCandidates(unittest.TestCase):
         self.assertEqual(rows["100001"][1]["ev"], None)
         self.assertEqual(st["meta"]["source"], "지분 스캔")
 
+    def test_loss_making_stock_is_not_a_scan_candidate(self):      # 적자 회사는 아무도 사고 싶어 하지 않음
+        c = self._db()
+        c.execute("CREATE TABLE valuation (code TEXT PRIMARY KEY, per REAL, pbr REAL, div REAL, eps REAL, bps REAL, fetched TEXT)")
+        c.execute("INSERT INTO valuation VALUES ('100001', NULL, 1.2, 0, -300, 5000, '2026-11-26')")
+        self.assertEqual(D.next_candidates(c)[0], [])
+        c.execute("UPDATE valuation SET eps=1200, per=9.0 WHERE code='100001'")
+        self.assertEqual([r["code"] for r in D.next_candidates(c)[0]], ["100001"])
+
     def test_my_exclude_and_role(self):
         c = self._db()
         c.execute("INSERT INTO dispute_tag (code,name,role,updated,pct) VALUES ('100001','*','exclude','2026-11-26',NULL)")
