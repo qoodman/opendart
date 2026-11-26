@@ -5023,6 +5023,8 @@ def view_dispute(conn, q):
                 else:
                     gap = f'<div style="font-size:12px;margin:2px 0">최대주주 측 {fp_:.1f}% vs {escape(top["name"])} {top["pct"]:.1f}% — <b class="{"down" if (fp_ - top["pct"]) <= 5 else ""}">격차 {fp_ - top["pct"]:.1f}%p</b></div>'
             rs_ = "".join(f'<div class="muted" style="font-size:12px">· {escape(r)}</div>' for r in (sc.get("reasons") or [])[:3]) if not ev else ""
+            if sc.get("committed"):
+                gap += '<div style="font-size:12px;margin:2px 0">🤝 공개매수자와 매매계약: ' + ", ".join(f'{escape(x["name"])} {x["pct"]:.1f}%' for x in sc["committed"][:3] if x.get("pct") is not None) + (' <b class="down">· 최대주주 측도 계약 상대 (합의 인수 가능성)</b>' if sc.get("owner_in_deal") else "") + '</div>'
             if sc.get("pending"):
                 gap += '<div style="font-size:12px;margin:2px 0">🚧 공개매수·인수 진행 중: ' + ", ".join(f'<b>{escape(x["name"])}</b> (예정 지분 {x["pct"]:.1f}%)' for x in sc["pending"][:2] if x.get("pct") is not None) + ' <span class="muted">— 실제 보유가 아닐 수 있어 지분 비교에서 뺐어요</span></div>'
             if sc.get("warn"):
@@ -5226,7 +5228,11 @@ def _dsp_detail(conn, s_, code):
         if sc.get("pending"):
             pend_html = ('<div style="margin:6px 0;font-size:13px"><b>🚧 공개매수·인수 진행 중</b><ul style="padding-left:18px;margin:2px 0">' + "".join(
                 f'<li><b>{escape(x["name"])}</b> 보고 지분 {x["pct"]:.1f}% ' + (f'<a class="chip" style="font-size:10px" href="{dart_link(x["rcept_no"])}" target="_blank" rel="noopener noreferrer">보고서 ↗</a>' if x.get("rcept_no") else "") + '</li>' for x in sc["pending"] if x.get("pct") is not None)
-                + '</ul><div class="muted" style="font-size:11px">공개매수·인수 계약으로 낸 보고라 예정 지분일 수 있어요. 아직 실제 보유가 아닐 수 있어서 위 지분 비교·격차에서는 뺐어요. 인수가 끝나면 최대주주 변경 공시로 이어져요.</div></div>')
+                + '</ul>'
+                + ((f'<div style="font-size:12px;margin-top:4px"><b>🤝 계약 상대(지분을 넘기기로 한 쪽)</b>: ' + ", ".join(f'{escape(x["name"])} {x["pct"]:.1f}%' for x in sc["committed"] if x.get("pct") is not None)
+                    + (f' · 합계 {sc["contract_total"]:.2f}%' if sc.get("contract_total") else "") + '</div>') if sc.get("committed") else "")
+                + ('<div style="font-size:12px;color:var(--down);margin-top:2px"><b>최대주주 측도 같은 계약의 상대예요</b> — 적대적 분쟁이 아니라 공개매수자와 최대주주·주요 주주가 합의한 인수(공동 인수·상장폐지 목적 등)일 수 있어요. 다른 주주 반발·소송이 따로 있는지는 공시 타임라인으로 확인하세요.</div>' if sc.get("owner_in_deal") else "")
+                + '<div class="muted" style="font-size:11px">공개매수·인수 계약으로 낸 보고라 예정 지분일 수 있어요. 아직 실제 보유가 아닐 수 있어서 위 지분 비교·격차에서는 뺐어요. 계약 상대(양도인)로 적힌 보유자는 곧 공개매수자에게 넘어가므로 맞서는 보유자에서도 뺐어요. 인수가 끝나면 최대주주 변경 공시로 이어져요.</div></div>')
         warn_html = ("<div style=\"margin:6px 0;font-size:12px\"><b class=\"down\">⚠ 지분 자료 확인 필요</b><ul style=\"padding-left:18px;margin:2px 0\">" + "".join(f"<li>{escape(x)}</li>" for x in sc.get("warn") or []) + "</ul></div>") if sc.get("warn") else ""
         add_form_html = ('<form method="post" action="/dispute/tag" class="filters" style="margin:8px 0 0;font-size:12px"><input type="hidden" name="code" value="' + escape(code) + '"><input type="hidden" name="role" value="challenger">'
                          '직접 추가 — 도전자 <input name="name" placeholder="이름 (예: 맥쿼리)" size="12" style="font-size:12px"> 지분 <input name="pct" placeholder="%" size="4" inputmode="decimal" style="font-size:12px">% <button style="font-size:12px">추가</button>'

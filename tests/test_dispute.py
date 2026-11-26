@@ -280,5 +280,53 @@ class Reports(unittest.TestCase):
         self.assertTrue(D.structure_score(hp, ext, None)["contest"])
 
 
+CONTRACT_TXT = """나. 계약 내용
+연번\t성명(명칭)\t관계\t번호\t종류\t주식등의 수\t계약 상대방\t계약의 종류\t계약체결(변경)일\t계약기간\t비율\t비고
+1\t한국인터넷인프라홀딩스 유한회사\t본인\t280\t의결권있는 주식\t1,917,916\t삼성증권(주),
+얼라인파트너스자산운용(주)
+(집합투자업자)\t주식매매계약\t2026.10.27\t-\t14.29\t주1)
+2\t한국인터넷인프라홀딩스 유한회사\t본인\t280\t의결권있는 주식\t3,243,617\tThe Miri Strategic Emerging Markets Fund LP\t주식매매계약\t2026.10.27\t-\t24.17\t주2)
+3\t한국인터넷인프라홀딩스 유한회사\t본인\t280\t의결권있는 주식\t875,419\tGumshoe Master Fund LP\t주식매매계약\t2026.10.27\t-\t6.52\t주3)
+4\t한국인터넷인프라홀딩스 유한회사\t본인\t280\t의결권있는 주식\t3,270,248\t김홍국, 전정완, 원종홍\t주식매매 및 현물출자계약\t2026.10.27\t-\t24.37\t주4)
+합계(주식등의 수)\t9,307,200\t합계(비율)\t69.35\t-
+주1) 주식매매계약의 주요내용
+"""
+
+
+class Contracts(unittest.TestCase):
+    """공개매수자의 '보유주식등에 관한 계약' 표 (가비아: 한국인터넷인프라홀딩스가 미리·얼라인·검슈·최대주주 지분을 매수 계약)"""
+
+    def test_parse(self):
+        c = D.parse_contracts(CONTRACT_TXT)
+        self.assertEqual([r["pct"] for r in c["rows"]], [14.29, 24.17, 6.52, 24.37])
+        self.assertEqual(c["total_pct"], 69.35)
+        self.assertIn("김홍국", c["names"])
+
+    def test_same_party(self):
+        names = D.parse_contracts(CONTRACT_TXT)["names"]
+        for h in ("MiriCapitalManagementLLC", "얼라인파트너스자산운용", "GumshoeMasterFundLP", "김홍국"):
+            self.assertTrue(any(D.same_party(h, n) for n in names), h)
+        for h in ("KB자산운용", "국민연금공단", "KCGI"):
+            self.assertFalse(any(D.same_party(h, n) for n in names), h)
+
+    def test_committed_sellers_are_not_challengers(self):
+        import fin_clues
+        orig = fin_clues.fetch_document_text
+        fin_clues.fetch_document_text = lambda *a, **k: CONTRACT_TXT
+        try:
+            a = Analyze()
+            out = a.run_case([a.ev(1, "079940", "가비아", "주식등의공개매수신고서", "한국인터넷인프라홀딩스", "tender", 4.0),
+                              a.ev(2, "079940", "가비아", "경영권분쟁소송", "가비아", "litig", 4.0)],
+                             24.37, [holder("한국인터넷인프라홀딩스", 69.35, resn="주식매매계약", rcept_no="OFFER"), holder("MiriCapitalManagementLLC", 24.17, "약식"),
+                                     holder("얼라인파트너스자산운용", 14.29), holder("GumshoeMasterFundLP", 6.52, "약식"), holder("KB자산운용", 5.2, "약식")])
+        finally:
+            fin_clues.fetch_document_text = orig
+        st = out["079940"][1]["struct"]
+        self.assertEqual([h["name"] for h in st["ext"]], ["KB자산운용"])
+        self.assertEqual(sorted(x["name"] for x in st["committed"]), ["GumshoeMasterFundLP", "MiriCapitalManagementLLC", "얼라인파트너스자산운용"])
+        self.assertTrue(st["owner_in_deal"])
+        self.assertEqual(st["contract_total"], 69.35)
+
+
 if __name__ == "__main__":
     unittest.main()

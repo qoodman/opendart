@@ -46,6 +46,7 @@ def ensure(conn):
     CREATE TABLE IF NOT EXISTS dispute_holder (code TEXT, reporter TEXT, pct REAL, tp TEXT, date TEXT, resn TEXT, PRIMARY KEY (code, reporter));
     CREATE TABLE IF NOT EXISTS dispute_meta (key TEXT PRIMARY KEY, value TEXT);
     CREATE TABLE IF NOT EXISTS dispute_tag (code TEXT, name TEXT, role TEXT, updated TEXT, PRIMARY KEY (code, name));
+    CREATE TABLE IF NOT EXISTS dispute_contract (rcept_no TEXT PRIMARY KEY, data TEXT, fetched TEXT);
     CREATE TABLE IF NOT EXISTS dispute_struct (code TEXT PRIMARY KEY, fetched TEXT, hp REAL, ext TEXT, insiders TEXT);
     """)
     for stmt in ("ALTER TABLE dispute_struct ADD COLUMN ally REAL", "ALTER TABLE dispute_tag ADD COLUMN pct REAL", "ALTER TABLE dispute_struct ADD COLUMN meta TEXT"):
@@ -651,6 +652,87 @@ def parse_holder_table(text):
     return res
 
 
+_GENERIC = {"the", "fund", "lp", "llc", "capital", "management", "partners", "master", "asset", "assets", "emerging", "markets", "market", "holdings", "investment", "investments", "co", "ltd", "inc",
+            "strategic", "global", "group", "limited", "company", "corp", "trust", "ii", "iii", "i", "of", "and"}
+
+
+def _tokens(name):
+    return {w for w in re.findall(r"[a-z]{4,}", (name or "").lower()) if w not in _GENERIC}
+
+
+def same_party(a, b):
+    """두 이름이 같은 쪽인가: 표기 차이를 뺀 이름이 서로 포함되거나, 영문 이름이 구별되는 단어(예: miri, gumshoe)를 공유"""
+    na, nb = norm_name(a), norm_name(b)
+    if not na or not nb:
+        return False
+    if na == nb or (min(len(na), len(nb)) >= 3 and (na in nb or nb in na)):
+        return True
+    ta, tb = _tokens(a), _tokens(b)
+    if ta & tb:
+        return True
+    # DART 이름은 'MiriCapitalManagementLLC'처럼 붙어 있는 경우가 있어, 상대 이름의 구별되는 단어가 그 안에 들어 있는지도 봄
+    sa, sb = re.sub(r"[^a-z]", "", (a or "").lower()), re.sub(r"[^a-z]", "", (b or "").lower())
+    return any(t in sb for t in ta) or any(t in sa for t in tb)
+
+
+_KIND = re.compile(r"(주식매매 ?및 ?현물출자계약|주식매매계약|현물출자계약|주식양수도계약|주식매매 ?계약|양수도계약)$")
+
+
+def parse_contracts(text):
+    """공개매수자 등의 대량보유 보고서 '보유주식등에 관한 계약' 표 → dict(rows=[dict(sellers, shares, pct, kind, date)], total_pct, names)
+    계약 상대방(양도인)을 읽어, 그 보유자들이 공개매수자에게 지분을 넘기기로 한 쪽인지 가려내는 데 씀. 못 읽으면 rows=[]"""
+    lines = text.split("\n") if isinstance(text, str) else list(text)
+    start = next((i for i, ln in enumerate(lines) if "계약 내용" in re.sub(r"\s+", " ", ln) or "계약내용" in ln), None)
+    if start is None:
+        return dict(rows=[], total_pct=None, names=[])
+    seg = lines[start:start + 140]
+    end = next((i for i, ln in enumerate(seg) if re.match(r"^\s*주\s*1\s*\)", ln)), len(seg))
+    flat = " ".join(seg[:end]).replace("\n", " ")
+    cells = [re.sub(r"\s+", " ", c).strip() for c in flat.split("\t")]
+    rows = []
+    for i, c in enumerate(cells):
+        if _KIND.search(c) and i >= 2:
+            cp, num = cells[i - 1], cells[i - 2]
+            if re.fullmatch(r"[\d,]+", num or "") and cp and not re.fullmatch(r"[\d,.\-]+", cp):
+                nums = [x for x in cells[i + 1:i + 6] if re.fullmatch(r"\d+(\.\d+)?", x or "")]
+                pct = next((float(x) for x in cells[i + 1:i + 6] if re.fullmatch(r"\d+\.\d+", x or "")), None)
+                date = next((x for x in cells[i + 1:i + 4] if re.fullmatch(r"\d{4}\.\d{2}\.\d{2}", x or "")), "")
+                rows.append(dict(raw=cp, shares=float(num.replace(",", "")), pct=pct, kind=c, date=date))
+    names = []
+    for r in rows:
+        txt = r["raw"]
+        for m in re.finditer(r"([가-힣A-Za-z0-9&\.\(\) ]+?)\s*\(집합투자업자\)", txt):
+            names.append(m.group(1).strip(" ,"))
+        base = re.sub(r"\(각 ?신탁자\)|\(집합투자업자\)", "", txt)
+        parts = [x.strip() for x in re.split(r",|·| 및 ", base) if x.strip()]
+        # 증권사 신탁자(삼성증권 등)는 이름이 같아도 실제 매도 주체가 아니라 운용사가 대표이므로 둘 다 목록에 넣고, 맞추는 쪽에서 운용사가 걸리게 함
+        names += parts
+        r["sellers"] = parts
+    # 각주의 '양도인 : X'
+    for ln in lines[start:start + 400]:
+        m = re.search(r"양도인\s*[:：]\s*(.+)$", ln)
+        if m:
+            nm = re.sub(r"\s+", " ", m.group(1)).strip()
+            if nm:
+                names.append(nm)
+    seen, uniq = set(), []
+    for n in names:
+        k = norm_name(n)
+        if k and k not in seen:
+            seen.add(k)
+            uniq.append(n)
+    tot = None
+    m = re.search(r"합계\(비율\)\s*\t?\s*([\d.]+)", " ".join(seg[:end + 3]).replace("\n", " "))
+    if m:
+        try:
+            tot = float(m.group(1))
+        except ValueError:
+            tot = None
+    if tot is None and rows and all(r["pct"] is not None for r in rows):
+        tot = round(sum(r["pct"] for r in rows), 2)
+    return dict(rows=rows, total_pct=tot, names=uniq)
+
+
 def report_asof(report_nm, rcept_dt=""):
     """정기보고서가 가리키는 기준일(YYYYMMDD): 이름의 '(2026.06)'이면 그 달 말일, 없으면 접수일. 5% 보고와 최신 여부를 견줄 때 씀"""
     m = re.search(r"\((\d{4})\.(\d{2})\)", report_nm or "")
@@ -953,10 +1035,24 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
                     pending.append(dict(name=h["name"], pct=h.get("pct"), date=h.get("date"), resn=h.get("resn"), rcept_no=h.get("rcept_no")))
             if pending:
                 ext = [h for h in ext if not h.get("pending")]
+            # 공개매수자가 매매계약을 맺은 상대(양도인): 그 지분은 곧 공개매수자에게 넘어가므로 따로 맞서는 보유자가 아님. 최대주주 측도 계약 상대면 '합의 인수'일 수 있음
+            committed, owner_in_deal, contract_total = [], False, None
+            if pending and key:
+                for x in pending:
+                    info = load_contract(conn, x.get("rcept_no"), key, session, today)
+                    if not info or not info.get("names"):
+                        continue
+                    contract_total = info.get("total_pct") or contract_total
+                    for h in list(ext):
+                        if any(same_party(h["name"], n) for n in info["names"]):
+                            committed.append(dict(name=h["name"], pct=h.get("pct"), rcept_no=h.get("rcept_no"), buyer=x["name"]))
+                            ext.remove(h)
+                    if any(any(same_party(i, n) for n in info["names"]) for i in insiders[:40] if len(norm_name(i)) >= 2):
+                        owner_in_deal = True
             hp_eff = (hp + ally) if (hp is not None and ally) else hp          # 최대주주 측 + 계열·우호 회사 5% 보유분 = 우호 지분
             warn = data_warnings(hp_eff, ext, today)
             st_ = structure_score(hp_eff, ext, pbr.get(code))
-            states[code]["struct"] = dict(holder_pct=hp, ally_pct=ally or 0.0, friendly_pct=hp_eff, ext=ext, swing=swing_holders(hp_eff, ext), insiders=insiders[:12], warn=warn, pending=pending, meta=STRUCT_META.get(code) or {}, **st_)
+            states[code]["struct"] = dict(holder_pct=hp, ally_pct=ally or 0.0, friendly_pct=hp_eff, ext=ext, swing=swing_holders(hp_eff, ext), insiders=insiders[:12], warn=warn, pending=pending, committed=committed, owner_in_deal=owner_in_deal, contract_total=contract_total, meta=STRUCT_META.get(code) or {}, **st_)
             # 공시한 쪽이 최대주주 측이면(지주사·계열사 포함) 분쟁 신호에서 뺌: 일반 5% 보고·외부 권유·주주제안·공개매수
             keep, dropped = [], []
             for e in by[code]:
@@ -1046,6 +1142,27 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
 
 
 LEVEL_ORDER = {"치열": 0, "시작": 1, "징후": 2, "가능성 높음": 3, "가능성": 4}
+
+
+def load_contract(conn, rcept_no, key, session=None, today=None):
+    """공개매수자 보고서의 '보유주식등에 관한 계약' 표 (접수번호마다 한 번만 받아 저장) → parse_contracts 결과 또는 None"""
+    if not rcept_no:
+        return None
+    r = conn.execute("SELECT data FROM dispute_contract WHERE rcept_no=?", (rcept_no,)).fetchone()
+    if r:
+        try:
+            return json.loads(r[0])
+        except ValueError:
+            return None
+    if not key:
+        return None
+    from fin_clues import fetch_document_text
+    try:
+        info = parse_contracts(fetch_document_text(rcept_no, key, session))
+    except Exception:
+        return None
+    conn.execute("INSERT OR REPLACE INTO dispute_contract VALUES (?,?,?)", (rcept_no, json.dumps(info, ensure_ascii=False), (today or dt.date.today()).isoformat()))
+    return info
 
 
 def refresh_one(db_path, key, code, log=print, session=None):
