@@ -92,14 +92,14 @@ class Structure(unittest.TestCase):
 class Analyze(unittest.TestCase):
     """DART 호출 없이(지분 구조는 가짜로) 판정 전체를 돌려 본다."""
 
-    def run_case(self, events, hp, ext, ally=0.0, tags=()):
+    def run_case(self, events, hp, ext, ally=0.0, tags=(), insiders=("오너",)):
         c = sqlite3.connect(":memory:")
         D.ensure(c)
         c.executemany("INSERT INTO dispute_event VALUES (?,?,?,?,?,?,?,?,?,?)", events)
         for t in tags:
             c.execute("INSERT INTO dispute_tag (code,name,role,updated,pct) VALUES (?,?,?,?,?)", t)
         orig = D.fetch_structure
-        D.fetch_structure = lambda *a, **k: (hp, [dict(h) for h in ext], ["오너"], ally)
+        D.fetch_structure = lambda *a, **k: (hp, [dict(h) for h in ext], list(insiders), ally)
         try:
             D.analyze(c, key="k", today=TODAY, log=lambda m: None)
         finally:
@@ -318,7 +318,8 @@ class Contracts(unittest.TestCase):
             out = a.run_case([a.ev(1, "079940", "가비아", "주식등의공개매수신고서", "한국인터넷인프라홀딩스", "tender", 4.0),
                               a.ev(2, "079940", "가비아", "경영권분쟁소송", "가비아", "litig", 4.0)],
                              24.37, [holder("한국인터넷인프라홀딩스", 69.35, resn="주식매매계약", rcept_no="OFFER"), holder("MiriCapitalManagementLLC", 24.17, "약식"),
-                                     holder("얼라인파트너스자산운용", 14.29), holder("GumshoeMasterFundLP", 6.52, "약식"), holder("KB자산운용", 5.2, "약식")])
+                                     holder("얼라인파트너스자산운용", 14.29), holder("GumshoeMasterFundLP", 6.52, "약식"), holder("KB자산운용", 5.2, "약식")],
+                             insiders=("김홍국", "전정완", "원종홍"))
         finally:
             fin_clues.fetch_document_text = orig
         st = out["079940"][1]["struct"]
