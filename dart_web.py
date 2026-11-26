@@ -4927,7 +4927,7 @@ def view_dispute(conn, q):
             + status_steps_html(st, running) + '</div>')
     play_html = "".join(f'<div style="margin:6px 0"><b>{escape(t)}</b> <span class="muted" style="font-size:12px">{escape(d)}</span><ul style="padding-left:18px;margin:2px 0;font-size:12px">' + "".join(f"<li>{escape(x)}</li>" for x in items) + "</ul></div>" for t, d, items in PLAYBOOK)
     play = ('<div class="card"><details><summary><b>분쟁은 이렇게 전개돼요 — 가비아 사례로 본 단계별 신호 (다음 종목 찾는 체크리스트)</b></summary><div style="font-size:13px;margin-top:6px">' + play_html
-            + '<div class="muted" style="font-size:12px;margin-top:6px"><b>가능성·징후</b> 단계가 0~1단계예요: 공시 신호가 나오기 전이라도 '전 종목 지분 스캔'(위 버튼)을 돌린 종목 중 우호 지분이 얇고 도전자가 움직이는 곳을 함께 올려요. 우호 지분이 두꺼우면 도전자가 있어도 분쟁이 안 돼요.</div></div></details></div>')
+            + '<div class="muted" style="font-size:12px;margin-top:6px"><b>가능성·징후</b> 단계가 0~1단계예요: 공시 신호가 나오기 전이라도 “전 종목 지분 스캔”(위 버튼)을 돌린 종목 중 우호 지분이 얇고 도전자가 움직이는 곳을 함께 올려요. 우호 지분이 두꺼우면 도전자가 있어도 분쟁이 안 돼요.</div></div></details></div>')
     how = ('<div class="card"><details><summary><b>어떻게 찾고 판단하나요? (꼭 알아 둘 한계)</b></summary>'
            '<div style="font-size:13px;margin-top:6px"><b>벌어지고 있다는 신호</b>(공시 제목으로 잡아요): ⚖ 경영권 분쟁 소송·가처분(신주발행금지·의결권행사금지·주총금지) · 🗳 <b>주주측 위임장 권유</b>(회사가 아닌 쪽이 의결권을 모으는 표 대결) · '
            '📢 공개매수 · 📝 주주제안·소수주주권·임시주총 청구 · 👑 최대주주 변경 · 🎯 경영참여 목적 5% 보유(대량보유 <b>일반</b> 보고, 행동주의 포함). '
