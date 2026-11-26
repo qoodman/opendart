@@ -1183,7 +1183,7 @@ def float_run():
     except Exception as e:
         return False, f"시작하지 못했어요: {type(e).__name__}: {str(e)[:100]}"
     threading.Thread(target=proc.wait, daemon=True).start()
-    return True, "품절주 계산을 시작했어요. 처음엔 종목이 많아 시간이 걸려요(여러 번 나눠 이어서 받아요)."
+    return True, "전 종목 지분 스캔을 시작했어요(품절주·분쟁 후보에 같이 쓰여요). 처음엔 종목이 많아 시간이 걸려요(여러 번 나눠 이어서 받아요)."
 
 
 def cmd_float_sync(args):
@@ -2226,7 +2226,7 @@ def check_update():
 
 
 JOB_FILES = [("world_status.json", "해외 증시 받기"), ("dispute_status.json", "지분분쟁 분석"), ("fin_status.json", "재무제표 분석"), ("fin_clue_status.json", "재무 단서 수집"),
-             ("float_status.json", "품절주 계산"), ("foreign_status.json", "외국인 지분 계산"), ("legstudy_status.json", "입법 주가 분석"), ("legis_status.json", "입법 영향 기업 준비")]
+             ("float_status.json", "전 종목 지분 스캔"), ("foreign_status.json", "외국인 지분 계산"), ("legstudy_status.json", "입법 주가 분석"), ("legis_status.json", "입법 영향 기업 준비")]
 QUEUE_MAX_SEC = 6 * 3600
 
 

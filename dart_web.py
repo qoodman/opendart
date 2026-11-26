@@ -151,7 +151,7 @@ def freshness_html():
 
 
 _JOB_FILES = [("world_status.json", "해외 증시 받기"), ("dispute_status.json", "지분분쟁 분석"), ("fin_status.json", "재무제표 분석"), ("fin_clue_status.json", "재무 단서 수집"),
-              ("float_status.json", "품절주 계산"), ("foreign_status.json", "외국인 지분 계산"), ("legstudy_status.json", "입법 주가 분석"), ("legis_status.json", "입법 영향 기업 준비")]
+              ("float_status.json", "전 종목 지분 스캔"), ("foreign_status.json", "외국인 지분 계산"), ("legstudy_status.json", "입법 주가 분석"), ("legis_status.json", "입법 영향 기업 준비")]
 _BUSY = {"t": 0.0, "v": ([], False)}
 
 
@@ -4779,7 +4779,7 @@ def view_float(conn, q):
         rows, last, total = [], "", 0
     prep = ('<div class="card"><b>품절주</b>'
             '<div class="muted" style="font-size:13px">시장에서 실제로 거래될 수 있는 주식(유통주식)이 적은 종목이에요. 최대주주·특수관계인 지분과 자기주식, 5% 이상 보유자를 빼고 남는 비율로 찾아요 (DART 사업보고서 기준 · 네이버 시세).'
-            f' 계산한 종목 {len(rows):,}개 / 목록 {total:,}개' + (f' · 마지막 계산 {escape(last)}' if last else "") + '</div>'
+            f' 계산한 종목 {len(rows):,}개 / 목록 {total:,}개' + (f' · 마지막 계산 {escape(last)}' if last else "") + ' · <span title="이 계산은 지분분쟁의 \'전 종목 지분 스캔\'과 같은 작업이에요">지분분쟁 후보 찾기와 같은 자료를 써요</span></div>'
             '<form method="post" action="/float/run" class="filters" style="margin:8px 0 0">'
             f'<button{" disabled" if running else ""}>{"진행 중…" if running else ("유통주식 새로 계산" if rows else "유통주식 계산하기")}</button>'
             '<span class="muted" style="font-size:12px">종목이 2천 개가 넘어서 처음엔 오래 걸려요(별도 프로세스). 한 달 안에 계산한 종목은 건너뛰어요. DART 키가 설정에 있어야 해요.</span></form>'
@@ -4901,6 +4901,8 @@ def view_dispute(conn, q):
     d = Path(_DATA_DIR["path"] or ".")
     st = lg.read_status(str(d / "dispute_status.json"))
     running = bool(st and st.get("running"))
+    fl_st = lg.read_status(str(d / "float_status.json"))
+    fl_running = bool(fl_st and fl_st.get("running"))
     msg = q.get("msg", "")
     flash = f'<div class="card {"warn" if msg.startswith("✖") else ""}">{escape(msg)}</div>' if msg else ""
     states = dp.load_states(conn)
@@ -4915,13 +4917,17 @@ def view_dispute(conn, q):
             '<form method="post" action="/dispute/run" class="filters" style="margin:8px 0 0">'
             f'<button{" disabled" if running else ""}>{"진행 중…" if running else ("공시 새로 훑기" if states else "공시 훑고 분석하기")}</button>'
             '<span class="muted" style="font-size:12px">처음엔 최근 120일 공시를 훑어 몇 분 걸리고(별도 프로세스), 다음부터는 새 공시만 봐요. 새로 시작·치열이 되면 푸시로 알려요.</span></form>'
+            + ('<form method="post" action="/float/run" class="filters" style="margin:6px 0 0"><input type="hidden" name="back" value="dispute">'
+               f'<button{" disabled" if fl_running else ""}>{"지분 스캔 중…" if fl_running else "전 종목 지분 스캔 (공시 전 후보 찾기)"}</button>'
+               '<span class="muted" style="font-size:12px">공시 신호가 없어도 우호 지분이 얇고 도전자가 움직이는 종목을 찾으려고 전 종목의 최대주주 현황·5% 보유자·정기보고서 표를 받아요. 품절주 탭의 "유통주식 계산"과 같은 작업이에요 (오래 걸려 여러 번 나눠 이어서 받아요).</span></form>')
+            + (status_steps_html(fl_st, fl_running) if fl_running else "")
             + ('<form method="post" action="/dispute/reset" class="filters" style="margin:6px 0 0" onsubmit="return confirm(\'지분분쟁 결과를 모두 지우고 처음부터 다시 분석할까요? (내가 정한 역할·제외는 남아요, 몇 분 걸려요)\')">'
                f'<button{" disabled" if running else ""}>모두 지우고 새로 분석</button>'
                '<span class="muted" style="font-size:12px">엉뚱한 종목이 남아 있을 때: 예전 판정·공시 신호·지분 구조 저장분을 모두 지우고 새 규칙으로 다시 만들어요.</span></form>')
             + status_steps_html(st, running) + '</div>')
     play_html = "".join(f'<div style="margin:6px 0"><b>{escape(t)}</b> <span class="muted" style="font-size:12px">{escape(d)}</span><ul style="padding-left:18px;margin:2px 0;font-size:12px">' + "".join(f"<li>{escape(x)}</li>" for x in items) + "</ul></div>" for t, d, items in PLAYBOOK)
     play = ('<div class="card"><details><summary><b>분쟁은 이렇게 전개돼요 — 가비아 사례로 본 단계별 신호 (다음 종목 찾는 체크리스트)</b></summary><div style="font-size:13px;margin-top:6px">' + play_html
-            + '<div class="muted" style="font-size:12px;margin-top:6px"><b>가능성·징후</b> 단계가 0~1단계예요: 공시 신호가 나오기 전이라도 지분 계산(품절주 탭의 유통주식 계산)을 돌린 종목 중 우호 지분이 얇고 도전자가 움직이는 곳을 함께 올려요. 우호 지분이 두꺼우면 도전자가 있어도 분쟁이 안 돼요.</div></div></details></div>')
+            + '<div class="muted" style="font-size:12px;margin-top:6px"><b>가능성·징후</b> 단계가 0~1단계예요: 공시 신호가 나오기 전이라도 '전 종목 지분 스캔'(위 버튼)을 돌린 종목 중 우호 지분이 얇고 도전자가 움직이는 곳을 함께 올려요. 우호 지분이 두꺼우면 도전자가 있어도 분쟁이 안 돼요.</div></div></details></div>')
     how = ('<div class="card"><details><summary><b>어떻게 찾고 판단하나요? (꼭 알아 둘 한계)</b></summary>'
            '<div style="font-size:13px;margin-top:6px"><b>벌어지고 있다는 신호</b>(공시 제목으로 잡아요): ⚖ 경영권 분쟁 소송·가처분(신주발행금지·의결권행사금지·주총금지) · 🗳 <b>주주측 위임장 권유</b>(회사가 아닌 쪽이 의결권을 모으는 표 대결) · '
            '📢 공개매수 · 📝 주주제안·소수주주권·임시주총 청구 · 👑 최대주주 변경 · 🎯 경영참여 목적 5% 보유(대량보유 <b>일반</b> 보고, 행동주의 포함). '
@@ -8690,10 +8696,10 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                 return self._redirect("/market?" + urlencode({"fmsg": ("✔ " if ok else "✖ ") + why}))
             if path == "/float/run" and settings_api:
                 n = min(int(self.headers.get("Content-Length") or 0), 4096)
-                self.rfile.read(n)
+                form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore")).items()}
                 S = settings()
                 ok, why = S["float_run"]() if "float_run" in S else (False, "이 서버 버전은 지원하지 않아요")
-                return self._redirect("/ideas?" + urlencode({"t": "float", "msg": ("✔ " if ok else "✖ ") + why}))
+                return self._redirect("/ideas?" + urlencode({"t": "dispute" if form.get("back") == "dispute" else "float", "msg": ("✔ " if ok else "✖ ") + why}))
             if path == "/jobs/stop" and settings_api:
                 n = min(int(self.headers.get("Content-Length") or 0), 4096)
                 form = {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8", "ignore")).items()}
