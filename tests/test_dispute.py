@@ -357,6 +357,17 @@ class NextCandidates(unittest.TestCase):
         self.assertEqual([r["code"] for r in rows], ["100001"])
         self.assertTrue(rows[0]["slow"] and rows[0]["activist"])
 
+    def test_scan_candidates_show_in_main_list(self):          # 별도 화면 없이 지분분쟁 목록의 '가능성'으로 올라옴
+        c = self._db()
+        D.analyze(c, key="k", today=TODAY, log=lambda m: None)
+        rows = {r[0]: (r[1], json.loads(r[2])) for r in c.execute("SELECT code, level, payload FROM dispute_state")}
+        self.assertEqual(list(rows), ["100001"])
+        self.assertIn(rows["100001"][0], ("가능성", "가능성 높음"))
+        st = rows["100001"][1]["struct"]
+        self.assertTrue(st["contest"])
+        self.assertEqual(rows["100001"][1]["ev"], None)
+        self.assertEqual(st["meta"]["source"], "지분 스캔")
+
     def test_my_exclude_and_role(self):
         c = self._db()
         c.execute("INSERT INTO dispute_tag (code,name,role,updated,pct) VALUES ('100001','*','exclude','2026-11-26',NULL)")

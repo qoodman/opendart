@@ -1072,6 +1072,17 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
         except Exception:
             pass
     out = 0
+    if not only:
+        try:
+            scan_rows, _ = next_candidates(conn, today, limit=400)
+        except Exception:
+            scan_rows = []
+        for r in scan_rows:                         # 공시 신호는 아직 없지만 지분 구조상 분쟁이 날 수 있는 종목 (가비아로 치면 0~1단계)
+            if r["code"] in states:
+                continue
+            states[r["code"]] = dict(name=r["name"], ev=None, pot=None, struct=r["struct"])
+            by.setdefault(r["code"], [])
+            names[r["code"]] = r["name"]
     skipped = weak = 0
     kept = []
     try:
@@ -1220,7 +1231,9 @@ def next_candidates(conn, today=None, limit=300):
         if not sc.get("contest") or sc["score"] < 4:
             continue
         ch = sorted([h for h in ext if h.get("pct") and not _neutral(h)], key=lambda h: -h["pct"])
-        out.append(dict(code=code, name=name, market=mkt, mcap=mcap, score=sc["score"], reasons=sc["reasons"], friendly=friendly, hp=hp, ally=ally, top=ch[0] if ch else None,
+        struct = dict(holder_pct=hp, ally_pct=ally or 0.0, friendly_pct=friendly, ext=ext, swing=swing_holders(friendly, ext), insiders=(d.get("insiders") or [])[:12],
+                      warn=data_warnings(friendly, ext, today), pending=[], committed=[], owner_in_deal=False, contract_total=None, meta=dict(hy=d.get("hy", ""), source="지분 스캔"), **sc)
+        out.append(dict(code=code, name=name, market=mkt, mcap=mcap, struct=struct, score=sc["score"], reasons=sc["reasons"], friendly=friendly, hp=hp, ally=ally, top=ch[0] if ch else None,
                         challengers=ch[:3], slow=any(h.get("slow") for h in ch), activist=any(h.get("activist") for h in ch), shift=any(h.get("shift") for h in ch),
                         pbr=pbr.get(code), level=active.get(code), hy=d.get("hy", ""), fetched=fetched))
     out.sort(key=lambda r: (-r["score"], r["friendly"]))
