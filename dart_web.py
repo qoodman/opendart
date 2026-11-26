@@ -5256,7 +5256,7 @@ def _dsp_detail(conn, s_, code):
                      + ((f'<div style="margin-top:6px;font-size:12px"><b>최대주주 측으로 보고 뺀 공시</b> (지주사·계열사 포함 — 분쟁 상대가 아니에요): '
                          + ", ".join(f'{escape(d.get("flr") or "")} ({escape(d.get("date", ""))})' for d in (pl.get("dropped") or [])[:5]) + '</div>') if pl.get("dropped") else "")
                      + ((f'<div class="muted" style="font-size:11px;margin-top:4px">최대주주 측으로 본 이름: {escape(", ".join(sc.get("insiders") or []))} · 표기가 달라도(㈜·주식회사) 같은 곳으로 봐요</div>') if sc.get("insiders") else "")
-                     + ((f'<div class="muted" style="font-size:11px;margin-top:4px">지분 자료 기준 — 최대주주 현황: {escape(sc["meta"].get("hy", "") or "?")}' + (f' · 5% 주주 표: {escape(sc["meta"]["report"])}' if sc["meta"].get("report") else "") + '</div>') if sc.get("meta") else "")
+                     + ((f'<div class="muted" style="font-size:11px;margin-top:4px">지분 자료 기준 — 최대주주 현황: {escape(sc["meta"].get("hy", "") or "?")}' + (f' · 5% 주주 표: {escape(sc["meta"]["report"])}' if sc["meta"].get("report") else "") + (f' · {escape(sc["meta"]["source"])} 기준(공시 신호 없이 지분 구조로 올라온 종목)' if sc["meta"].get("source") else "") + '</div>') if sc.get("meta") else "")
                      + pend_html
                      + warn_html
                      + ('<form method="post" action="/dispute/refresh" class="filters" style="margin:8px 0 0;font-size:12px"><input type="hidden" name="code" value="' + escape(code) + '"><button style="font-size:12px">이 종목 지분 다시 받기 (DART)</button>'
