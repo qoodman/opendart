@@ -144,7 +144,7 @@ def dart_json(path, key, session=None, timeout=20, **params):
 
 
 def _download_corp_map(cache_dir, key, session=None):
-    """DART 회사 목록(corpCode.xml)을 받아 종목코드→고유번호(corp_map.json), 회사이름→고유번호(corp_names.json, 상장사만)로 저장"""
+    """DART 회사 목록(corpCode.xml)을 받아 종목코드→고유번호(corp_map.json), 회사이름→고유번호(corp_by_name.json, 상장사만)로 저장"""
     s = session or requests
     r = s.get(f"{DART_BASE}/corpCode.xml", params={"crtfc_key": key}, timeout=60)
     if r.status_code != 200:
@@ -164,7 +164,7 @@ def _download_corp_map(cache_dir, key, session=None):
             if nm:
                 names[nm] = cc
     os.makedirs(cache_dir, exist_ok=True)
-    for fname, data in (("corp_map.json", m), ("corp_names.json", names)):
+    for fname, data in (("corp_map.json", m), ("corp_by_name.json", names)):
         path = os.path.join(cache_dir, fname)
         tmp = path + ".part"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -191,7 +191,7 @@ def corp_code_for(stock_code, cache_dir, key, session=None):
 
 def corp_code_by_name(name, cache_dir, key, session=None):
     """상장사 이름 → DART 기업고유번호 (없으면 None). 이름 표기가 조금 달라도 ㈜·주식회사를 뺀 이름이 같으면 찾음"""
-    path = os.path.join(cache_dir, "corp_names.json")
+    path = os.path.join(cache_dir, "corp_by_name.json")
     try:
         with open(path, encoding="utf-8") as f:
             names = json.load(f)

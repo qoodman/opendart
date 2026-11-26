@@ -605,9 +605,11 @@ class Engine:
         if os.path.exists(path) and time.time() - os.path.getmtime(path) < 7 * 86400:
             try:
                 with open(path, encoding="utf-8") as f:
-                    return json.load(f)
+                    cached = json.load(f)
+                if isinstance(cached, dict) and isinstance(cached.get("stock"), dict) and isinstance(cached.get("corp"), dict):
+                    return cached
             except (OSError, ValueError):
-                pass
+                pass          # 모양이 다르거나 깨진 캐시(다른 기능이 같은 이름으로 덮어쓴 경우 등)는 버리고 새로 받음
         try:
             data = self.get(f"{BASE}/corpCode.xml").content
             import xml.etree.ElementTree as ET
