@@ -715,6 +715,18 @@ def parse_contracts(text):
             nm = re.sub(r"\s+", " ", m.group(1)).strip()
             if nm:
                 names.append(nm)
+    amounts = []
+    for ln in lines[start:start + 400]:
+        m = re.search(r"총\s*양수도\s*금액\s*[:：]\s*([\d,]+)\s*원", ln)
+        if m:
+            amounts.append(int(m.group(1).replace(",", "")))
+    prices = []
+    for r, a_ in zip(rows, amounts):
+        if r.get("shares"):
+            r["amount"] = a_
+            r["price"] = round(a_ / r["shares"])
+            prices.append(r["price"])
+    price = max(set(prices), key=prices.count) if prices else None          # 가장 흔한 주당 가격 (계약가 = 공개매수가)
     seen, uniq = set(), []
     for n in names:
         k = norm_name(n)
@@ -730,7 +742,7 @@ def parse_contracts(text):
             tot = None
     if tot is None and rows and all(r["pct"] is not None for r in rows):
         tot = round(sum(r["pct"] for r in rows), 2)
-    return dict(rows=rows, total_pct=tot, names=uniq)
+    return dict(rows=rows, total_pct=tot, names=uniq, price=price)
 
 
 def report_asof(report_nm, rcept_dt=""):
@@ -1020,13 +1032,14 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
             if pending:
                 ext = [h for h in ext if not h.get("pending")]
             # 공개매수자가 매매계약을 맺은 상대(양도인): 그 지분은 곧 공개매수자에게 넘어가므로 따로 맞서는 보유자가 아님. 최대주주 측도 계약 상대면 '합의 인수'일 수 있음
-            committed, owner_in_deal, contract_total = [], False, None
+            committed, owner_in_deal, contract_total, tender_price = [], False, None, None
             if pending and key:
                 for x in pending:
                     info = load_contract(conn, x.get("rcept_no"), key, session, today)
                     if not info or not info.get("names"):
                         continue
                     contract_total = info.get("total_pct") or contract_total
+                    tender_price = info.get("price") or tender_price
                     for h in list(ext):
                         if any(same_party(h["name"], n) for n in info["names"]):
                             committed.append(dict(name=h["name"], pct=h.get("pct"), rcept_no=h.get("rcept_no"), buyer=x["name"]))
@@ -1036,7 +1049,7 @@ def analyze(conn, key=None, today=None, log=print, session=None, enrich_limit=60
             hp_eff = (hp + ally) if (hp is not None and ally) else hp          # 최대주주 측 + 계열·우호 회사 5% 보유분 = 우호 지분
             warn = data_warnings(hp_eff, ext, today)
             st_ = structure_score(hp_eff, ext, pbr.get(code))
-            states[code]["struct"] = dict(holder_pct=hp, ally_pct=ally or 0.0, friendly_pct=hp_eff, ext=ext, swing=swing_holders(hp_eff, ext), insiders=insiders[:12], warn=warn, pending=pending, committed=committed, owner_in_deal=owner_in_deal, contract_total=contract_total, meta=STRUCT_META.get(code) or {}, **st_)
+            states[code]["struct"] = dict(holder_pct=hp, ally_pct=ally or 0.0, friendly_pct=hp_eff, ext=ext, swing=swing_holders(hp_eff, ext), insiders=insiders[:12], warn=warn, pending=pending, committed=committed, owner_in_deal=owner_in_deal, contract_total=contract_total, tender_price=tender_price, meta=STRUCT_META.get(code) or {}, **st_)
             # 공시한 쪽이 최대주주 측이면(지주사·계열사 포함) 분쟁 신호에서 뺌: 일반 5% 보고·외부 권유·주주제안·공개매수
             keep, dropped = [], []
             for e in by[code]:
@@ -1158,6 +1171,39 @@ def load_contract(conn, rcept_no, key, session=None, today=None):
         return None
     conn.execute("INSERT OR REPLACE INTO dispute_contract VALUES (?,?,?)", (rcept_no, json.dumps(info, ensure_ascii=False), (today or dt.date.today()).isoformat()))
     return info
+
+
+STAGE_NAMES = ["잠복", "진입", "압박", "대결", "결말"]
+
+
+def phase_of(events, struct=None):
+    """공시 이력과 지분 구조로 본 분쟁 단계 (가비아 전개: 0 잠복 → 1 진입 → 2 압박 → 3 대결 → 4 결말).
+    → dict(seen=[5개 bool], current=0~4 또는 None, label, kind)"""
+    kinds = {e.get("kind") for e in (events or [])}
+    st = struct or {}
+    ext = st.get("ext") or []
+    seen = [False] * 5
+    if any(h.get("slow") for h in ext) or (st and not kinds):
+        seen[0] = True
+    if kinds & {"proposal", "blk_gen"} or any(h.get("shift") for h in ext):
+        seen[1] = True
+    if kinds & {"litig", "egm"}:
+        seen[2] = True
+    if kinds & {"proxy_ext", "injunction"}:
+        seen[3] = True
+    deal = bool(st.get("committed") or st.get("owner_in_deal"))
+    if kinds & {"tender", "owner_chg"} or deal:
+        seen[4] = True
+    cur = max((i for i, v in enumerate(seen) if v), default=None)
+    if cur is None:
+        return dict(seen=seen, current=None, label="", kind="")
+    if cur == 4:
+        kind = "합의 인수" if deal else ("공개매수" if "tender" in kinds else "최대주주 변경")
+        label = f"결말 단계 — {kind}"
+    else:
+        kind = STAGE_NAMES[cur]
+        label = f"{cur} {kind}"
+    return dict(seen=seen, current=cur, label=label, kind=kind)
 
 
 def _apply_tags(ext, ally, mine, manual):

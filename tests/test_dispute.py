@@ -290,6 +290,11 @@ CONTRACT_TXT = """나. 계약 내용
 4\t한국인터넷인프라홀딩스 유한회사\t본인\t280\t의결권있는 주식\t3,270,248\t김홍국, 전정완, 원종홍\t주식매매 및 현물출자계약\t2026.10.27\t-\t24.37\t주4)
 합계(주식등의 수)\t9,307,200\t합계(비율)\t69.35\t-
 주1) 주식매매계약의 주요내용
+2. 총 양수도 금액 : 101,649,548,000원
+주2) 주식매매계약의 주요내용
+2. 총 양수도 금액 : 171,911,701,000원
+주3) 주식매매계약의 주요내용
+2. 총 양수도 금액 : 46,397,207,000원
 """
 
 
@@ -301,6 +306,7 @@ class Contracts(unittest.TestCase):
         self.assertEqual([r["pct"] for r in c["rows"]], [14.29, 24.17, 6.52, 24.37])
         self.assertEqual(c["total_pct"], 69.35)
         self.assertIn("김홍국", c["names"])
+        self.assertEqual(c["price"], 53000)                        # 양도금액 ÷ 주식 수 = 공개매수가
 
     def test_same_party(self):
         names = D.parse_contracts(CONTRACT_TXT)["names"]
@@ -383,6 +389,23 @@ class NextCandidates(unittest.TestCase):
         c = self._db()
         c.execute("INSERT INTO dispute_tag (code,name,role,updated,pct) VALUES ('100001','얼라인파트너스','ally','2026-11-26',NULL)")      # 우호로 정하면 후보에서 빠짐
         self.assertEqual(D.next_candidates(c)[0], [])
+
+
+class Phase(unittest.TestCase):
+    def test_stages(self):
+        e = lambda *k: [dict(kind=x) for x in k]
+        self.assertEqual(D.phase_of(e("proposal"), {})["current"], 1)
+        self.assertEqual(D.phase_of(e("proposal", "litig"), {})["current"], 2)
+        self.assertEqual(D.phase_of(e("litig", "proxy_ext", "injunction"), {})["current"], 3)
+        ph = D.phase_of(e("tender", "litig", "proxy_ext"), dict(committed=[dict(name="미리")], owner_in_deal=True))
+        self.assertEqual((ph["current"], ph["kind"]), (4, "합의 인수"))
+        self.assertEqual(ph["seen"], [False, False, True, True, True])
+        self.assertEqual(D.phase_of(e("tender"), {})["kind"], "공개매수")
+
+    def test_structure_only_is_dormant(self):
+        ph = D.phase_of([], dict(ext=[dict(name="얼라인", slow=True)]))
+        self.assertEqual((ph["current"], ph["kind"]), (0, "잠복"))
+        self.assertIsNone(D.phase_of([], None)["current"])
 
 
 if __name__ == "__main__":
