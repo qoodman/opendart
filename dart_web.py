@@ -4715,6 +4715,62 @@ def tenbagger_list(conn):
     return out
 
 
+_TRN = {"t": 0.0, "v": None}
+
+
+def view_turnaround(conn, q):
+    """아이디어 → 흑자전환 임박: 아직 영업적자인데 매출이 빠르게 늘고 분기마다 손실이 줄거나 막 분기 흑자로 돌아선 종목"""
+    import turnaround as tr
+    if _TRN["v"] is None or time.time() - _TRN["t"] > 300:
+        _TRN.update(t=time.time(), v=tr.rank(conn))
+    rows = _TRN["v"]
+    intro = ('<div class="card"><b>흑자전환 임박</b><div class="muted" style="font-size:13px">지금은 영업적자인데 <b>매출이 빠르게 늘고, 분기마다 손실이 줄고, 막 분기 흑자로 돌아섰거나 손익분기 근처</b>인 종목을 재무제표 분석 결과로 점수 매겨 모았어요. '
+             '적자 회사는 PER이 없어 지금 숫자만으로는 안 보이는데, 전환이 가까운 회사를 미리 좁히는 용도예요. <b>전환이 보장되지는 않아요</b> — 전환이 미뤄지거나 현금이 먼저 떨어지면 크게 빠져요.</div></div>')
+    how = ('<div class="card"><details><summary><b>점수는 어떻게 매기나요? (한계)</b></summary><ul class="muted" style="font-size:13px;padding-left:18px">'
+           '<li><b>성장 25</b>: 매출 증가율(15·30·50·100% 구간) + 최근 분기 가속</li><li><b>손실 축소 30</b>: 전년 같은 분기 대비 분기 영업손실이 얼마나 줄었는지, 영업이익률 개선 폭</li>'
+           '<li><b>분기 흑자 20</b>: 이번 분기 영업이익 흑자면 만점, 분기 영업이익률 −3%·−8% 안이면 손익분기 근처</li><li><b>추이 10</b>: 분기 영업이익률이 2·3분기 이상 연속 개선</li>'
+           '<li><b>구조·현금 10</b>: 매출총이익이 플러스이고 늘었는지, 영업현금흐름 흑자</li><li><b>전망 5</b>: 증권사 컨센서스가 흑자를 예상 (시총 상위 종목만 자료가 있어요)</li></ul>'
+           '<ul class="muted" style="font-size:12px;padding-left:18px"><li>현금이 영업현금흐름 적자 속도로 9개월 안에 떨어지면 −10점, 매출이 줄면 −10점이에요. 증자·전환사채가 나오면 지분이 희석되고 최대주주 지분이 얇아질 수 있어요.</li>'
+           '<li>점수는 제가 정한 규칙이라 과거 수익률로 검증하지 않았어요. 일회성 이익(자산 매각 등)으로 분기 흑자가 난 경우는 구분하지 못해요.</li>'
+           '<li>재무제표 분석을 돌린 종목만 나와요 (아이디어 → 재무제표 분석). 투자 권유가 아니에요.</li></ul></details></div>')
+    if not rows:
+        return page("흑자전환 임박", intro + how + '<div class="card muted">대상 종목이 없어요. 아이디어 → 재무제표 분석에서 분석을 돌려 주세요 (영업적자 종목이 있어야 나와요).</div>')
+    try:
+        mn = float(q.get("min") or 40)
+    except ValueError:
+        mn = 40.0
+    kw = (q.get("kw") or "").strip()
+    qp = q.get("qp") == "1"
+    hide_h, halt_chip_ = halt_toggle(conn, q, {"t": "turnaround", "min": str(int(mn)), "kw": kw, "qp": "1" if qp else ""})
+    sel = [r for r in rows if r["score"] >= mn and (not qp or r["q_profit"]) and (not kw or kw in (r["name"] or "") or kw in r["code"]) and not (hide_h and r["code"] in halt_set(conn))]
+    base = {"t": "turnaround", "min": str(int(mn)), "kw": kw, "qp": "1" if qp else "", "hh": q.get("hh") or ""}
+    link = lambda **kw_: "/ideas?" + urlencode({k: v for k, v in {**base, **kw_}.items() if v != ""})
+    chips = " ".join((f'<b class="chip" style="background:var(--accent);color:var(--bg)">{v}점 이상</b>' if int(mn) == v else f'<a class="chip" href="{link(min=v)}">{v}점 이상</a>') for v in (30, 40, 50, 60, 70))
+    chips += (' <b class="chip" style="background:var(--accent);color:var(--bg)">✔ 이번 분기 흑자만 ✕</b>' if qp else f' <a class="chip" href="{link(qp="1")}">이번 분기 흑자만</a>')
+    form = ('<form method="get" action="/ideas" class="filters" style="margin:6px 0"><input type="hidden" name="t" value="turnaround">'
+            f'<input type="hidden" name="min" value="{int(mn)}"><input type="hidden" name="qp" value="{"1" if qp else ""}"><input type="hidden" name="hh" value="{escape(q.get("hh") or "")}">'
+            f'<input type="search" name="kw" value="{escape(kw)}" placeholder="종목 이름·코드"><button>찾기</button></form>')
+    body = ""
+    for r in sel[:60]:
+        pt = " · ".join(f"{k} {v}" for k, v in r["parts"].items())
+        tr_ = " → ".join(f'{lab} {v:.0%}' for lab, v in r["trend"]) if r["trend"] else ""
+        vh = val_html(conn, r["code"])
+        body += (f'<div style="border-top:1px solid var(--line);padding:8px 0"><div><a href="/ideas?{urlencode({"t": "fin", "code": r["code"]})}"><b>{escape(r["name"])}</b></a> '
+                 f'<span class="muted" style="font-size:12px">{escape(r["code"])}</span> {halt_badge(conn, r["code"])}<span class="chip {"up" if r["score"] >= 70 else ""}" style="font-weight:700">{r["score"]}</span>'
+                 + (' <span class="chip up" style="font-size:11px">이번 분기 흑자</span>' if r["q_profit"] else "")
+                 + (f' <span class="chip down" style="font-size:11px">{r["up"]}분기 연속 개선</span>' if r["up"] >= 2 else "")
+                 + (f' <span class="chip" style="font-size:11px">시총 {r["mcap"]:,.0f}억</span>' if r.get("mcap") else "")
+                 + f' {dispute_chip(conn, r["code"])}</div><div class="muted" style="font-size:11px">{escape(pt)}</div>'
+                 + (f'<div class="muted" style="font-size:12px">분기 영업이익률 {escape(tr_)}</div>' if tr_ else "")
+                 + f'<div style="font-size:12px">{vh}</div>'
+                 + (f'<div style="font-size:12px">✔ ' + " · ".join(escape(g) for g in r["good"][:6]) + '</div>' if r["good"] else "")
+                 + (f'<div style="font-size:12px;color:var(--down)">⚠ ' + " · ".join(escape(g) for g in r["risk"][:4]) + '</div>' if r["risk"] else "") + '</div>')
+    card = (f'<div class="card"><div>{chips}</div><div style="margin-top:4px">{halt_chip_}</div>{form}'
+            f'<div class="muted" style="font-size:12px">영업적자(또는 분기 적자) 종목 {len(rows):,}개 중 조건에 맞는 종목 {len(sel):,}개' + (" · 위 60개만" if len(sel) > 60 else "") + '</div>'
+            + (body or '<div class="muted" style="margin-top:6px">조건에 맞는 종목이 없어요. 점수 기준을 낮춰 보세요.</div>') + '</div>')
+    return page("흑자전환 임박", intro + card + how)
+
+
 def view_tenbagger(conn, q):
     """아이디어 → 텐배거 후보: 작고, 빠르게 크고, 이익이 돌아서고, 재무가 튼튼한 종목 (과거 텐배거의 흔한 특징으로 점수화)"""
     rows = tenbagger_list(conn)
@@ -6196,12 +6252,12 @@ IDEA_TABS = {"overall": "종합", "mine": "내 종목 점수", "cheap": "기관 
              "rank": "종목 순위", "score": "점수표 (오일전문가)", "perf": "운용사 성적표",
              "lynch": "피터 린치", "buffett": "워렌 버핏",
              "graham": "벤저민 그레이엄", "magic": "마법공식", "fscore": "F-스코어", "momentum": "모멘텀",
-             "legis": "입법 영향 기업", "legstudy": "입법 주가 분석", "fin": "재무제표 분석", "dispute": "지분분쟁", "float": "품절주", "tenbagger": "텐배거 후보", "picks": "투자처"}
-IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "legis", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf", "legstudy", "fin", "dispute", "float", "tenbagger", "picks"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
+             "legis": "입법 영향 기업", "legstudy": "입법 주가 분석", "fin": "재무제표 분석", "dispute": "지분분쟁", "float": "품절주", "tenbagger": "텐배거 후보", "turnaround": "흑자전환 임박", "picks": "투자처"}
+IDEA_GROUPS = [["overall", "mine", "cheap", "cluster", "super", "legis", "rank", "lynch", "buffett", "graham", "magic", "fscore", "momentum", "score", "perf", "legstudy", "fin", "dispute", "float", "tenbagger", "turnaround", "picks"]]     # 위쪽 메뉴의 '아이디어' 하나로 합침 (예전 '분석' 탭들 포함)
 
 
 IDEA_SECTIONS = [("점수", ["picks", "overall", "mine"]), ("투자 방법", ["lynch", "buffett", "graham", "magic", "fscore", "momentum"]),
-                 ("종목 찾기", ["cheap", "cluster", "super", "legis", "fin", "dispute", "float", "tenbagger", "rank"]), ("평가·성적", ["score", "perf", "legstudy"])]
+                 ("종목 찾기", ["cheap", "cluster", "super", "legis", "fin", "dispute", "float", "tenbagger", "turnaround", "rank"]), ("평가·성적", ["score", "perf", "legstudy"])]
 
 
 def idea_tab_html(active, link=None):
@@ -6636,6 +6692,12 @@ def view_ideas(conn, q):
         _CTX.pre = idea_tabs_row("picks")
         try:
             return view_picks(conn, q)
+        finally:
+            _CTX.pre = ""
+    if q.get("t") == "turnaround":
+        _CTX.pre = idea_tabs_row("turnaround")
+        try:
+            return view_turnaround(conn, q)
         finally:
             _CTX.pre = ""
     if q.get("t") == "tenbagger":
