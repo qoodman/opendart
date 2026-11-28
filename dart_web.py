@@ -1313,6 +1313,38 @@ def _fresh_card(conn):
             '<div class="muted" style="font-size:11px">5일 넘게 지났거나 없으면 시장 → 해외 증시에서 받기, 또는 지금 수집 → 시장·정책만을 돌려 주세요.</div></div>')
 
 
+LEV_CARD_HTML = '<div class="card"><details><summary><b>🎯 집중투자 플랜 — 목표·무효화·반대매매선 (레버리지를 쓰기 전에 미리 적어 두기)</b></summary>\n<div class="muted" style="font-size:12px;margin:4px 0">시작하기 전에 근거·목표·무효화·출구를 적고, 반대매매가 오는 가격과 손절선의 간격을 계산해요. <b>입력은 이 브라우저에만 저장하고 서버로 보내지 않아요.</b> 담보유지비율은 증권사마다 달라서 직접 바꿀 수 있어요.</div>\n<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px;font-size:12px">\n<label>종목 코드 (선택)<input id="lv_code" placeholder="000660" style="width:100%"></label>\n<label>자기 돈 (만원)<input id="lv_e" type="number" value="2000" style="width:100%"></label>\n<label>빌린 돈 (만원)<input id="lv_l" type="number" value="2000" style="width:100%"></label>\n<label>평균 매수가 (원)<input id="lv_a" type="number" value="100000" style="width:100%"></label>\n<label>현재가 (원) <a href="#" id="lv_fetch">불러오기</a><input id="lv_p" type="number" value="100000" style="width:100%"></label>\n<label>담보유지비율 (%)<input id="lv_m" type="number" value="140" style="width:100%"></label>\n<label>무효화(손절) 가격 (원)<input id="lv_s" type="number" value="85000" style="width:100%"></label>\n<label>목표 자기자본 (만원)<input id="lv_t" type="number" value="100000" style="width:100%"></label>\n<label>안전자산으로 옮길 비율 (%)<input id="lv_x" type="number" value="50" style="width:100%"></label>\n<label>하루 충격 (%)<input id="lv_d" type="number" value="-15" style="width:100%"></label>\n<label>연 변동성 (%)<input id="lv_v" type="number" value="60" style="width:100%"></label>\n<label>감당할 한 달 손실 (자기 돈 대비 %)<input id="lv_k" type="number" value="30" style="width:100%"></label>\n</div>\n<div id="lv_out" style="margin-top:8px;font-size:13px"></div>\n<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:6px;margin-top:8px;font-size:12px">\n<label>시나리오 (왜 오를 거라고 보나)<textarea id="lv_n1" rows="3" style="width:100%" placeholder="예: AI 수요 → HBM 가격·물량 증가"></textarea></label>\n<label>무효화 조건 (이게 틀어지면 판다)<textarea id="lv_n2" rows="3" style="width:100%" placeholder="예: 설비투자 감소 · 가격 하락 · 종가 85,000원 이탈"></textarea></label>\n<label>출구 계획 (목표 도달 시)<textarea id="lv_n3" rows="3" style="width:100%" placeholder="예: 목표 도달 시 전량 매도, 절반은 현금·부동산으로"></textarea></label>\n</div>\n<div class="muted" style="font-size:11px;margin-top:6px">계산은 원금 대비 단순 모델이에요 (이자·세금·수수료·호가 공백 제외). 하루 -15% 충격 같은 갭하락과 상·하한가, 거래정지는 반영되지 않아요. 레버리지는 원금 이상을 잃을 수 있고, 투자 권유가 아니에요.</div>\n<script>(function(){\nvar ids=["code","e","l","a","p","m","s","t","x","d","v","k","n1","n2","n3"],K="dart_lev_plan_v1";\nfunction $(i){return document.getElementById("lv_"+i)}\nfunction num(i){return parseFloat($(i).value)||0}\nfunction N(x,d){return isFinite(x)?x.toLocaleString(undefined,{maximumFractionDigits:d||0}):"-"}\nfunction P(x){return isFinite(x)?(x>=0?"+":"")+(x*100).toFixed(1)+"%":"-"}\nfunction save(){try{var o={};ids.forEach(function(i){o[i]=$(i).value});localStorage.setItem(K,JSON.stringify(o))}catch(e){}}\nfunction load(){try{var o=JSON.parse(localStorage.getItem(K)||"null");if(o)ids.forEach(function(i){if(o[i]!=null)$(i).value=o[i]})}catch(e){}}\nfunction calc(){\nvar E=num("e"),L=num("l"),A=num("a"),Pc=num("p"),m=num("m")/100,S=num("s"),T=num("t"),X=num("x")/100,D=num("d")/100,V=num("v")/100,Kk=num("k")/100;\nvar h="";\nif(!(E>0&&A>0&&Pc>0)){document.getElementById("lv_out").innerHTML="<span class=muted>자기 돈·평균 매수가·현재가를 넣어 주세요.</span>";save();return}\nvar S0=E+L,val=S0*Pc/A,eq=val-L,lev=eq>0?val/eq:Infinity,cover=L>0?val/L:Infinity;\nvar liq=L>0?A*m*L/S0:0,liqGap=L>0?liq/Pc-1:NaN;\nvar pt=A*(T+L)/S0,upNeed=pt/Pc-1,mult=T/E;\nvar stopEq=S0*S/A-L,stopLoss=stopEq/E-1,stopGap=(L>0&&liq>0)?S/liq-1:NaN;\nvar afterD=L>0?val*(1+D)/L:Infinity;\nvar sd=V/Math.sqrt(250),m2=2*V/Math.sqrt(12),adverse=lev*m2,maxLev=Kk/m2;\nvar rows=[\n["지금 자기자본", N(eq)+"만원 ("+P(eq/E-1)+")"],\n["투입 자산 / 자기 돈 (레버리지)", N(val)+"만원 / "+(isFinite(lev)?lev.toFixed(2)+"배":"-")],\n["담보비율 지금", isFinite(cover)?(cover*100).toFixed(0)+"% (반대매매선 "+(m*100).toFixed(0)+"%)":"빌린 돈 없음"],\n["<b>반대매매 가격</b>", L>0?"<b>"+N(liq)+"원</b> (지금보다 "+P(liqGap)+")":"-"],\n["하루 "+(D*100).toFixed(0)+"% 충격 후 담보비율", isFinite(afterD)?(afterD*100).toFixed(0)+"% "+(afterD<m?"<b class=down>→ 반대매매</b>":"(버텨요)"):"-"],\n["무효화(손절) 가격 → 자기돈 손실", N(S)+"원 → "+P(stopLoss)],\n["손절선과 반대매매선 간격", isFinite(stopGap)?P(stopGap)+(stopGap<0.05?" <b class=down>— 손절 전에 강제 청산이 올 수 있어요</b>":" (손절이 먼저 와요)"):"-"],\n["목표 도달 가격 / 필요 상승", N(pt)+"원 / "+P(upNeed)+" (자기 돈 "+mult.toFixed(0)+"배)"],\n["목표 도달 시 안전자산 전환", N(T*X)+"만원 옮기고 "+N(T*(1-X))+"만원 남김"],\n["일 1σ 자기자본 변동", isFinite(sd)&&isFinite(lev)?"±"+(lev*sd*100).toFixed(1)+"%":"-"],\n["한 달 −2σ 시 자기자본 손실", isFinite(adverse)?"-"+(adverse*100).toFixed(0)+"% (감당 "+(Kk*100).toFixed(0)+"%)":"-"],\n["변동성 기준 적정 레버리지", "최대 "+maxLev.toFixed(2)+"배 "+(isFinite(lev)&&lev>maxLev?"<b class=down>— 지금("+lev.toFixed(2)+"배)이 더 커요</b>":"(안쪽)")]\n];\nh="<table>"+rows.map(function(r){return "<tr><td>"+r[0]+"</td><td>"+r[1]+"</td></tr>"}).join("")+"</table>";\ndocument.getElementById("lv_out").innerHTML=h;save()}\nfunction wire(){ids.forEach(function(i){$(i).addEventListener("input",calc)});\ndocument.getElementById("lv_fetch").addEventListener("click",function(ev){ev.preventDefault();var c=$("code").value.trim();if(!/^\\d{6}$/.test(c)){alert("종목 코드 6자리를 넣어 주세요");return}\nfetch("/api/px?code="+c).then(function(r){return r.json()}).then(function(j){if(j.close){$("p").value=j.close;if(!num("a"))$("a").value=j.close;calc()}else{alert(j.msg||"현재가를 못 가져왔어요")}}).catch(function(){alert("현재가를 못 가져왔어요")})})}\nload();wire();calc()})();</script>\n</details></div>\n'
+
+
+def _lev_card():
+    """동반 하락 탭: 집중투자 플랜 — 목표·무효화·반대매매선 계산 (브라우저에만 저장)"""
+    return LEV_CARD_HTML
+
+
+def px_lookup(conn, code):
+    """종목 현재가 (앱에 받아 둔 일별 시세 → 없으면 네이버에서 바로) → dict"""
+    code = (code or "").strip()
+    if not re.fullmatch(r"\d{6}", code):
+        return dict(ok=False, msg="종목 코드 6자리를 넣어 주세요")
+    try:
+        ser = price_map(conn, code)
+        if ser:
+            last = sorted(ser.items())[-1] if isinstance(ser, dict) else ser[-1]
+            return dict(ok=True, close=last[1], date=str(last[0]), source="앱 저장 시세")
+    except Exception:
+        pass
+    try:
+        import requests as rq
+        today = dt.date.today()
+        r = rq.get(f"https://api.stock.naver.com/chart/domestic/item/{code}/day", params=dict(startDateTime=(today - dt.timedelta(days=12)).strftime("%Y%m%d"), endDateTime=(today + dt.timedelta(days=1)).strftime("%Y%m%d")),
+                   headers={"User-Agent": "Mozilla/5.0"}, timeout=8).json()
+        if r:
+            return dict(ok=True, close=float(r[-1]["closePrice"]), date=str(r[-1]["localDate"]), source="네이버 증권")
+    except Exception:
+        pass
+    return dict(ok=False, msg="현재가를 못 가져왔어요 (직접 넣어 주세요)")
+
+
 def _plan_card(conn):
     """동반 하락 탭: 낙폭 단계별 분할 매수 계획표 (미리 적어 두기). 입력은 이 브라우저에만 저장"""
     import vol_limit as vl
@@ -1471,7 +1503,7 @@ def view_crash(conn, q):
              '<li><b>분할 규칙은 미리 적어 두기</b>: 낙폭 구간마다 어느 만큼 살지 정해 두면 공포 속에서 판단하지 않아도 돼요.</li>'
              '<li><b>하나가 아니라 유형이 다른 자산</b>: 위 2번 표처럼 유형이 바뀌면 방어가 되는 자산도 바뀌어요.</li></ul>'
              '<div class="muted" style="font-size:12px;margin-top:6px">관련 화면: <a href="/cycle">투자 사이클</a> · <a href="/diag">하락 점검</a> · <a href="/ideas?t=picks">투자처(해외·다자산)</a> · <a href="/world">해외 증시 ETF</a></div></div>')
-    return page("동반 하락 대응", intro + _fresh_card(conn) + _vol_card(conn) + _foreign_card(conn, q) + _conc_card(conn) + _nps_card(conn) + diag + past + _stress_card(conn) + split + _plan_card(conn) + alloc + check)
+    return page("동반 하락 대응", intro + _fresh_card(conn) + _vol_card(conn) + _foreign_card(conn, q) + _conc_card(conn) + _nps_card(conn) + diag + past + _stress_card(conn) + _lev_card() + split + _plan_card(conn) + alloc + check)
 
 
 def view_derivs(conn, q):
@@ -8639,6 +8671,8 @@ def make_handler(db_path, status_path, run_cmd, child_env=None, get_key=None, sa
                     body = view_crash(conn, q)
                 elif url.path == "/jobs":
                     body = view_jobs(S, q)
+                elif url.path == "/api/px":
+                    return self._send(200, "application/json; charset=utf-8", json.dumps(px_lookup(conn, q.get("code", "")), ensure_ascii=False).encode())
                 elif url.path == "/dispute":          # 지분분쟁은 아이디어 탭으로 옮겼어요 (예전 주소 호환)
                     return self._redirect("/ideas?" + urlencode({"t": "dispute", **{k: v for k, v in q.items() if not k.startswith("_")}}))
                 elif url.path == "/ideas":
